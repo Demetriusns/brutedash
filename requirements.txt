@@ -1,0 +1,3 @@
+Flask>=3.0
+# optional — enables LLM-powered triage in app.py (rule-based fallback otherwise)
+# openai>=1.0
