@@ -17,6 +17,7 @@ from datetime import datetime
 from flask import Flask, request, render_template_string
 
 from detector import detect_brute_force
+from ipintel import lookup_ip, describe as describe_intel
 
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -67,7 +68,9 @@ Return ONLY a JSON object with exactly these keys:
   "observed_pattern": "1-2 sentences grounded ONLY in the evidence",
   "recommended_actions": ["action 1", "action 2", "action 3"]
 }
-Do not invent facts not present in the evidence. No markdown, no extra text."""
+Do not invent facts not present in the evidence. IP intel is context only --
+use it to characterize the source (e.g. "hosting-provider IP"), never as
+proof of malice. No markdown, no extra text."""
 
 VALID_SEVERITIES = {"Low", "Medium", "High", "Critical"}
 
@@ -107,8 +110,13 @@ def rule_based_brief(ip, count, severity):
 
 def write_brief(ip, count, severity):
     """Return (brief_dict, source). LLM when a key is available, else rules."""
+    # Tool use: enrich the IP before reasoning. Best-effort -- an empty
+    # dict means "no intel", and the brief is written without it.
+    intel = lookup_ip(ip)
     evidence = (f"{ip} made {count} failed SSH login attempts "
                 f"(rule-based severity: {severity}).")
+    if intel:
+        evidence += f" IP intel: {describe_intel(intel)}."
     api_key = os.environ.get("OPENAI_API_KEY")
     if api_key:
         try:
@@ -127,7 +135,10 @@ def write_brief(ip, count, severity):
             # Invalid shape -> fall through to the rule-based brief below.
         except Exception:
             pass
-    return rule_based_brief(ip, count, severity), "rule-based"
+    brief = rule_based_brief(ip, count, severity)
+    if intel:
+        brief["observed_pattern"] += f" IP intel: {describe_intel(intel)}."
+    return brief, "rule-based"
 
 
 # ---------------------------------------------------------------------- pages
