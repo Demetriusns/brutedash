@@ -9,6 +9,7 @@ Pipeline: parse -> detect -> persist -> brief
 Run:  python app.py   (then open http://127.0.0.1:5000)
 """
 import os
+import json
 import sqlite3
 import tempfile
 from datetime import datetime
@@ -55,23 +56,57 @@ def save_detections(findings):
 
 
 # ---------------------------------------------------------------------- briefs
+# Every brief -- LLM-written or rule-based -- is a dict matching this shape.
+# Structured data in, validated data out: the UI renders from the dict, so a
+# malformed LLM response can never corrupt the page.
 BRIEF_PROMPT = """You are a SOC analyst writing a technical brief.
 Evidence: {evidence}
-Write a technical brief with exactly these sections:
-- Severity: Low/Medium/High/Critical
-- Observed pattern:
-- Recommended actions:
-Do not invent facts not present in the evidence."""
+Return ONLY a JSON object with exactly these keys:
+{
+  "severity": "one of: Low, Medium, High, Critical",
+  "observed_pattern": "1-2 sentences grounded ONLY in the evidence",
+  "recommended_actions": ["action 1", "action 2", "action 3"]
+}
+Do not invent facts not present in the evidence. No markdown, no extra text."""
 
-FALLBACK_ACTIONS = (
-    "- Block the IP at the firewall (or fail2ban).\n"
-    "- Check logs for any *successful* logins from this IP.\n"
-    "- Review and rotate credentials on targeted accounts."
-)
+VALID_SEVERITIES = {"Low", "Medium", "High", "Critical"}
+
+
+def _validate_brief(data):
+    """Return the brief dict if it matches the schema, else None."""
+    if not isinstance(data, dict):
+        return None
+    severity = data.get("severity")
+    pattern = data.get("observed_pattern")
+    actions = data.get("recommended_actions")
+    if severity not in VALID_SEVERITIES:
+        return None
+    if not isinstance(pattern, str) or not pattern.strip():
+        return None
+    if (not isinstance(actions, list) or not actions
+            or not all(isinstance(a, str) and a.strip() for a in actions)):
+        return None
+    return {"severity": severity,
+            "observed_pattern": pattern.strip(),
+            "recommended_actions": [a.strip() for a in actions]}
+
+
+def rule_based_brief(ip, count, severity):
+    """Fallback brief in the same structured shape as the LLM output."""
+    return {
+        "severity": severity,
+        "observed_pattern": (f"{ip} made {count} failed SSH login attempts. "
+                             "Consistent with a brute-force attack."),
+        "recommended_actions": [
+            "Block the IP at the firewall (or fail2ban).",
+            "Check logs for any successful logins from this IP.",
+            "Review and rotate credentials on targeted accounts.",
+        ],
+    }
 
 
 def write_brief(ip, count, severity):
-    """Return (brief_text, source). LLM when a key is available, else rules."""
+    """Return (brief_dict, source). LLM when a key is available, else rules."""
     evidence = (f"{ip} made {count} failed SSH login attempts "
                 f"(rule-based severity: {severity}).")
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -83,15 +118,16 @@ def write_brief(ip, count, severity):
                 model="gpt-4o-mini",
                 messages=[{"role": "user",
                            "content": BRIEF_PROMPT.format(evidence=evidence)}],
+                response_format={"type": "json_object"},
                 max_tokens=300,
             )
-            return resp.choices[0].message.content.strip(), "llm"
+            brief = _validate_brief(json.loads(resp.choices[0].message.content))
+            if brief:
+                return brief, "llm"
+            # Invalid shape -> fall through to the rule-based brief below.
         except Exception:
-            pass  # fall through to the rule-based brief below
-    brief = (f"Severity: {severity}\n"
-             f"Observed pattern: {evidence} Consistent with a brute-force attack.\n"
-             f"Recommended actions:\n{FALLBACK_ACTIONS}")
-    return brief, "rule-based"
+            pass
+    return rule_based_brief(ip, count, severity), "rule-based"
 
 
 # ---------------------------------------------------------------------- pages
@@ -148,7 +184,11 @@ HISTORY_HTML = """<html><head><title>brutedash history</title><style>""" + STYLE
 BRIEF_HTML = """<html><head><title>brutedash brief</title><style>""" + STYLE + """</style></head><body>
 <h1>Technical brief: {{ ip }}</h1>
 <p style="color:#8b949e">origin: {{ origin }}</p>
-<pre>{{ brief }}</pre>
+<pre>Severity: {{ brief.severity }}
+Observed pattern: {{ brief.observed_pattern }}
+Recommended actions:
+{% for a in brief.recommended_actions %}- {{ a }}
+{% endfor %}</pre>
 <p><a href="/">New scan</a> | <a href="/history">History</a></p>
 </body></html>"""
 
