@@ -1,3 +1,5 @@
 Flask>=3.0
-# optional — enables LLM-powered triage in app.py (rule-based fallback otherwise)
+scapy>=2.5
+# optional — enables LLM-powered triage in app.py and AI summaries in netmon/
+# (rule-based fallbacks otherwise)
 # openai>=1.0

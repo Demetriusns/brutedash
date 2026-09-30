@@ -1,8 +1,72 @@
 # brutedash
 
-A mini SOC analyst: parses SSH auth logs and writes technical briefs.
+A mini SOC analyst: parses SSH auth logs and writes technical briefs — now
+with **netmon**, a Phase 1 home-network traffic monitor with a live
+dashboard and plain-English AI explanations.
 
-Paste a raw log and brutedash parses it into structured findings, persists them to SQLite, enriches each attacker IP with threat intel, and writes an analyst-ready technical brief per attacker — via an LLM when `OPENAI_API_KEY` is set, or a rule-based fallback otherwise.
+## netmon — live network monitor (Phase 1)
+
+Watches **this machine's** network interface, rolls packets into flow
+metadata (who talked to who, on what port, how many bytes — **never packet
+contents**), and answers three questions on a live dashboard:
+
+- **What's happening?** — throughput, top talkers, protocol mix, updating every 5 seconds
+- **What stands out?** — detection rules: port scans, unusual outbound ports, traffic spikes
+- **Did my connection drop?** — a watchdog pings the gateway + internet hosts and logs every outage with timestamps
+
+An **AI explainer** turns the aggregated stats into plain English every 15
+minutes (or on demand with the "Explain now" button): a headline, what's
+happening, what stands out, and suggested actions. LLM when
+`OPENAI_API_KEY` is set, rule-based roll-up otherwise — output is
+JSON-schema validated before display, same discipline as the brief writer.
+
+It also **analyzes pcap files** (e.g. exported from Wireshark): upload one
+on the `/pcap` page and it runs the same pipeline — flows, detection,
+AI explanation.
+
+### Run it
+
+```bash
+pip install -r requirements.txt
+
+# Full monitor (live capture needs root for raw sockets):
+sudo python -m netmon.run
+# open http://127.0.0.1:5001
+
+# Analyze a pcap and exit:
+python -m netmon.run --pcap capture.pcap
+
+# Dashboard only (no capture):
+python -m netmon.run --dashboard-only
+```
+
+Optional, for AI-written summaries:
+
+```bash
+export OPENAI_API_KEY=...
+```
+
+### netmon structure
+
+| File | What it does |
+|---|---|
+| `netmon/run.py` | Entry point: wires up watchdog + capture + monitor threads + dashboard |
+| `netmon/capture.py` | Packets → flow metadata (live sniff or pcap); inline SYN port-scan tracker |
+| `netmon/detect.py` | Periodic rules: traffic spikes, unusual outbound ports (with alert cooldowns) |
+| `netmon/watchdog.py` | Ping-based drop detection; logs outages with start/end/duration |
+| `netmon/explainer.py` | Evidence builder + plain-English summaries (LLM or rule-based, validated) |
+| `netmon/dashboard.py` | Flask live dashboard: `/`, `/api/stats`, `/explain`, `/pcap` |
+| `netmon/db.py` | SQLite storage: flows, alerts, outages, summaries (WAL mode) |
+
+### Honest scope note
+
+On a switched home network, one machine only sees **its own** traffic.
+Whole-home visibility (every device) is Phase 3: a Raspberry Pi sensor by
+the router. Phase 1 monitors the machine it runs on.
+
+---
+
+## brutedash — SSH log triage (original module)
 
 ## Pipeline
 
