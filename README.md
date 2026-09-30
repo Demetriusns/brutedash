@@ -1,28 +1,35 @@
 # brutedash
 
 A mini SOC analyst: parses SSH auth logs and writes technical briefs — now
-with **netmon**, a Phase 1 home-network traffic monitor with a live
-dashboard and plain-English AI explanations.
+with **netmon**, a Phase 2 home-network traffic monitor with a live
+dashboard and plain-English explanations anyone can read.
 
-## netmon — live network monitor (Phase 1)
+## netmon — live network monitor (Phase 2)
 
 Watches **this machine's** network interface, rolls packets into flow
 metadata (who talked to who, on what port, how many bytes — **never packet
 contents**), and answers three questions on a live dashboard:
 
-- **What's happening?** — throughput, top talkers, protocol mix, updating every 5 seconds
-- **What stands out?** — detection rules: port scans, unusual outbound ports, traffic spikes
-- **Did my connection drop?** — a watchdog pings the gateway + internet hosts and logs every outage with timestamps
+- **What needs your eyes?** — alerts written for non-technical readers: every
+  alert explains what it means, whether it's normal, and what to do
+- **What's happening?** — a plain-English summary every 15 minutes (or on
+  demand with the "Explain now" button): headline, what's happening, what
+  stands out, suggested actions
+- **What's normal?** — a live "right now" readout plus a port guide, so you
+  learn what everyday traffic looks like
 
-An **AI explainer** turns the aggregated stats into plain English every 15
-minutes (or on demand with the "Explain now" button): a headline, what's
-happening, what stands out, and suggested actions. LLM when
-`OPENAI_API_KEY` is set, rule-based roll-up otherwise — output is
-JSON-schema validated before display, same discipline as the brief writer.
+Detection rules: port scans, unusual outbound ports, traffic spikes, and
+**beaconing** (steady clockwork check-ins with one outside address — how
+malware "phones home"). A watchdog pings the gateway + internet hosts and
+logs every outage with timestamps.
+
+The explainer uses an LLM when `OPENAI_API_KEY` is set, otherwise a
+narrative rule-based summary — output is JSON-schema validated before
+display, same discipline as the brief writer.
 
 It also **analyzes pcap files** (e.g. exported from Wireshark): upload one
 on the `/pcap` page and it runs the same pipeline — flows, detection,
-AI explanation.
+plain-English explanation.
 
 ### Run it
 
@@ -43,8 +50,14 @@ python -m netmon.run --dashboard-only
 Optional, for AI-written summaries:
 
 ```bash
-export OPENAI_API_KEY=...
+export OPENAI_API_KEY=<your key here>
 ```
+
+If port 5001 is taken on your machine: `python -m netmon.run --port 8080`.
+
+Windows notes: install [Npcap](https://npcap.com/) for live capture, run
+PowerShell **as administrator**, and use the `py` launcher
+(`py -m pip install -r requirements.txt`, `py -m netmon.run --port 8080`).
 
 ### netmon structure
 
@@ -52,11 +65,11 @@ export OPENAI_API_KEY=...
 |---|---|
 | `netmon/run.py` | Entry point: wires up watchdog + capture + monitor threads + dashboard |
 | `netmon/capture.py` | Packets → flow metadata (live sniff or pcap); inline SYN port-scan tracker |
-| `netmon/detect.py` | Periodic rules: traffic spikes, unusual outbound ports (with alert cooldowns) |
-| `netmon/watchdog.py` | Ping-based drop detection; logs outages with start/end/duration |
-| `netmon/explainer.py` | Evidence builder + plain-English summaries (LLM or rule-based, validated) |
-| `netmon/dashboard.py` | Flask live dashboard: `/`, `/api/stats`, `/explain`, `/pcap` |
-| `netmon/db.py` | SQLite storage: flows, alerts, outages, summaries (WAL mode) |
+| `netmon/detect.py` | Periodic rules: spikes, unusual ports, beaconing (with alert cooldowns); every alert carries plain-English meaning / is-this-normal / what-to-do |
+| `netmon/watchdog.py` | Ping-based drop detection (Windows + Linux ping flags); logs outages with start/end/duration |
+| `netmon/explainer.py` | Evidence builder + plain-English summaries (LLM or narrative rule-based, validated); shared port guide |
+| `netmon/dashboard.py` | Flask live dashboard: `/`, `/api/stats`, `/explain`, `/pcap` — written for non-technical readers |
+| `netmon/db.py` | SQLite storage: flows, alerts, outages, summaries (WAL mode); auto-migrates older DBs |
 
 ### Honest scope note
 
