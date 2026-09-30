@@ -135,18 +135,97 @@ def build_evidence(window_min=WINDOW_MIN, now=None):
     return "\n".join(lines)
 
 
-def rule_based_summary(evidence, window_min=WINDOW_MIN):
-    """Fallback when no LLM key is available: template over the evidence."""
+# Plain-English guide to the ports a home machine actually uses.
+# Shared with the dashboard's "Port guide" section.
+PORT_GUIDE = {
+    80: "web browsing (unencrypted)",
+    443: "encrypted web browsing and apps -- this is most of your traffic",
+    53: "address lookups (your computer asking 'where is this website?')",
+    123: "clock syncing (keeping your computer's time correct)",
+    22: "secure remote login",
+    25: "sending email",
+    465: "sending email (encrypted)",
+    587: "sending email (encrypted)",
+    993: "reading email (encrypted)",
+    995: "reading email",
+    67: "getting a network address when joining Wi-Fi",
+    68: "getting a network address when joining Wi-Fi",
+    1900: "finding smart devices on your own network",
+    5353: "finding smart devices on your own network",
+    3389: "remote desktop (someone controlling this screen remotely)",
+    445: "Windows file sharing (should stay inside your home network)",
+    3478: "video/voice calls setting up",
+    5222: "chat app notifications",
+}
+
+
+def _port_words(port):
+    return PORT_GUIDE.get(port, "an uncommon channel -- see the Port guide")
+
+
+def rule_based_summary(evidence, window_min=WINDOW_MIN, now=None):
+    """Narrative summary a non-technical reader can follow. No LLM needed."""
+    now = now or time.time()
+    since = now - window_min * 60
+    tot = dbm.query(
+        "SELECT COALESCE(SUM(bytes),0), COALESCE(SUM(packets),0)"
+        " FROM flows WHERE ts > ?", (since,))[0]
+    total_mb = (tot[0] or 0) / 1e6
+    total_packets = tot[1] or 0
+
+    ports = dbm.query(
+        "SELECT dst_port, SUM(bytes) FROM flows WHERE ts > ?"
+        " AND direction='outbound' GROUP BY dst_port"
+        " ORDER BY SUM(bytes) DESC LIMIT 3", (since,))
+    ext = dbm.query(
+        "SELECT COUNT(DISTINCT dst_ip) FROM flows WHERE ts > ?"
+        " AND direction='outbound'", (since,))[0][0] or 0
+
+    alerts = dbm.query(
+        "SELECT severity, title, meaning, what_to_do FROM alerts"
+        " WHERE ts > ? ORDER BY ts DESC", (since,))
+
+    if ports:
+        uses = "; ".join(
+            f"{b/1e6:.1f} MB on port {p} ({_port_words(p)})"
+            for p, b in ports)
+        happening = (
+            f"In the last {window_min} minutes this computer moved"
+            f" {total_mb:.1f} MB across {total_packets} packets, talking to"
+            f" {ext} different outside addresses. The breakdown: {uses}.")
+    elif total_packets:
+        happening = (
+            f"In the last {window_min} minutes this computer moved"
+            f" {total_mb:.1f} MB across {total_packets} packets.")
+    else:
+        happening = (f"In the last {window_min} minutes this computer sent"
+                     " almost no traffic -- it was quiet.")
+
+    if alerts:
+        n = len(alerts)
+        headline = (f"{n} thing{'s' if n > 1 else ''} worth a look"
+                    f" in the last {window_min} minutes")
+        stands_out = [
+            f"{title}: {meaning}" if meaning else title
+            for _, title, meaning, _ in alerts]
+        actions = [a for _, _, _, a in alerts if a]
+        # de-dupe while keeping order
+        seen, suggested = set(), []
+        for a in actions:
+            if a not in seen:
+                seen.add(a)
+                suggested.append(a)
+    else:
+        headline = f"All quiet in the last {window_min} minutes"
+        stands_out = ["Nothing unusual -- this looks like normal,"
+                      " everyday traffic."]
+        suggested = []
+
     return {
-        "headline": "Network summary (rule-based -- no AI key configured)",
-        "whats_happening": (
-            "This is an automated roll-up of the traffic metadata collected"
-            " in the window. Set OPENAI_API_KEY for a plain-English AI"
-            " explanation. Raw evidence is listed below so nothing is"
-            " hidden."),
-        "stands_out": [line.strip() for line in evidence.splitlines()
-                       if line.strip()][:12],
-        "suggested_actions": [],
+        "headline": headline,
+        "whats_happening": happening,
+        "stands_out": stands_out,
+        "suggested_actions": suggested,
     }
 
 

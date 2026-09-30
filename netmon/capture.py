@@ -72,10 +72,24 @@ class ScanTracker:
                                              SCAN_COOLDOWN):
                     dbm.add_alert(
                         "port_scan", "High",
-                        f"Port scan from {src_ip}",
-                        f"{src_ip} probed {len(distinct_ports)} distinct"
-                        f" ports within {SCAN_WINDOW}s -- consistent with"
-                        " an automated port scan.",
+                        f"Possible port scan from {src_ip}",
+                        f"{src_ip} tried {len(distinct_ports)} different"
+                        f" ports within {SCAN_WINDOW} seconds.",
+                        meaning=("Another computer rapidly knocked on many"
+                                 " different 'doors' (ports) of this machine"
+                                 " -- like someone walking down a hallway"
+                                 " trying every doorknob. That's how"
+                                 " attackers look for a way in."),
+                        is_normal=("On a home network this is rarely normal."
+                                   " It can occasionally be your router or a"
+                                   " security tool doing a health check, but"
+                                   " treat it as suspicious until you know"
+                                   " which device it was."),
+                        what_to_do=("Find the device behind that address"
+                                    " (your router's device list shows"
+                                    " what's connected). If you don't"
+                                    " recognize it, block it there and"
+                                    " change your Wi-Fi password."),
                         ts=ts,
                     )
                 self.history[src_ip] = []  # reset after alerting

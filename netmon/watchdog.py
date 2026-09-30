@@ -7,6 +7,7 @@ target answers again.
 
 This answers "did my internet drop?" with timestamps instead of vibes.
 """
+import platform
 import re
 import subprocess
 import threading
@@ -17,16 +18,25 @@ from . import db as dbm
 PING_INTERVAL = 5
 CONSECUTIVE_FAILS = 2  # missed pings before we call it an outage
 
+_IS_WINDOWS = platform.system() == "Windows"
+
 
 def find_gateway():
     """Best-effort default gateway IP from the routing table."""
     try:
-        out = subprocess.run(["ip", "route", "show", "default"],
-                             capture_output=True, text=True,
-                             timeout=5).stdout
-        m = re.search(r"default via (\S+)", out)
-        if m:
-            return m.group(1)
+        if _IS_WINDOWS:
+            out = subprocess.run(["ipconfig"], capture_output=True,
+                                 text=True, timeout=5).stdout
+            m = re.search(r"Default Gateway[ .]*:\s*([\d.]+)", out)
+            if m:
+                return m.group(1)
+        else:
+            out = subprocess.run(["ip", "route", "show", "default"],
+                                 capture_output=True, text=True,
+                                 timeout=5).stdout
+            m = re.search(r"default via (\S+)", out)
+            if m:
+                return m.group(1)
     except Exception:
         pass
     return "192.168.1.1"  # common home-router default
@@ -35,9 +45,11 @@ def find_gateway():
 def ping_once(host):
     """True if the host answers one ping within the timeout."""
     try:
-        result = subprocess.run(
-            ["ping", "-c1", "-W2", host],
-            capture_output=True, timeout=5)
+        if _IS_WINDOWS:
+            cmd = ["ping", "-n", "1", "-w", "2000", host]
+        else:
+            cmd = ["ping", "-c1", "-W2", host]
+        result = subprocess.run(cmd, capture_output=True, timeout=5)
         return result.returncode == 0
     except Exception:
         return False

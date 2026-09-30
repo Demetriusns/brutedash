@@ -37,7 +37,10 @@ CREATE TABLE IF NOT EXISTS alerts(
     kind TEXT,               -- port_scan | unusual_port | traffic_spike | ...
     severity TEXT,           -- Low | Medium | High | Critical
     title TEXT,
-    detail TEXT
+    detail TEXT,
+    meaning TEXT,            -- plain-English: what this means
+    is_normal TEXT,          -- plain-English: when this is fine vs not
+    what_to_do TEXT          -- plain-English: one concrete next step
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts);
 
@@ -66,6 +69,12 @@ def _connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.executescript(_SCHEMA)
+    # Migrate older databases that lack the plain-English alert columns.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
+    for col in ("meaning", "is_normal", "what_to_do"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT")
+    conn.commit()
     return conn
 
 
@@ -95,15 +104,23 @@ def insert_flows(rows):
         conn.commit()
 
 
-def add_alert(kind, severity, title, detail, ts=None):
+def add_alert(kind, severity, title, detail, meaning="", is_normal="",
+              what_to_do="", ts=None):
+    """Store a detection finding.
+
+    meaning / is_normal / what_to_do are plain-English fields written for
+    non-technical readers: what this means, when it's fine vs not, and one
+    concrete next step.
+    """
     import time
     with _lock:
         conn = _db()
         conn.execute(
-            "INSERT INTO alerts (ts, kind, severity, title, detail)"
-            " VALUES (?,?,?,?,?)",
+            "INSERT INTO alerts (ts, kind, severity, title, detail,"
+            " meaning, is_normal, what_to_do)"
+            " VALUES (?,?,?,?,?,?,?,?)",
             (ts if ts is not None else time.time(), kind, severity,
-             title, detail),
+             title, detail, meaning, is_normal, what_to_do),
         )
         conn.commit()
 
