@@ -18,7 +18,6 @@ import argparse
 import threading
 import time
 
-from . import dashboard as dash
 from . import detect as detm
 from . import explainer as expl
 from .watchdog import Watchdog
@@ -49,8 +48,22 @@ def main():
     ap.add_argument("--pcap", default=None, help="analyze a pcap and exit")
     ap.add_argument("--dashboard-only", action="store_true",
                     help="serve the dashboard without capturing")
+    ap.add_argument("--weekly-report", action="store_true",
+                    help="print the weekly report and exit (no capture)")
     ap.add_argument("--port", type=int, default=5001)
     args = ap.parse_args()
+
+    if args.weekly_report:
+        from . import weekly as weekm
+        report = weekm.generate_weekly_report()
+        text = weekm.maybe_polish(weekm.format_plaintext(report))
+        print(text)
+        sent = weekm.email_report(text)
+        print("\nEmail: " + ("sent" if sent
+                             else "skipped (email not configured)"))
+        return
+
+    from . import dashboard as dash  # lazy: weekly-report exits above
 
     if args.pcap:
         from . import capture as capm

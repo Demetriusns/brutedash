@@ -256,7 +256,7 @@ def summarize(window_min=WINDOW_MIN, save=True, now=None):
             except Exception:
                 pass
         if summary is None:
-            summary = rule_based_summary(evidence, window_min)
+            summary = rule_based_summary(evidence, window_min, now=now)
         if save:
             dbm.save_summary(window_min, summary["headline"],
                              summary["whats_happening"],

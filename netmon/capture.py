@@ -20,7 +20,7 @@ import time
 from . import db as dbm
 
 try:
-    from scapy.all import sniff, rdpcap, IP, IPv6, TCP, UDP
+    from scapy.all import sniff, rdpcap, IP, IPv6, TCP, UDP, DNS, Ether
     HAVE_SCAPY = True
 except ImportError:  # dashboard-only mode can run without scapy
     HAVE_SCAPY = False
@@ -96,11 +96,18 @@ class ScanTracker:
 
 
 class FlowAggregator:
-    """Accumulates per-packet metadata, flushes flow buckets to SQLite."""
+    """Accumulates per-packet metadata, flushes flow buckets to SQLite.
+
+    Also buffers observed DNS queries (UDP/53 with a DNS question) and
+    IP/MAC observations (from the Ethernet header), which are written to
+    the dns_queries and arp_observations tables on flush()."""
 
     def __init__(self):
         self.local_ips = get_local_ips()
         self.flows = {}  # (src, dst, sport, dport, proto) -> [pkts, bytes, first, last]
+        self.dns_buf = []   # [(ts, name, qtype)]
+        self.arp_buf = []   # [(ts, ip, mac)]
+        self._mac_seen = set()  # (ip, mac) already buffered this run
         self.lock = threading.Lock()
         self.scans = ScanTracker()
         self.packets_seen = 0
@@ -114,6 +121,32 @@ class FlowAggregator:
             return "inbound"
         return "local"
 
+    def _dns_query_row(self, pkt, ts):
+        """Return a (ts, name, qtype) row for a DNS question, or None.
+
+        Only called for UDP packets headed to port 53, so ordinary
+        traffic never pays for DNS parsing.
+        """
+        try:
+            dns = pkt.getlayer(DNS)
+            if dns is None or getattr(dns, "qr", 1) != 0:
+                return None  # not a query (response or no DNS layer)
+            qd = getattr(dns, "qd", None)
+            if qd is None:
+                return None
+            name = qd.qname
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", "replace")
+            name = str(name).rstrip(".")
+            qtype = qd.qtype
+            try:
+                qtype = int(qtype)
+            except (TypeError, ValueError):
+                qtype = str(qtype)
+            return (ts, name, qtype)
+        except Exception:
+            return None
+
     def handle(self, pkt):
         """Process one scapy packet. Never touches payload bytes."""
         ip = pkt.getlayer(IP) or pkt.getlayer(IPv6)
@@ -122,6 +155,7 @@ class FlowAggregator:
         src, dst = ip.src, ip.dst
         ts = float(getattr(pkt, "time", time.time()))
         proto, sport, dport, is_syn = "other", 0, 0, False
+        dns_row = None
         if pkt.haslayer(TCP):
             t = pkt[TCP]
             proto, sport, dport = "TCP", t.sport, t.dport
@@ -129,10 +163,15 @@ class FlowAggregator:
         elif pkt.haslayer(UDP):
             u = pkt[UDP]
             proto, sport, dport = "UDP", u.sport, u.dport
+            if u.dport == 53 and pkt.haslayer(DNS):
+                dns_row = self._dns_query_row(pkt, ts)
         try:
             size = len(pkt)
         except Exception:
             size = 0
+
+        eth = pkt.getlayer(Ether)
+        mac = eth.src if eth is not None else None
 
         self.packets_seen += 1
         if ts > self.max_ts:
@@ -148,16 +187,39 @@ class FlowAggregator:
                 f[0] += 1
                 f[1] += size
                 f[3] = ts
+            if dns_row is not None:
+                self.dns_buf.append(dns_row)
+            if mac is not None:
+                pair = (src, mac)
+                if pair not in self._mac_seen:
+                    self._mac_seen.add(pair)
+                    if len(self._mac_seen) > 5000:
+                        # Bound memory on busy networks; already-buffered
+                        # pairs will simply be recorded again.
+                        self._mac_seen = {pair}
+                    self.arp_buf.append((ts, src, mac))
 
     def flush(self):
         """Write accumulated buckets to SQLite, reset counters.
 
         The bucket timestamp is the flow's last-seen packet time, not
         wall-clock time -- so pcap analysis keeps the capture's real
-        timeline instead of flattening everything into "now"."""
+        timeline instead of flattening everything into "now".
+
+        DNS-query and IP/MAC observation buffers flush even when no flow
+        rows exist; the last_flow_ts heartbeat is only written when at
+        least one flow row was stored."""
         with self.lock:
             items = list(self.flows.items())
             self.flows = {}
+            dns_rows = self.dns_buf
+            self.dns_buf = []
+            arp_rows = self.arp_buf
+            self.arp_buf = []
+        if dns_rows:
+            dbm.insert_dns_queries(dns_rows)
+        if arp_rows:
+            dbm.insert_arp_observations(arp_rows)
         if not items:
             return 0
         rows = [
@@ -167,6 +229,7 @@ class FlowAggregator:
             in items
         ]
         dbm.insert_flows(rows)
+        dbm.set_meta("last_flow_ts", str(time.time()))
         return len(rows)
 
 
