@@ -70,11 +70,98 @@ PowerShell **as administrator**, and use the `py` launcher
 | `netmon/explainer.py` | Evidence builder + plain-English summaries (LLM or narrative rule-based, validated); shared port guide |
 | `netmon/dashboard.py` | Flask live dashboard: `/`, `/api/stats`, `/explain`, `/pcap` — written for non-technical readers |
 | `netmon/db.py` | SQLite storage: flows, alerts, outages, summaries (WAL mode); auto-migrates older DBs |
+| `netmon/notify.py` | Email alerts on High/Critical: plain-English subject + body, one email per alert kind per hour, silent when email isn't configured |
+| `netmon/weekly.py` | Weekly plain-English rollup of the last 7 days (`--weekly-report` prints it, emails it when SMTP is set, LLM-polishes it when a key is set) |
+| `netmon/ai_assist.py` | Optional OpenAI tie-ins: per-alert triage verdicts, "ask your network" Q&A over the last 24h, weekly-report polishing (never writes SQL, never touches the DB) |
+
+### Phase 3 — depth
+
+The monitor grew a second layer: it now *learns your network over time*
+and taps you on the shoulder when something matters. All in the same
+plain-English style as Phase 2.
+
+- **Email alerts on High/Critical.** Set the SMTP variables below and the
+  monitor emails you when something important is spotted — at most one
+  email per alert kind per hour, written the way the dashboard writes
+  (what happened, what it means, what to do). No SMTP configured? Silence,
+  not errors.
+- **Dashboard password.** Set `NETMON_PASSWORD` and every page except the
+  login and the health check requires a session login. (The `/api/health`
+  endpoint stays open on purpose — that's what service monitors ping.)
+- **Alert triage.** On the dashboard every alert now has **Ack**,
+  **Dismiss**, and **AI verdict** buttons. Acknowledge means "I've seen
+  this"; dismiss means "not worth my time"; either takes it out of your
+  mental inbox. Your choice is stored on the alert (with an optional note)
+  and survives restarts.
+- **Weekly plain-English report.** Run `python -m netmon.run
+  --weekly-report` to print (and, when email is configured, email) a warm
+  rollup of the last 7 days: how much went through, where it went,
+  anything worth a look, connection drops, and new devices. Quiet weeks
+  get a quiet report, not an error.
+- **Run as a service + health endpoint.** The monitor is meant to live on
+  your machine permanently now: [docs/run-as-service.md](docs/run-as-service.md)
+  walks through Windows Task Scheduler and Linux systemd setup. The
+  `/api/health` endpoint reports whether the web part is up, when traffic
+  was last seen, and whether the data is **stale** (nothing captured in
+  5+ minutes); a stale dashboard shows a red banner telling you to check
+  that netmon is still running.
+- **First-seen baselining.** The monitor now remembers every outside
+  address, domain, and device the first time it sees it (`first_seen`
+  table). A known address that suddenly moves far more than its own 7-day
+  average — 10x and 50 MB absolute in an hour — gets flagged, like a faucet
+  suddenly running full blast.
+- **DNS anomaly detection.** Outbound lookups are recorded now, and three
+  shapes get flagged: one domain looked up 200+ times in 10 minutes,
+  25+ weird subdomains under one parent (the classic shape of DNS
+  tunneling — data sneaked out disguised as address lookups), and a
+  never-before-seen domain suddenly getting 50+ lookups.
+- **New-device + ARP-spoof detection.** Hardware addresses seen on the
+  local network are tracked: a new face on the block gets a low-key
+  heads-up, and ARP weirdness — one device introducing itself as 3+
+  different addresses, or an address answering with a new hardware
+  address — raises a High alert.
+- **AI triage verdicts + ask your network.** With `OPENAI_API_KEY` set,
+  every alert gets an **AI verdict** button (a second opinion: real
+  concern, likely benign, or uncertain, in 2–3 plain sentences), and the
+  **/ask** page answers free-text questions about the last 24 hours from
+  the monitor's own data. The model never writes SQL and never touches the
+  database — it only reads a fixed evidence summary. Without a key, both
+  features quietly report they're unavailable.
+
+Databases from earlier versions upgrade themselves on startup — new
+tables and columns are added in place, nothing is deleted.
+
+### Environment variables
+
+All optional. Set the ones you want; everything else degrades gracefully.
+
+| Variable | Default | Enables | What it does |
+|---|---|---|---|
+| `NETMON_SMTP_HOST` | — | Email alerts + weekly report | Your mail server's address (e.g. `smtp.gmail.com`). Without it, no email goes out. |
+| `NETMON_SMTP_PORT` | `587` | Email alerts + weekly report | Mail server port; 587 is the usual one for STARTTLS. |
+| `NETMON_SMTP_USER` | — | Email alerts + weekly report | Login name for the mail server. |
+| `NETMON_SMTP_PASS` | — | Email alerts + weekly report | Login password (app password, if your provider needs one). |
+| `NETMON_ALERT_TO` | — | Email alerts + weekly report | The email address alerts and the weekly report are sent **to**. |
+| `NETMON_SMTP_FROM` | `NETMON_SMTP_USER` | Email alerts | The address emails appear to come **from**. Defaults to the login name. |
+| `NETMON_PASSWORD` | — | Dashboard password gate | When set, the dashboard asks for this password before showing anything (the health endpoint stays open). |
+| `NETMON_SECRET_KEY` | random each start | Session security | Signs the login session cookie. Set it to something stable so logins survive restarts; leave unset and everyone gets logged out on restart. |
+| `OPENAI_API_KEY` | — | AI summaries, triage verdicts, ask-your-network, weekly-report polish | Turns on all OpenAI features. Without it everything falls back to the rule-based versions. |
+
+Example:
+
+```bash
+export NETMON_PASSWORD=<your dashboard password here>
+export NETMON_SMTP_HOST=smtp.gmail.com
+export NETMON_SMTP_USER=you@example.com
+export NETMON_SMTP_PASS=<app password here>
+export NETMON_ALERT_TO=you@example.com
+sudo -E python -m netmon.run --port 8080   # -E keeps the exports for sudo
+```
 
 ### Honest scope note
 
 On a switched home network, one machine only sees **its own** traffic.
-Whole-home visibility (every device) is Phase 3: a Raspberry Pi sensor by
+Whole-home visibility (every device) is Phase 4: a Raspberry Pi sensor by
 the router. Phase 1 monitors the machine it runs on.
 
 ---
