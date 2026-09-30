@@ -1,0 +1,107 @@
+"""netmon/run.py -- entry point for the Phase 1 network monitor.
+
+Starts, in this order:
+  1. watchdog thread  (ping gateway + internet, logs outages)
+  2. capture thread   (live sniff -> flows -> SQLite; needs root)
+  3. monitor thread   (periodic detection rules + AI summary every 15 min)
+  4. Flask dashboard  (http://127.0.0.1:5001)
+
+Usage:
+  sudo python -m netmon.run                  # full monitor on default iface
+  sudo python -m netmon.run --iface wlan0    # pick the interface
+  python -m netmon.run --pcap capture.pcap   # one-shot pcap analysis
+  python -m netmon.run --dashboard-only       # just serve the dashboard
+
+Live capture needs root (raw sockets). The dashboard alone does not.
+"""
+import argparse
+import threading
+import time
+
+from . import dashboard as dash
+from . import detect as detm
+from . import explainer as expl
+from .watchdog import Watchdog
+
+DETECT_INTERVAL = 60  # seconds between periodic rule runs
+
+
+def _monitor_loop(stop_event):
+    """Detection rules every minute; AI summary every SUMMARY_INTERVAL."""
+    last_summary = 0
+    while not stop_event.wait(DETECT_INTERVAL):
+        try:
+            detm.run_all()
+        except Exception:
+            pass
+        now = time.time()
+        if now - last_summary >= expl.SUMMARY_INTERVAL:
+            last_summary = now
+            try:
+                expl.summarize(save=True)
+            except Exception:
+                pass
+
+
+def main():
+    ap = argparse.ArgumentParser(description="netmon Phase 1 monitor")
+    ap.add_argument("--iface", default=None, help="interface to sniff")
+    ap.add_argument("--pcap", default=None, help="analyze a pcap and exit")
+    ap.add_argument("--dashboard-only", action="store_true",
+                    help="serve the dashboard without capturing")
+    ap.add_argument("--port", type=int, default=5001)
+    args = ap.parse_args()
+
+    if args.pcap:
+        from . import capture as capm
+        agg = capm.run_pcap(args.pcap)
+        print(f"Processed {agg.packets_seen} packets from {args.pcap}.")
+        anchor = agg.max_ts or time.time()
+        detm.run_all(now=anchor)
+        summary, origin = expl.summarize(save=True, now=anchor)
+        print(f"\n[{origin}] {summary['headline']}\n")
+        print(summary["whats_happening"])
+        for s in summary["stands_out"]:
+            print(f"  - {s}")
+        return
+
+    stop_event = threading.Event()
+
+    watchdog = Watchdog()
+    watchdog.start()
+    dash.watchdog = watchdog  # dashboard reads live status from here
+
+    monitor = threading.Thread(target=_monitor_loop, args=(stop_event,),
+                               daemon=True)
+    monitor.start()
+
+    capture_thread = None
+    if not args.dashboard_only:
+        from . import capture as capm
+        capture_thread = threading.Thread(
+            target=capm.run_live,
+            kwargs={"interface": args.iface, "stop_event": stop_event},
+            daemon=True)
+        capture_thread.start()
+        print(f"Capturing on {args.iface or 'default interface'}..."
+              " (needs root for live sniff)")
+
+    # first summary right away so the dashboard isn't empty
+    try:
+        expl.summarize(save=True)
+    except Exception:
+        pass
+
+    print(f"Dashboard: http://127.0.0.1:{args.port}")
+    try:
+        dash.app.run(host="127.0.0.1", port=args.port,
+                     use_reloader=False)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        watchdog.stop()
+
+
+if __name__ == "__main__":
+    main()
