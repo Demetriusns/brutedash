@@ -1,8 +1,29 @@
-# brutedash
+# brutedash — Project Orion
 
-A mini SOC analyst: parses SSH auth logs and writes technical briefs — now
-with **netmon**, a Phase 2 home-network traffic monitor with a live
-dashboard and plain-English explanations anyone can read.
+A mini SOC analyst for a home network: it watches traffic and SSH logs,
+detects suspicious behavior, and explains it in plain English — written so
+a non-technical reader can understand every alert, and engineered so a
+technical reviewer can verify every claim.
+
+**Stack:** Python · Flask · SQLite (WAL) · scapy · vanilla JS (canvas) ·
+OpenAI API (optional, every AI feature has a rule-based fallback)
+
+```mermaid
+flowchart LR
+    A[Packets / SSH logs / pcap] --> B(capture.py)
+    B --> C[Flow metadata<br/>no packet contents]
+    C --> D(detect.py)
+    D --> E[Alerts + plain-English<br/>meaning / normal? / action]
+    C --> F(explainer.py)
+    F --> G[15-min summaries]
+    D --> H[(SQLite)]
+    H --> I(dashboard.py)
+    E --> I
+    G --> I
+    I --> J[Live dashboard]
+    F -.-> K{{OpenAI API}}
+    K -.->|absent: rule-based fallback| F
+```
 
 ## Project phases — what was added when
 
