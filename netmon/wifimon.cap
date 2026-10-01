@@ -1,0 +1,22 @@
+# wifimon.cap -- bettercap caplet for brutedash whole-network view.
+#
+# WHAT IT DOES: ARP-spoofs your own LAN (default 192.168.1.0/24) so this PC
+# relays traffic between your devices and the router. brutedash, sniffing the
+# Wi-Fi interface, then sees every device's conversations -- phones, TV,
+# consoles -- not just this PC's.
+#
+# ONLY run this on a network you own. While it runs, this PC is the LAN's
+# man in the middle: if the PC sleeps, reboots, or bettercap dies, the other
+# devices lose internet until their ARP tables recover (usually < 1 min).
+#
+# RUN (as Administrator):
+#   bettercap.exe -iface "\Device\NPF_{57EEC6F2-5326-4C06-83DA-710B9FAAF062}" -caplet "C:\Users\dmanc\brutedash\netmon\wifimon.cap"
+# STOP: type `quit` in the bettercap console (it restores ARP tables on exit).
+#
+# brutedash's ARP-spoof detector ignores this PC's own MAC, so the dashboard
+# will not flag you. Other devices will each raise one "new device" alert
+# the first time they are seen -- that is the point.
+
+set arp.spoof.fullduplex true
+set arp.spoof.targets 192.168.1.0/24
+arp.spoof on
