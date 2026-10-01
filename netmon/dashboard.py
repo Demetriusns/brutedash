@@ -48,6 +48,8 @@ table{border-collapse:collapse;width:100%;margin:1em 0}
 th,td{border:1px solid #30363d;padding:.5em;text-align:left;font-size:.9em}
 th{background:#161b22}
 .card{display:inline-block;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:1em 1.5em;margin:.4em;min-width:150px}
+.card.graphcard{min-width:300px;vertical-align:top}
+#pktgraph{display:block;margin-top:.4em;width:100%;height:auto}
 .card .v{font-size:1.6em;color:#58a6ff} .card .l{color:#8b949e;font-size:.85em}
 .up{color:#3fb950;font-weight:bold} .down{color:#f85149;font-weight:bold}
 .high{color:#f85149;font-weight:bold} .medium{color:#d29922} .low{color:#8b949e} .critical{color:#f85149;font-weight:bold;background:#3d1113}
@@ -56,6 +58,9 @@ th{background:#161b22}
 a{color:#58a6ff} button{background:#238636;color:#fff;border:0;padding:.5em 1.2em;cursor:pointer;font-family:monospace;border-radius:4px}
 .btn-sm{background:#238636;color:#fff;border:0;padding:.25em .8em;cursor:pointer;font-family:monospace;border-radius:4px;font-size:.85em;margin:.25em .2em 0 0}
 .btn-sm.ghost{background:#21262d;border:1px solid #30363d}
+.badge{display:inline-block;padding:.15em .6em;border-radius:999px;font-size:.8em;white-space:nowrap}
+.badge.ok{background:#1a3a24;color:#7ee787;border:1px solid #2d6a3f}
+.badge.warn{background:#3d2e12;color:#f0b429;border:1px solid #8a6d1f}
 input,textarea,select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;font-family:monospace;padding:.4em;border-radius:4px}
 .banner-red{background:#3d1113;border:1px solid #f85149;color:#f85149;padding:.8em 1em;border-radius:6px;margin-bottom:1em}
 pre{background:#161b22;padding:1em;white-space:pre-wrap;border:1px solid #30363d;border-radius:6px}
@@ -185,6 +190,38 @@ the monitor flags those for you automatically.</p>
 <script>
 const SEV_WORDS = {Critical:"Act now", High:"Needs attention", Medium:"Worth a look", Low:"Heads up"};
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
+// Live traffic graph: MB and packets per 5s tick from cumulative counters, last ~6 min.
+let TR_HIST = [];
+let TR_LAST_B = null, TR_LAST_P = null;
+const TR_MAX_TICKS = 72;
+function drawTrafficGraph(){
+  const cv = document.getElementById("pktgraph");
+  if (!cv) return;
+  const W = cv.width, H = cv.height;
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+  const n = TR_HIST.length;
+  if (!n) return;
+  const maxV = Math.max(0.01, ...TR_HIST);
+  const yOf = v => H - 4 - (v / maxV) * (H - 16);
+  ctx.strokeStyle = "#21262d"; ctx.lineWidth = 1;
+  for (const f of [0.25, 0.5, 0.75]) {
+    const y = yOf(f * maxV);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  const step = W / Math.max(1, TR_MAX_TICKS - 1);
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  TR_HIST.forEach((v, i) => ctx.lineTo(i * step, yOf(v)));
+  ctx.lineTo((n - 1) * step, H);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(88,166,255,0.25)"; ctx.fill();
+  ctx.beginPath();
+  TR_HIST.forEach((v, i) => { const x = i * step, y = yOf(v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.strokeStyle = "#58a6ff"; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = "#8b949e"; ctx.font = "10px sans-serif";
+  ctx.fillText("peak " + maxV.toFixed(2) + " MB", 4, 10);
+}
 async function refresh(){
   const sf = document.getElementById("alertstatusfilter");
   const r = await fetch("/api/stats?status=" + (sf ? sf.value : "all"));
@@ -221,10 +258,25 @@ async function refresh(){
     + (s.suggested_actions.length ? "<b>Suggested:</b><ul>" + s.suggested_actions.map(x=>`<li>${esc(x)}</li>`).join("") + "</ul>" : "");
 
   let cards = `<div class="card"><div class="v">${d.throughput_mbps.toFixed(2)}</div><div class="l">MB per second (last min)</div></div>`;
-  cards += `<div class="card"><div class="v">${d.packets_1m}</div><div class="l">data packets (last min)</div></div>`;
+  cards += `<div class="card graphcard"><div class="v"><span id="pktrate">&ndash;</span> MB</div><div class="l">traffic per tick, live &middot; <span id="pktrate2"></span> packets/tick</div><canvas id="pktgraph" width="280" height="72"></canvas></div>`;
   for (const [label, st] of Object.entries(d.connectivity))
     cards += `<div class="card"><div class="v ${st.up?"up":"down"}">${st.up?"UP":"DOWN"}</div><div class="l">${esc(label)}</div></div>`;
   document.getElementById("cards").innerHTML = cards;
+
+  const bt = d.bytes_total, pt = d.packets_total;
+  if (typeof bt === "number" && !d.stale) {
+    const mb = (TR_LAST_B === null || bt < TR_LAST_B) ? 0 : (bt - TR_LAST_B) / 1e6;
+    const pk = (typeof pt === "number" && TR_LAST_P !== null && pt >= TR_LAST_P) ? pt - TR_LAST_P : 0;
+    TR_HIST.push(mb);
+    if (TR_HIST.length > TR_MAX_TICKS) TR_HIST.shift();
+    TR_LAST_B = bt;
+    if (typeof pt === "number") TR_LAST_P = pt;
+    const pr = document.getElementById("pktrate");
+    if (pr) pr.textContent = mb.toFixed(2);
+    const pr2 = document.getElementById("pktrate2");
+    if (pr2) pr2.textContent = pk;
+  }
+  drawTrafficGraph();
 
   document.getElementById("normalnow").innerHTML =
     `<p>In the last 15 minutes: <b>${d.normal_now.mb} MB</b> across ${d.normal_now.flows} conversations.`
@@ -271,10 +323,18 @@ async function loadDevices(){
   const d = await r.json();
   DEV_NAMES = {};
   d.devices.forEach(v => { DEV_NAMES[v.mac] = v.name; });
-  document.getElementById("devices").innerHTML = d.devices.length ?
-    `<table><tr><th>Device</th><th>Last address</th><th>Last seen</th><th></th></tr>` +
-    d.devices.map(v=>`<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${esc(v.last_ip)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`).join("") + `</table>`
-    : '<p class="note">No devices seen yet.</p>';
+  const nprob = d.devices.filter(v => v.on_probation).length;
+  document.getElementById("devices").innerHTML =
+    (nprob ? `<p><span class="badge warn">🟡 ${nprob} device${nprob>1?"s":""} on 24h probation watch</span></p>` : "") +
+    (d.devices.length ?
+    `<table><tr><th>Device</th><th>Status</th><th>Last address</th><th>First seen</th><th>Last seen</th><th></th></tr>` +
+    d.devices.map(v=>{
+      const status = v.on_probation
+        ? `<span class="badge warn">🟡 Probation · trusted in ${v.probation_left_h}h</span>`
+        : `<span class="badge ok">✅ Trusted</span>`;
+      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
+    }).join("") + `</table>`
+    : '<p class="note">No devices seen yet.</p>');
 }
 async function renameDevice(mac){
   const name = prompt("Name for " + mac + " (blank clears it):", DEV_NAMES[mac] || "");
@@ -513,11 +573,22 @@ def alert_dismiss(aid):
 
 @app.route("/api/devices")
 def api_devices():
+    now = time.time()
     devs = dbm.known_devices(limit=100)
-    return jsonify({"devices": [
-        {"mac": d["mac"], "name": d["name"], "last_ip": d["last_ip"],
-         "last_seen": _fmt_ts(d["last_seen"]) if d["last_seen"] else ""}
-        for d in devs]})
+    out = []
+    for d in devs:
+        left_h = ((d["probation_ends"] - now) / 3600
+                  if d["on_probation"] else 0)
+        out.append({
+            "mac": d["mac"], "name": d["name"],
+            "last_ip": d["last_ip"],
+            "last_seen": _fmt_ts(d["last_seen"]) if d["last_seen"] else "",
+            "first_seen": _fmt_ts(d["first_seen"])
+            if d["first_seen"] else "",
+            "on_probation": d["on_probation"],
+            "probation_left_h": round(left_h, 1),
+        })
+    return jsonify({"devices": out})
 
 
 @app.route("/api/devices/name", methods=["POST"])
@@ -826,6 +897,8 @@ def api_stats():
     n15 = dbm.query(
         "SELECT COALESCE(SUM(bytes),0), COUNT(*) FROM flows WHERE ts > ?",
         (now - 900,))[0]
+    total_pkts = dbm.query("SELECT COALESCE(SUM(packets),0) FROM flows")[0][0]
+    total_bytes = dbm.query("SELECT COALESCE(SUM(bytes),0) FROM flows")[0][0]
     try:
         device_names = dbm.ip_name_map()
     except Exception:
@@ -834,6 +907,8 @@ def api_stats():
         "now": _fmt_ts(now),
         "throughput_mbps": mbps,
         "packets_1m": one_min[1],
+        "packets_total": total_pkts or 0,
+        "bytes_total": total_bytes or 0,
         "connectivity": conn,
         "summary": dbm.latest_summary(),
         "alerts": alerts,
