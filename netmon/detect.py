@@ -541,33 +541,6 @@ def _own_macs():
     return _OWN_MACS
 
 
-_OWN_MACS = None
-
-
-def _own_macs():
-    """MAC addresses of this machine's interfaces (lowercased).
-
-    Used to keep the ARP-spoof detector from flagging this machine
-    itself -- e.g. when deliberately relaying LAN traffic so the
-    monitor sees every device (whole-network mode on your own LAN)."""
-    global _OWN_MACS
-    if _OWN_MACS is None:
-        macs = set()
-        try:
-            from scapy.arch import get_if_list, get_if_hwaddr
-            for iface in get_if_list():
-                try:
-                    mac = get_if_hwaddr(iface).lower()
-                except Exception:
-                    continue
-                if mac and mac != "00:00:00:00:00:00":
-                    macs.add(mac)
-        except Exception:
-            pass
-        _OWN_MACS = macs
-    return _OWN_MACS
-
-
 def check_arp_spoof(now=None):
     """Flag ARP weirdness over the last 30 minutes.
 
@@ -589,8 +562,6 @@ def check_arp_spoof(now=None):
     for mac, nip in rows:
         if not mac:
             continue
-        if mac.lower() in _own_macs():
-            continue  # that's us (e.g. relaying the LAN for whole-network view)
         ips = sorted(r[0] for r in dbm.query(
             "SELECT DISTINCT ip FROM arp_observations"
             " WHERE ts >? AND mac =?", (now - ARP_SPOOF_WINDOW, mac))
@@ -639,9 +610,7 @@ def check_arp_spoof(now=None):
             continue
         if all(m == first_mac for m in macs):
             continue
-        others = sorted(set(macs) - {first_mac} - _own_macs())
-        if not others:
-            continue  # only newcomer is this machine itself -- not an attack
+        others = sorted(set(macs) - {first_mac})
         if dbm.recent_alert_kind("arp_spoof", ip, ARP_SPOOF_COOLDOWN):
             continue
         dbm.add_alert(
