@@ -1,6 +1,6 @@
 """netmon/db.py -- SQLite storage for the network monitor.
 
-Eight tables:
+Tables:
   flows      per-flush flow records (5-tuple + packet/byte counts)
   alerts     detection findings (port scans, spikes, odd ports, ...)
   outages    connection-drop windows from the watchdog
@@ -8,6 +8,8 @@ Eight tables:
   dns_queries  observed outbound DNS lookups (ts, name, qtype)
   arp_observations  (ip, mac) pairs seen on the wire (ts, ip, mac)
   first_seen  first-seen timestamps keyed by (kind, key)
+  device_names  user-chosen friendly names keyed by MAC
+  allowlist  user-approved (kind, pattern) pairs that suppress alerts
   meta        small key/value store (heartbeats, watermarks, ...)
 
 All writers take the module lock; SQLite runs in WAL mode so the
@@ -88,6 +90,20 @@ CREATE TABLE IF NOT EXISTS first_seen(
     key TEXT,
     first_ts REAL,
     PRIMARY KEY(kind, key)
+);
+
+CREATE TABLE IF NOT EXISTS device_names(
+    mac TEXT PRIMARY KEY,        -- lowercased hardware address
+    name TEXT NOT NULL,          -- user-chosen friendly name ("PS5")
+    updated_ts REAL
+);
+
+CREATE TABLE IF NOT EXISTS allowlist(
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,          -- alert kind this entry suppresses
+    pattern TEXT NOT NULL,       -- case-insensitive substring match
+    note TEXT,
+    created_ts REAL
 );
 
 CREATE TABLE IF NOT EXISTS meta(
@@ -261,6 +277,159 @@ def get_meta(key):
         return row[0] if row else None
 
 
+# --- device names ------------------------------------------------------
+# Friendly names ("PS5", "Mom's iPhone") keyed by MAC so alerts and tables
+# read like English instead of hardware addresses.
+
+
+def set_device_name(mac, name):
+    """Name (or rename) a device by MAC. An empty name clears it."""
+    import time
+    mac = (mac or "").strip().lower()
+    name = (name or "").strip()
+    if not mac:
+        raise ValueError("mac is required")
+    with _lock:
+        conn = _db()
+        if name:
+            conn.execute(
+                "INSERT INTO device_names (mac, name, updated_ts)"
+                " VALUES (?,?,?)"
+                " ON CONFLICT(mac) DO UPDATE SET name=excluded.name,"
+                " updated_ts=excluded.updated_ts",
+                (mac, name[:40], time.time()))
+        else:
+            conn.execute("DELETE FROM device_names WHERE mac=?", (mac,))
+        conn.commit()
+
+
+def device_name_map():
+    """{mac: name} for every named device."""
+    with _lock:
+        conn = _db()
+        return {m: n for m, n in conn.execute(
+            "SELECT mac, name FROM device_names")}
+
+
+def known_devices(limit=100):
+    """Devices ever seen on the LAN, newest first.
+
+    Returns [{mac, name, last_ip, last_seen}]; name is "" when unnamed.
+    """
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT mac, MAX(ts) FROM arp_observations"
+            " WHERE mac IS NOT NULL AND mac != ''"
+            " GROUP BY mac ORDER BY MAX(ts) DESC LIMIT ?",
+            (limit,)).fetchall()
+        out = []
+        for mac, last_seen in rows:
+            iprow = conn.execute(
+                "SELECT ip FROM arp_observations WHERE mac=?"
+                " ORDER BY ts DESC LIMIT 1", (mac,)).fetchone()
+            nmrow = conn.execute(
+                "SELECT name FROM device_names WHERE mac=?",
+                (mac,)).fetchone()
+            out.append({
+                "mac": mac,
+                "name": nmrow[0] if nmrow else "",
+                "last_ip": iprow[0] if iprow and iprow[0] else "",
+                "last_seen": last_seen,
+            })
+        return out
+
+
+def ip_name_map():
+    """{local ip: device name} using each IP's most recent MAC."""
+    latest = {}
+    for ip, mac, ts in query(
+            "SELECT ip, mac, MAX(ts) FROM arp_observations"
+            " WHERE ip IS NOT NULL AND mac IS NOT NULL AND mac != ''"
+            " GROUP BY ip, mac"):
+        if ip not in latest or ts > latest[ip][1]:
+            latest[ip] = (mac, ts)
+    names = device_name_map()
+    return {ip: names[mac] for ip, (mac, _ts) in latest.items()
+            if mac in names}
+
+
+# --- quiet hours -------------------------------------------------------
+# Email silencing windows, stored as a JSON list in meta under
+# "quiet_hours". Each window: {days:[0..6 Mon..Sun], start:"HH:MM",
+# end:"HH:MM", kinds:["all"] or [alert kinds]}.
+def get_quiet_hours():
+    """List of quiet-window dicts, or []."""
+    raw = get_meta("quiet_hours")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def set_quiet_hours(windows):
+    """Persist quiet windows (a list of dicts; validated by callers)."""
+    if not isinstance(windows, list):
+        raise ValueError("quiet hours must be a list")
+    set_meta("quiet_hours", json.dumps(windows))
+
+# --- allowlist ---------------------------------------------------------
+# (kind, pattern) pairs the user approved: matching alerts never fire.
+# Pattern is a case-insensitive substring matched against the alert's
+# identifying text (e.g. a MAC, an "ip:port" key, a domain).
+
+def add_allowlist(kind, pattern, note=""):
+    """Add an allowlist entry; returns its id."""
+    import time
+    kind = (kind or "").strip()
+    pattern = (pattern or "").strip()
+    if not kind or not pattern:
+        raise ValueError("kind and pattern are required")
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "INSERT INTO allowlist (kind, pattern, note, created_ts)"
+            " VALUES (?,?,?,?)",
+            (kind, pattern[:200], (note or "").strip()[:200],
+             time.time()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def remove_allowlist(entry_id):
+    with _lock:
+        conn = _db()
+        conn.execute("DELETE FROM allowlist WHERE id=?", (entry_id,))
+        conn.commit()
+
+
+def list_allowlist():
+    with _lock:
+        conn = _db()
+        return [
+            {"id": i, "kind": k, "pattern": p, "note": n or "",
+             "created_ts": t}
+            for i, k, p, n, t in conn.execute(
+                "SELECT id, kind, pattern, note, created_ts FROM allowlist"
+                " ORDER BY kind, pattern")]
+
+
+def is_allowlisted(kind, text):
+    """True if any allowlist pattern for this kind appears in text
+    (case-insensitive substring match)."""
+    text = (text or "").lower()
+    if not text:
+        return False
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT pattern FROM allowlist WHERE kind=?", (kind,)).fetchall()
+    return any((p or "").lower() in text for (p,) in rows if p)
+
+
 def set_alert_status(alert_id, status, note=None):
     """Mark an alert 'new' | 'acknowledged' | 'dismissed', with an
     optional human note."""
@@ -362,3 +531,4 @@ def query(sql, params=()):
     with _lock:
         conn = _db()
         return conn.execute(sql, params).fetchall()
+
