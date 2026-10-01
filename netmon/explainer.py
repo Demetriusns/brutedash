@@ -30,12 +30,12 @@ EVIDENCE:
 {evidence}
 
 Return ONLY a JSON object with exactly these keys:
-{
+{{
   "headline": "one short line: the current state of the network",
   "whats_happening": "2-3 plain sentences describing the traffic. No jargon; if you must use a term like 'port scan', explain it briefly.",
   "stands_out": ["bullet 1 -- anything unusual, or 'Nothing unusual' as a single bullet", "bullet 2"],
   "suggested_actions": ["concrete next step 1", "step 2"] -- empty list [] if nothing needs doing
-}
+}}
 Rules: ground every claim in the evidence; never invent IPs, countries, or
 events. Calm tone -- most home traffic is boring and that is fine to say.
 No markdown, no extra text."""
@@ -257,7 +257,7 @@ def rule_based_summary(evidence, window_min=WINDOW_MIN, now=None):
 
     return {
         "headline": headline,
-        "whats_happening": whats_happening,
+        "whats_happening": happening,
         "stands_out": stands_out,
         "suggested_actions": suggested,
     }
