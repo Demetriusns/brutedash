@@ -15,6 +15,7 @@ Usage:
 Live capture needs root (raw sockets). The dashboard alone does not.
 """
 import argparse
+import os
 import threading
 import time
 
@@ -26,8 +27,15 @@ DETECT_INTERVAL = 60  # seconds between periodic rule runs
 
 
 def _monitor_loop(stop_event):
-    """Detection rules every minute; AI summary every SUMMARY_INTERVAL."""
+    """Detection rules every minute; AI summary every SUMMARY_INTERVAL;
+    email digest every NETMON_DIGEST_HOURS (default 24, 0 disables)."""
     last_summary = 0
+    last_digest = time.time()  # first digest waits a full interval
+    try:
+        digest_hours = float(os.environ.get("NETMON_DIGEST_HOURS", "24")
+                             or 24)
+    except ValueError:
+        digest_hours = 24
     while not stop_event.wait(DETECT_INTERVAL):
         try:
             detm.run_all()
@@ -38,6 +46,13 @@ def _monitor_loop(stop_event):
             last_summary = now
             try:
                 expl.summarize(save=True)
+            except Exception:
+                pass
+        if digest_hours > 0 and now - last_digest >= digest_hours * 3600:
+            last_digest = now
+            try:
+                from . import notify as notifm
+                notifm.send_digest()
             except Exception:
                 pass
 
