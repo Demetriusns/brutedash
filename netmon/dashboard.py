@@ -222,6 +222,8 @@ function drawTrafficGraph(){
   ctx.fillStyle = "#8b949e"; ctx.font = "10px sans-serif";
   ctx.fillText("peak " + maxV.toFixed(2) + " MB", 4, 10);
 }
+const VERDICTS = {};   // alert id -> AI verdict text; survives the 5s re-render
+let ALERT_GROUPS = []; // groups from the latest refresh(), for triageGroup/toggleGroup
 async function refresh(){
   const sf = document.getElementById("alertstatusfilter");
   const r = await fetch("/api/stats?status=" + (sf ? sf.value : "all"));
@@ -237,18 +239,35 @@ async function refresh(){
   }
   document.getElementById("logoutlink").style.display = d.auth_required ? "inline" : "none";
 
-  document.getElementById("alerts").innerHTML = d.alerts.length ? d.alerts.map(a=>
-    `<div class="alert ${esc(a.severity)}"><b>[${SEV_WORDS[a.severity]||esc(a.severity)}] ${esc(a.title)}</b> <span class="note">[${esc(a.status)}]</span>`
-    + (a.meaning ? `<br><b>What this means:</b> ${esc(a.meaning)}` : "")
-    + (a.is_normal ? `<br><b>Is this normal?</b> ${esc(a.is_normal)}` : "")
-    + (a.what_to_do ? `<br><b>What to do:</b> ${esc(a.what_to_do)}` : "")
-    + (a.note ? `<br><b>Your note:</b> ${esc(a.note)}` : "")
-    + `<br><span class="note">${esc(a.ts)}${a.detail ? " -- " + esc(a.detail) : ""}</span>`
-    + `<br><button class="btn-sm" onclick="triage(${a.id},'ack')">Ack</button>`
-    + `<button class="btn-sm ghost" onclick="triage(${a.id},'dismiss')">Dismiss</button>`
-    + `<button class="btn-sm ghost" onclick="aiVerdict(${a.id})">AI verdict</button>`
-    + ` <span class="note" id="verdict-${a.id}"></span></div>`
-  ).join("") : '<p class="note">No alerts in the last hour. All quiet.</p>';
+  // Group repeat alerts (same severity + title) into one card so the
+  // list stays readable; expanders reveal individual occurrences.
+  ALERT_GROUPS = [];
+  const gmap = {};
+  d.alerts.forEach(a => {
+    const k = a.severity + "|" + a.title;
+    if (!gmap[k]) { gmap[k] = {sev: a.severity, title: a.title, items: []}; ALERT_GROUPS.push(gmap[k]); }
+    gmap[k].items.push(a);
+  });
+  document.getElementById("alerts").innerHTML = ALERT_GROUPS.length ? ALERT_GROUPS.map((g, gi) => {
+    const lead = g.items[0], n = g.items.length;
+    const vtxt = VERDICTS[lead.id] ? esc(VERDICTS[lead.id]) : "";
+    return `<div class="alert ${esc(g.sev)}"><b>[${SEV_WORDS[g.sev]||esc(g.sev)}] ${esc(g.title)}</b>`
+    + (n > 1 ? ` <span class="note">&times;${n}</span>` : "")
+    + ` <span class="note">[${esc(lead.status)}]</span>`
+    + (lead.meaning ? `<br><b>What this means:</b> ${esc(lead.meaning)}` : "")
+    + (lead.is_normal ? `<br><b>Is this normal?</b> ${esc(lead.is_normal)}` : "")
+    + (lead.what_to_do ? `<br><b>What to do:</b> ${esc(lead.what_to_do)}` : "")
+    + (lead.note ? `<br><b>Your note:</b> ${esc(lead.note)}` : "")
+    + `<br><span class="note">${esc(lead.ts)}${lead.detail ? " -- " + esc(lead.detail) : ""}</span>`
+    + (n > 1 ? `<br><button class="btn-sm ghost" onclick="toggleGroup(${gi}, this)">show all ${n}</button>`
+      + `<div id="group-${gi}" style="display:none">`
+      + g.items.slice(1).map(a=>`<span class="note">${esc(a.ts)}${a.detail ? " -- " + esc(a.detail) : ""}</span><br>`).join("")
+      + `</div>` : "")
+    + `<br><button class="btn-sm" onclick="triageGroup(${gi},'ack')">Ack${n > 1 ? " all" : ""}</button>`
+    + `<button class="btn-sm ghost" onclick="triageGroup(${gi},'dismiss')">Dismiss${n > 1 ? " all" : ""}</button>`
+    + `<button class="btn-sm ghost" onclick="aiVerdict(${lead.id})">AI verdict</button>`
+    + ` <span class="note" id="verdict-${lead.id}">${vtxt}</span></div>`;
+  }).join("") : '<p class="note">No alerts in the last hour. All quiet.</p>';
 
   const s = d.summary;
   if (s) document.getElementById("summary").innerHTML =
@@ -297,20 +316,33 @@ async function refresh(){
       d.outages.map(o=>`<tr><td>${esc(o.target)}</td><td>${o.gap_s.toFixed(0)}s</td><td class="note">${esc(o.when)}</td></tr>`).join("") + `</table>`
       : '<p class="note">No drops recorded. Your connection has been steady.</p>');
 }
-async function triage(aid, action){
-  const note = prompt("Optional note (leave blank for none):", "");
+async function triageGroup(gi, action){
+  const g = ALERT_GROUPS[gi];
+  if (!g) return;
+  const note = action === "ack" ? prompt("Optional note (leave blank for none):", "") : "";
   if (note === null) return;  // cancelled
-  await fetch("/api/alerts/" + aid + "/" + action, {method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({note: note})});
+  for (const a of g.items) {
+    await fetch("/api/alerts/" + a.id + "/" + action, {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({note: note})});
+  }
   refresh();
+}
+function toggleGroup(gi, btn){
+  const el = document.getElementById("group-" + gi);
+  const open = el.style.display === "none";
+  el.style.display = open ? "block" : "none";
+  btn.textContent = open ? "hide" : ("show all " + ALERT_GROUPS[gi].items.length);
 }
 async function aiVerdict(aid){
   const el = document.getElementById("verdict-" + aid);
-  el.textContent = "thinking...";
+  if (el) el.textContent = "thinking...";
   const r = await fetch("/api/triage/" + aid, {method:"POST"});
   const d = await r.json();
-  el.textContent = d.unavailable ? d.message : (d.verdict + " \u2014 " + d.reasoning);
+  const txt = d.unavailable ? d.message : (d.verdict + " \u2014 " + d.reasoning);
+  VERDICTS[aid] = txt;  // cache so the 5s refresh doesn't wipe it
+  const el2 = document.getElementById("verdict-" + aid);
+  if (el2) el2.textContent = txt;
 }
 async function explain(){
   document.getElementById("summary").innerHTML = '<p class="note">Writing summary...</p>';
