@@ -79,6 +79,32 @@ pre{background:#161b22;padding:1em;white-space:pre-wrap;border:1px solid #30363d
 .alert{border-left:4px solid #d29922;background:#161b22;padding:.6em 1em;margin:.5em 0}
 .alert.High{border-color:#f85149} .alert.Critical{border-color:#f85149;background:#2a1215}
 .note{color:#8b949e;font-size:.85em}
+html{scroll-behavior:smooth}
+nav.top{position:sticky;top:0;z-index:50;background:rgba(13,17,23,.94);
+backdrop-filter:blur(6px);border-bottom:1px solid #30363d;padding:.55em 1em;
+display:flex;align-items:center;gap:1.1em;margin:0 -1em 1em;flex-wrap:wrap}
+nav.top .brand{color:#58a6ff;font-weight:bold;font-size:1.15em;text-decoration:none}
+nav.top a.nl{color:#8b949e;text-decoration:none;font-size:.9em;padding:.3em .55em;border-radius:4px}
+nav.top a.nl:hover{background:#161b22;color:#c9d1d9}
+.pill{display:inline-block;padding:.2em .8em;border-radius:999px;font-size:.78em;font-weight:bold;letter-spacing:.03em}
+.pill.ok{background:#1a3a24;color:#7ee787;border:1px solid #2d6a3f}
+.pill.warn{background:#3d1113;color:#f85149;border:1px solid #f85149}
+.badge-count{background:#f85149;color:#fff;border-radius:999px;font-size:.72em;padding:.1em .5em;font-weight:bold;margin-left:.25em}
+.hero{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:1.2em 1.5em;margin:0 0 1.5em}
+.hero h1{margin-top:0}
+section.block{margin:0 0 2.2em}
+section.block>h2{font-size:1.25em;margin-bottom:.4em}
+.card.kpi .v{font-size:2em}
+.card.kpi-ok{border-color:#2d6a3f} .card.kpi-ok .v{color:#7ee787}
+.card.kpi-warn{border-color:#8a6d1f} .card.kpi-warn .v{color:#f0b429}
+.card.kpi-bad{background:#3d1113;border-color:#f85149} .card.kpi-bad .v{color:#f85149}
+details.settings{border:1px solid #30363d;border-radius:8px;margin:.6em 0;background:#0d1117}
+details.settings>summary{cursor:pointer;padding:.75em 1em;font-weight:bold;color:#c9d1d9;list-style:none}
+details.settings>summary::-webkit-details-marker{display:none}
+details.settings>summary::before{content:"\25B8  ";color:#58a6ff}
+details.settings[open]>summary::before{content:"\25BE  "}
+details.settings .inner{padding:0 1.2em 1.2em}
+footer.site{margin-top:2.5em;padding-top:1em;border-top:1px solid #30363d}
 """
 
 LOGIN_HTML = """<html><head><title>netmon -- sign in</title>
@@ -112,52 +138,70 @@ def logout():
     return redirect("/login" if NETMON_PASSWORD else "/")
 
 INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
-<style>""" + STYLE + """</style></head><body>
-<h1>netmon &mdash; your network, explained</h1>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>" + STYLE + "</style></head><body>
+<nav class="top">
+<a class="brand" href="/">netmon</a>
+<span id="status-pill" class="pill ok">&#9679; LIVE</span>
+<a class="nl" href="#overview">Overview</a>
+<a class="nl" href="#alerts">Alerts <span id="nav-alert-badge"></span></a>
+<a class="nl" href="#traffic">Traffic</a>
+<a class="nl" href="#devices">Devices</a>
+<a class="nl" href="#settings">Settings</a>
+</nav>
 <div id="stalebanner" class="banner-red" style="display:none"></div>
-<div id="wnbanner" class="banner-blue" style="display:none">📡 Whole-network view: this computer is relaying the LAN, so every device's traffic is monitored.</div>
+<div id="wnbanner" class="banner-blue" style="display:none">&#128225; Whole-network view: this computer is relaying the LAN, so every device's traffic is monitored.</div>
+
+<div class="hero" id="overview">
+<h1>Your network, explained</h1>
 <p class="note" id="pagesub">This page watches your computer's network traffic and explains
 it in plain English. It never reads <i>what</i> you send or receive -- only
 <i>who</i> your computer talks to and <i>how much</i> data moves.
 <span id="clock"></span></p>
+<div id="cards"></div>
+</div>
 
-<h2>What needs your eyes</h2>
-<p class="note">Show: <select id="alertstatusfilter" onchange="refresh()">
+<section class="block" id="alerts">
+<h2>&#128680; What needs your eyes</h2>
+<p class="note">Triage queue &mdash; most urgent first. Show: <select id="alertstatusfilter" onchange="refresh()">
 <option value="all" selected>All</option><option value="new">New</option>
 <option value="acknowledged">Acknowledged</option>
-<option value="dismissed">Dismissed</option></select></p>
-<div id="alerts"><p class="note">Loading...</p></div>
+<option value="dismissed">Dismissed</option></select>
+Severity: <select id="alertsevfilter" onchange="refresh()">
+<option value="all" selected>All</option><option value="Critical">Critical</option>
+<option value="High">High</option><option value="Medium">Medium</option>
+<option value="Low">Low</option></select></p>
+<div id="alertslist"><p class="note">Loading...</p></div>
+</section>
 
-<h2>Plain-English summary <button onclick="explain()">Explain now</button></h2>
-<div id="summary"><p class="note">Loading...</p></div>
-
-<h2>At a glance</h2>
-<div id="cards"></div>
-
-<h2>What's normal?</h2>
+<section class="block" id="summary">
+<h2>&#128172; Plain-English summary <button onclick="explain()">Explain now</button></h2>
+<div id="summarybody"><p class="note">Loading...</p></div>
+<h2>&#127968; What's normal?</h2>
 <p>On a normal day, almost everything your computer does online is one of a few
 things: loading websites and apps (encrypted, port 443), looking up website
 addresses (port 53), and quiet background chatter like checking the time. If
 the alerts above are empty, everything is fine -- <b>a quiet network is a healthy network.</b></p>
 <div id="normalnow"><p class="note">Loading...</p></div>
+</section>
 
-<h2>Biggest conversations (last 15 min)</h2>
+<section class="block" id="traffic">
+<h2>&#128202; Biggest conversations (last 15 min)</h2>
 <div id="talkers"></div>
-
-<h2>Port guide &mdash; what the numbers mean</h2>
-<p class="note">Apps talk on numbered "channels" called ports. Here are the
-ones you'll actually see. Anything not on this list is an uncommon channel --
-the monitor flags those for you automatically.</p>
-%%PORT_GUIDE%%
-
-<h2>Internet drops</h2>
+<h2>&#128268; Internet drops</h2>
 <div id="outages"><p class="note">Loading...</p></div>
+</section>
 
-<h2>Your devices</h2>
+<section class="block" id="devices">
+<h2>&#128241; Your devices</h2>
 <p class="note">Name your devices so alerts read like English instead of hardware addresses.</p>
 <div id="devices"><p class="note">Loading...</p></div>
+</section>
 
-<h2>Quiet hours</h2>
+<section class="block" id="settings">
+<h2>&#9881;&#65039; Settings</h2>
+
+<details class="settings"><summary>Quiet hours</summary><div class="inner">
 <p class="note">Email alerts stay silent during these windows. The dashboard still records everything.</p>
 <div id="quiethours"><p class="note">Loading...</p></div>
 <p class="note">Add a window:
@@ -170,12 +214,14 @@ the monitor flags those for you automatically.</p>
 <label><input type="checkbox" class="qh_day" value="5" checked>Sat</label>
 <label><input type="checkbox" class="qh_day" value="6" checked>Sun</label>
 <button class="btn-sm" onclick="addQuietWindow()">Add</button></p>
+</div></details>
 
-<h2>Rule health</h2>
+<details class="settings"><summary>Rule health</summary><div class="inner">
 <p class="note">How often each detection rule earns its keep, judged by your own Ack / Dismiss history over the last 30 days.</p>
 <div id="rulehealth"><p class="note">Loading...</p></div>
+</div></details>
 
-<h2>Allowlist</h2>
+<details class="settings"><summary>Allowlist</summary><div class="inner">
 <p class="note">Patterns the monitor should never alert on again. A pattern matches when it appears anywhere in the alert's identifying text -- a MAC, an IP:port, a domain.</p>
 <div id="allowlist"><p class="note">Loading...</p></div>
 <p class="note">Add:
@@ -193,10 +239,20 @@ the monitor flags those for you automatically.</p>
 </select>
 <input id="al_pattern" placeholder="e.g. aa:bb:cc:dd:ee:ff or 8080" size="28">
 <button class="btn-sm" onclick="addAllow()">Add</button></p>
+</div></details>
 
-<h2>Email digest</h2>
+<details class="settings"><summary>Email digest</summary><div class="inner">
 <p><button class="btn-sm" onclick="sendDigest()">Send digest now</button> <span class="note" id="digestmsg"></span></p>
 <p class="note">A digest email goes out automatically once a day (set NETMON_DIGEST_HOURS to change it, 0 to disable). It covers Medium alerts and up, skipping anything you dismissed.</p>
+</div></details>
+
+<details class="settings"><summary>Port guide &mdash; what the numbers mean</summary><div class="inner">
+<p class="note">Apps talk on numbered "channels" called ports. Here are the
+ones you'll actually see. Anything not on this list is an uncommon channel --
+the monitor flags those for you automatically.</p>
+%%PORT_GUIDE%%
+</div></details>
+</section>
 
 <p><a href="/pcap">Analyze a pcap file</a> | <a href="/ask">Ask your network</a> | <a href="/logout" id="logoutlink" style="display:none">Logout</a></p>
 
@@ -236,12 +292,18 @@ function drawTrafficGraph(){
   ctx.fillText("peak " + maxV.toFixed(2) + " MB", 4, 10);
 }
 const VERDICTS = {};   // alert id -> AI verdict text; survives the 5s re-render
+let DEV_COUNT = null;  // devices seen, filled by loadDevices(), shown as a KPI
+const SEV_RANK = {Critical: 0, High: 1, Medium: 2, Low: 3};  // triage order
 let ALERT_GROUPS = []; // groups from the latest refresh(), for triageGroup/toggleGroup
 async function refreshInner(){
   const sf = document.getElementById("alertstatusfilter");
   const r = await fetch("/api/stats?status=" + (sf ? sf.value : "all"));
   const d = await r.json();
   document.getElementById("clock").textContent = "updated " + d.now;
+  // Client-side severity filter for the triage queue.
+  const sevf = document.getElementById("alertsevfilter");
+  let alertList = d.alerts;
+  if (sevf && sevf.value !== "all") alertList = alertList.filter(a => a.severity === sevf.value);
 
   const sb = document.getElementById("stalebanner");
   if (d.stale) {
@@ -250,15 +312,25 @@ async function refreshInner(){
   } else {
     sb.style.display = "none";
   }
+  // Nav: live/stale pill + urgent-alert badge.
+  const pill = document.getElementById("status-pill");
+  if (pill) {
+    if (d.stale) { pill.innerHTML = "&#9679; STALE"; pill.className = "pill warn"; }
+    else { pill.innerHTML = "&#9679; LIVE"; pill.className = "pill ok"; }
+  }
+  const urgent = alertList.filter(a => a.status === "new" &&
+    (a.severity === "High" || a.severity === "Critical")).length;
+  const nb = document.getElementById("nav-alert-badge");
+  if (nb) nb.innerHTML = urgent ? '<span class="badge-count">' + urgent + '</span>' : "";
   document.getElementById("logoutlink").style.display = d.auth_required ? "inline" : "none";
   const wb = document.getElementById("wnbanner");
   if (d.whole_network) {
     wb.style.display = "block";
     document.getElementById("pagesub").innerHTML =
-      "This page watches <b>every device on your home network</b> and explains " +
-      "it in plain English. It never reads <i>what</i> anyone sends or receives -- only " +
-      "<i>who</i> each device talks to and <i>how much</i> data moves. " +
-      "<span id=\"clock\"></span>";
+      'This page watches <b>every device on your home network</b> and explains ' +
+      'it in plain English. It never reads <i>what</i> anyone sends or receives -- only ' +
+      '<i>who</i> each device talks to and <i>how much</i> data moves. ' +
+      '<span id="clock"></span>';
     document.getElementById("clock").textContent = "updated " + d.now;
   } else {
     wb.style.display = "none";
@@ -266,14 +338,17 @@ async function refreshInner(){
 
   // Group repeat alerts (same severity + title) into one card so the
   // list stays readable; expanders reveal individual occurrences.
+  // Then Splunk-style urgency sort: Critical first, newest first.
   ALERT_GROUPS = [];
   const gmap = {};
-  d.alerts.forEach(a => {
+  alertList.forEach(a => {
     const k = a.severity + "|" + a.title;
     if (!gmap[k]) { gmap[k] = {sev: a.severity, title: a.title, items: []}; ALERT_GROUPS.push(gmap[k]); }
     gmap[k].items.push(a);
   });
-  document.getElementById("alerts").innerHTML = ALERT_GROUPS.length ? ALERT_GROUPS.map((g, gi) => {
+  ALERT_GROUPS.sort((a, b) => (SEV_RANK[a.sev] ?? 4) - (SEV_RANK[b.sev] ?? 4)
+    || String(b.items[0].ts).localeCompare(String(a.items[0].ts)));
+  document.getElementById("alertslist").innerHTML = ALERT_GROUPS.length ? ALERT_GROUPS.map((g, gi) => {
     const lead = g.items[0], n = g.items.length;
     const vtxt = VERDICTS[lead.id] ? esc(VERDICTS[lead.id]) : "";
     return `<div class="alert ${esc(g.sev)}"><b>[${SEV_WORDS[g.sev]||esc(g.sev)}] ${esc(g.title)}</b>`
@@ -295,13 +370,20 @@ async function refreshInner(){
   }).join("") : '<p class="note">No alerts in the last hour. All quiet.</p>';
 
   const s = d.summary;
-  if (s && !EXPLAINING) document.getElementById("summary").innerHTML =
+  if (s && !EXPLAINING) document.getElementById("summarybody").innerHTML =
     `<p><b>${esc(s.headline)}</b> <span class="note">(${esc(s.origin)}, ${s.window_min} min window)</span></p>`
     + `<p>${esc(s.whats_happening)}</p>`
     + (s.stands_out.length ? "<b>Stands out:</b><ul>" + s.stands_out.map(x=>`<li>${esc(x)}</li>`).join("") + "</ul>" : "")
     + (s.suggested_actions.length ? "<b>Suggested:</b><ul>" + s.suggested_actions.map(x=>`<li>${esc(x)}</li>`).join("") + "</ul>" : "");
 
-  let cards = `<div class="card"><div class="v">${d.throughput_mbps.toFixed(2)}</div><div class="l">MB per second (last min)</div></div>`;
+  // Row 1: KPI single-values, Splunk-style -- the "so what" goes first.
+  const acNew = (d.alert_counts && d.alert_counts["new"]) || {};
+  const openN = Object.values(acNew).reduce((x, y) => x + y, 0);
+  const critHighN = (acNew.Critical || 0) + (acNew.High || 0);
+  const kpiCls = critHighN ? "kpi-bad" : (openN ? "kpi-warn" : "kpi-ok");
+  let cards = `<div class="card kpi ${kpiCls}"><div class="v">${openN}</div><div class="l">open alerts &middot; ${critHighN} high/critical</div></div>`;
+  cards += `<div class="card"><div class="v">${d.throughput_mbps.toFixed(2)}</div><div class="l">MB per second (last min)</div></div>`;
+  if (DEV_COUNT !== null) cards += `<div class="card"><div class="v">${DEV_COUNT}</div><div class="l">devices seen</div></div>`;
   cards += `<div class="card graphcard"><div class="v"><span id="pktrate">&ndash;</span> MB</div><div class="l">traffic per tick, live &middot; <span id="pktrate2"></span> packets/tick</div><canvas id="pktgraph" width="280" height="72"></canvas></div>`;
   for (const [label, st] of Object.entries(d.connectivity))
     cards += `<div class="card"><div class="v ${st.up?"up":"down"}">${st.up?"UP":"DOWN"}</div><div class="l">${esc(label)}</div></div>`;
@@ -347,7 +429,7 @@ async function refreshInner(){
 async function refresh(){
   try { await refreshInner(); }
   catch(e) {
-    const el = document.getElementById("alerts");
+    const el = document.getElementById("alertslist");
     if (el) el.innerHTML = '<div class="banner-red">Dashboard refresh hit a snag: '
       + esc(String((e && e.message) || e))
       + ' — the monitor keeps recording; this is a display hiccup. Retrying…</div>';
@@ -383,7 +465,7 @@ async function aiVerdict(aid){
 }
 let EXPLAINING = false;
 async function explain(){
-  const sdiv = document.getElementById("summary");
+  const sdiv = document.getElementById("summarybody");
   EXPLAINING = true;
   sdiv.innerHTML = '<p class="note">Writing summary...</p>';
   try {
@@ -406,6 +488,7 @@ async function loadDevices(){
     if (!r.ok) throw new Error("server returned " + r.status);
     const d = await r.json();
   DEV_NAMES = {};
+  DEV_COUNT = d.devices.length;
   d.devices.forEach(v => { DEV_NAMES[v.mac] = v.name; });
   const nprob = d.devices.filter(v => v.on_probation).length;
   document.getElementById("devices").innerHTML =
@@ -478,7 +561,7 @@ async function loadAllowlist(){
   const d = await r.json();
   document.getElementById("allowlist").innerHTML = d.entries.length ?
     `<table><tr><th>Rule</th><th>Pattern</th><th>Note</th><th></th></tr>` +
-    d.entries.map(e=>`<tr><td>${esc(e.kind)}</td><td>${esc(e.pattern)}</td><td class="note">${esc(e.note)}</td><td><button class="btn-sm ghost" onclick="delAllow(${e.id})">Remove</button></td></tr>`).join("") + `</table>`
+    d.entries.map(e=>`<tr><td>${esc(e.kind)}</td><td>${esc(e.pattern)}</td><td>${esc(e.note)}</td><td><button class="btn-sm ghost" onclick="delAllow(${e.id})">Remove</button></td></tr>`).join("") + `</table>`
     : '<p class="note">Allowlist is empty.</p>';
 }
 async function addAllow(){
@@ -505,7 +588,8 @@ async function sendDigest(){
 }
 refresh(); setInterval(refresh, 5000);
 loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist();
-</script></body></html>"""
+</script></body></html>
+"""
 
 
 PCAP_HTML = """<html><head><title>netmon -- analyze pcap</title>
@@ -1008,6 +1092,15 @@ def api_stats():
         device_names = {}
     whole_network = os.environ.get(
         "NETMON_WHOLE_NETWORK", "").strip().lower() in ("1", "true", "yes")
+    try:
+        _cnt = dbm.query(
+            "SELECT status, severity, COUNT(*) FROM alerts WHERE ts > ?"
+            " GROUP BY status, severity", (now - 3600,))
+        alert_counts = {}
+        for _st, _sev, _n in _cnt:
+            alert_counts.setdefault(_st or "new", {})[_sev or "Low"] = _n
+    except Exception:
+        alert_counts = {}
     return jsonify({
         "now": _fmt_ts(now),
         "whole_network": whole_network,
@@ -1018,6 +1111,7 @@ def api_stats():
         "connectivity": conn,
         "summary": dbm.latest_summary(),
         "alerts": alerts,
+        "alert_counts": alert_counts,
         "talkers": talkers,
         "normal_now": {
             "mb": round((n15[0] or 0) / 1e6, 1),
