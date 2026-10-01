@@ -126,6 +126,11 @@ def _connect():
         conn.execute("ALTER TABLE alerts ADD COLUMN status TEXT DEFAULT 'new'")
     if "note" not in cols:
         conn.execute("ALTER TABLE alerts ADD COLUMN note TEXT")
+    # Migrate older databases whose dns_queries lack the querier IP
+    # (needed to attribute DNS anomalies per device in whole-network mode).
+    dns_cols = {r[1] for r in conn.execute("PRAGMA table_info(dns_queries)")}
+    if "src_ip" not in dns_cols:
+        conn.execute("ALTER TABLE dns_queries ADD COLUMN src_ip TEXT")
     conn.commit()
     return conn
 
@@ -204,7 +209,7 @@ def add_alert(kind, severity, title, detail, meaning="", is_normal="",
 
 
 def insert_dns_queries(rows):
-    """rows: list of (ts, name, qtype) tuples for observed DNS lookups.
+    """rows: list of (ts, src_ip, name, qtype) tuples for observed DNS lookups.
 
     qtype may be an int (e.g. 1) or a str; it is stored as text."""
     if not rows:
@@ -212,8 +217,8 @@ def insert_dns_queries(rows):
     with _lock:
         conn = _db()
         conn.executemany(
-            "INSERT INTO dns_queries (ts, name, qtype) VALUES (?,?,?)",
-            [(ts, name, str(qtype)) for ts, name, qtype in rows],
+            "INSERT INTO dns_queries (ts, src_ip, name, qtype) VALUES (?,?,?,?)",
+            [(ts, src_ip, name, str(qtype)) for ts, src_ip, name, qtype in rows],
         )
         conn.commit()
 

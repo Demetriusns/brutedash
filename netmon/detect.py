@@ -27,6 +27,38 @@ import time
 from. import db as dbm
 
 
+def _whole_network():
+    """True when capture is relaying the whole LAN (see capture.py)."""
+    try:
+        from .capture import whole_network_mode
+        return whole_network_mode()
+    except Exception:
+        return False
+
+
+_LOCAL_IPS_CACHE = None
+
+
+def _device_label(ip):
+    """Plain-English label for an alert: 'this computer (ip)' or 'device ip'."""
+    global _LOCAL_IPS_CACHE
+    if _LOCAL_IPS_CACHE is None:
+        try:
+            from .capture import get_local_ips
+            _LOCAL_IPS_CACHE = get_local_ips()
+        except Exception:
+            _LOCAL_IPS_CACHE = set()
+    if ip and ip in _LOCAL_IPS_CACHE:
+        return f"this computer ({ip})"
+    return f"device {ip}" if ip else "a device on your network"
+
+
+def _device_sentence(ip):
+    """_device_label capitalized for the start of a sentence."""
+    label = _device_label(ip)
+    return label[0].upper() + label[1:] if label else label
+
+
 # Ports a normal home machine talks to every day. Anything outbound to a
 # port NOT on this list is worth a second look (not proof of evil -- game
 # servers, dev tools, and VoIP apps all use odd ports).
@@ -143,59 +175,67 @@ def check_traffic_spike(now=None):
     detail = (f"Moved {recent_bytes/1e6:.1f} MB in the last 5 minutes vs a"
               f" baseline of ~{baseline_avg/1e6:.1f} MB/min over the previous"
               " hour.")
+    wn = _whole_network()
     dbm.add_alert(
         "traffic_spike", "Medium",
         "Unusual surge in network traffic", detail,
-        meaning=("This machine suddenly sent or received far more data than"
-                 " usual -- like a water bill jumping 5x in one month."
-                 " Something moved a lot of data in a short time."),
+        meaning=(("Your network suddenly moved far more data than"
+                  " usual -- like a water bill jumping 5x in one month."
+                  " Something moved a lot of data in a short time.")
+                 if wn else
+                 ("This machine suddenly sent or received far more data than"
+                  " usual -- like a water bill jumping 5x in one month."
+                  " Something moved a lot of data in a short time.")),
         is_normal=("This is normal if someone was downloading a large file,"
                    " backing up photos, updating a game, or on a long video"
-                   " call. It is not normal if nobody was using the computer."),
+                   " call. It is not normal if nobody was using the"
+                   + ("network." if wn else "computer.")),
         what_to_do=("Think about what was running in the last few minutes."
-                    " If nothing explains it, open Task Manager (Windows) or"
-                    " Activity Monitor (Mac) and check which app used the"
-                    " network most."),
+                    " If nothing explains it, check the per-device traffic"
+                    " on the dashboard to see which device moved the data."),
         ts=now)
     return detail
 
 
 def check_unusual_ports(now=None):
-    """Flag outbound flows to ports outside the common set."""
+    """Flag outbound flows to ports outside the common set, per device."""
     now = now or time.time()
     rows = dbm.query(
-        "SELECT DISTINCT dst_ip, dst_port, SUM(bytes) FROM flows"
+        "SELECT src_ip, dst_ip, dst_port, SUM(bytes) FROM flows"
         " WHERE ts >? AND direction='outbound' AND proto IN ('TCP','UDP')"
-        " GROUP BY dst_ip, dst_port",
+        " GROUP BY src_ip, dst_ip, dst_port",
         (now - 900,))
     fired = []
-    for dst_ip, dst_port, nbytes in rows:
+    for src_ip, dst_ip, dst_port, nbytes in rows:
         if dst_port in COMMON_PORTS:
             continue
         if dst_port in LAN_ONLY_PORTS and _is_lan_ip(dst_ip):
             continue  # normal Windows chatter inside the home network
-        key = f"{dst_ip}:{dst_port}"
+        key = f"{src_ip}:{dst_ip}:{dst_port}"
         if _suppressed("unusual_port", key):
             continue
         if dbm.recent_alert_kind("unusual_port", key, PORT_COOLDOWN):
             continue
         mb = (nbytes or 0) / 1e6
+        dev = _device_label(src_ip)
+        dev_s = _device_sentence(src_ip)
         dbm.add_alert(
             "unusual_port", "Medium",
             f"Talking on an unusual channel (port {dst_port})",
-            f"Outbound traffic to {dst_ip} on port {dst_port}"
+            f"{dev_s} sent traffic to {dst_ip} on port {dst_port}"
             f" ({mb:.2f} MB in the last 15 min).",
-            meaning=("Your computer talked to the outside world on a channel"
+            meaning=(f"{dev_s} talked to the outside world on a channel"
                      " (called a 'port') that everyday apps don't use. Think"
                      " of ports like TV channels -- most apps use the popular"
                      " ones, and this one used an obscure channel."),
             is_normal=("Often fine: games, work VPNs, video-chat apps, and"
                        " developer tools all use unusual ports. It only"
-                       " matters if you don't recognize the program doing it."),
-            what_to_do=("Match the time to what you were doing. Gaming or on"
-                        " a work call? Expected. Otherwise, search the web"
-                        " for 'port {0}' to see what normally uses it."
-.format(dst_port)),
+                       " matters if you don't recognize the program or"
+                       f" device ({dev}) doing it."),
+            what_to_do=("Match the time to what that device was doing."
+                        " Gaming or on a work call? Expected. Otherwise,"
+                        " search the web for 'port {0}' to see what normally"
+                        " uses it.".format(dst_port)),
             ts=now,
 )
         fired.append(key)
@@ -210,60 +250,66 @@ def check_beaconing(now=None):
     """
     now = now or time.time()
     rows = dbm.query(
-        "SELECT dst_ip, CAST(ts /? AS INTEGER) AS bkt, SUM(bytes)"
+        "SELECT src_ip, dst_ip, CAST(ts /? AS INTEGER) AS bkt, SUM(bytes)"
         " FROM flows WHERE ts >? AND direction='outbound'"
         " AND proto IN ('TCP','UDP')"
-        " GROUP BY dst_ip, bkt",
+        " GROUP BY src_ip, dst_ip, bkt",
         (BEACON_BUCKET, now - BEACON_WINDOW))
-    per_ip = {}
-    for dst_ip, bkt, nbytes in rows:
-        d = per_ip.setdefault(dst_ip, {"buckets": set(), "bytes": 0})
+    per_pair = {}
+    for src_ip, dst_ip, bkt, nbytes in rows:
+        d = per_pair.setdefault((src_ip, dst_ip),
+                                {"buckets": set(), "bytes": 0})
         d["buckets"].add(bkt)
         d["bytes"] += nbytes or 0
     fired = []
-    for dst_ip, d in per_ip.items():
+    for (src_ip, dst_ip), d in per_pair.items():
         buckets = sorted(d["buckets"])
         if len(buckets) < BEACON_MIN_BUCKETS:
             continue
         span_min = (buckets[-1] - buckets[0]) * (BEACON_BUCKET / 60)
         avg_every = span_min / max(len(buckets) - 1, 1)
-        if dbm.recent_alert_kind("beaconing", dst_ip, BEACON_COOLDOWN):
+        key = f"{src_ip}:{dst_ip}"
+        if dbm.recent_alert_kind("beaconing", key, BEACON_COOLDOWN):
             continue
         mb = d["bytes"] / 1e6
+        dev = _device_label(src_ip)
+        dev_s = _device_sentence(src_ip)
         dbm.add_alert(
             "beaconing", "Medium",
-            f"Repeated check-ins with {dst_ip}",
-            (f"Contacted {dst_ip} in {len(buckets)} of the last"
+            f"Repeated check-ins: {dev} with {dst_ip}",
+            (f"{dev_s} contacted {dst_ip} in {len(buckets)} of the last"
              f" {BEACON_WINDOW // 60} minutes -- roughly every"
              f" {avg_every:.0f} minutes ({mb:.2f} MB total)."),
-            meaning=("Your computer contacted the same outside address on a"
+            meaning=(f"{dev_s} contacted the same outside address on a"
                      " steady schedule, like clockwork. Some of this is"
                      " routine -- apps checking for updates or new messages"
                      " -- but malware also 'phones home' this way, so a"
                      " regular heartbeat to an unknown address is worth a"
                      " look."),
-            is_normal=("Normal if the address belongs to a service you use"
-                       " (email, chat, cloud backup, antivirus). Suspicious"
-                       " if you don't recognize the address, especially when"
-                       " each check-in moves only a tiny amount of data."),
+            is_normal=("Normal if the address belongs to a service used on"
+                       f" that device ({dev}) -- email, chat, cloud backup,"
+                       " antivirus. Suspicious if you don't recognize the"
+                       " address, especially when each check-in moves only a"
+                       " tiny amount of data."),
             what_to_do=("Search the web for the address to see who owns it."
-                        " If it's a service you use, you can ignore this. If"
-                        " not, note when it started and consider running an"
-                        " antivirus scan."),
+                        " If it's a service used on that device, you can"
+                        " ignore this. If not, note when it started and"
+                        " consider running an antivirus scan on the device."),
             ts=now,
 )
-        fired.append(dst_ip)
+        fired.append(key)
     return fired
 
 
-def _hourly_bytes_by_ip(now, window=BASELINE_WINDOW):
-    """{external dst_ip: bytes} for outbound TCP/UDP in the last `window`."""
+def _hourly_bytes_by_pair(now, window=BASELINE_WINDOW):
+    """{(src_ip, external dst_ip): bytes} for outbound TCP/UDP in `window`."""
     rows = dbm.query(
-        "SELECT dst_ip, SUM(bytes) FROM flows"
+        "SELECT src_ip, dst_ip, SUM(bytes) FROM flows"
         " WHERE ts >? AND direction='outbound' AND proto IN ('TCP','UDP')"
-        " GROUP BY dst_ip",
+        " GROUP BY src_ip, dst_ip",
         (now - window,))
-    return {ip: (nbytes or 0) for ip, nbytes in rows if _is_external_ip(ip)}
+    return {(s, ip): (nbytes or 0) for s, ip, nbytes in rows
+            if s and _is_external_ip(ip)}
 
 
 def check_baseline_anomalies(now=None):
@@ -280,81 +326,89 @@ def check_baseline_anomalies(now=None):
     leaving the machine.
     """
     now = now or time.time()
-    hourly = _hourly_bytes_by_ip(now)
+    hourly = _hourly_bytes_by_pair(now)
     fired = []
 
-    # 1) first time talking to this outside address
-    for ip in sorted(hourly):
-        nbytes = hourly[ip]
+    # 1) first time this device talked to this outside address
+    for src_ip, ip in sorted(hourly):
+        nbytes = hourly[(src_ip, ip)]
         if nbytes < BASELINE_MIN_BYTES:
             continue
-        if dbm.get_first_seen("ext_ip", ip) is not None:
+        seen_key = f"{src_ip}|{ip}"
+        if dbm.get_first_seen("ext_ip", seen_key) is not None:
             continue
-        dbm.note_first_seen("ext_ip", ip, now)
-        if dbm.recent_alert_kind("new_external_ip", ip, BASELINE_COOLDOWN):
+        dbm.note_first_seen("ext_ip", seen_key, now)
+        if dbm.recent_alert_kind("new_external_ip", seen_key,
+                                  BASELINE_COOLDOWN):
             continue
         mb = nbytes / 1e6
+        dev = _device_label(src_ip)
+        dev_s = _device_sentence(src_ip)
         dbm.add_alert(
             "new_external_ip", "Low",
-            f"First time talking to {ip}",
-            (f"This computer exchanged {mb:.1f} MB with {ip} in the last"
+            f"First time {dev} talked to {ip}",
+            (f"{dev_s} exchanged {mb:.1f} MB with {ip} in the last"
              " hour, and has no record of talking to it before."),
-            meaning=("Your computer started talking to a new address on the"
+            meaning=(f"{dev_s} started talking to a new address on the"
                      " internet -- like getting a letter from a pen pal"
                      " you've never heard of. First contact isn't proof of"
                      " anything bad; new apps, games, and services do this"
                      " all the time."),
-            is_normal=("Normal if you installed, updated, or opened something"
-                       " new recently -- an app, a game, a work tool. Worth"
-                       " a second look if nothing new was installed or"
-                       " opened around that time."),
-            what_to_do=("Think about what you started using in the last day"
-                        " or two. If something matches, you can ignore this."
-                        " If not, search the web for the address to see who"
-                        " owns it."),
+            is_normal=("Normal if something new was installed, updated, or"
+                       f" opened on that device ({dev}) recently -- an app,"
+                       " a game, a work tool. Worth a second look if nothing"
+                       " new was started around that time."),
+            what_to_do=("Think about what started running on that device in"
+                        " the last day or two. If something matches, you can"
+                        " ignore this. If not, search the web for the"
+                        " address to see who owns it."),
             ts=now,
 )
-        fired.append(("new_external_ip", ip))
+        fired.append(("new_external_ip", seen_key))
 
     # 2) known address suddenly moving far more than its own baseline
-    for ip in sorted(hourly):
-        hour_bytes = hourly[ip]
+    for src_ip, ip in sorted(hourly):
+        hour_bytes = hourly[(src_ip, ip)]
         if hour_bytes < VOLUME_MIN_BYTES:
             continue
         base = dbm.query(
             "SELECT COALESCE(SUM(bytes),0) FROM flows"
-            " WHERE ts >? AND direction='outbound' AND dst_ip=?"
-            " AND proto IN ('TCP','UDP')",
-            (now - VOLUME_BASELINE_SECS, ip))[0][0] or 0
+            " WHERE ts >? AND direction='outbound' AND src_ip=?"
+            " AND dst_ip=? AND proto IN ('TCP','UDP')",
+            (now - VOLUME_BASELINE_SECS, src_ip, ip))[0][0] or 0
         baseline_hourly = base / (VOLUME_BASELINE_SECS / 3600)
         if baseline_hourly <= 0:
             continue # zero baseline: covered by the first-seen check above
         if hour_bytes < baseline_hourly * VOLUME_FACTOR:
             continue
-        if dbm.recent_alert_kind("volume_anomaly", ip, VOLUME_COOLDOWN):
+        vol_key = f"{src_ip}|{ip}"
+        if dbm.recent_alert_kind("volume_anomaly", vol_key, VOLUME_COOLDOWN):
             continue
+        dev = _device_label(src_ip)
+        dev_s = _device_sentence(src_ip)
         dbm.add_alert(
             "volume_anomaly", "Medium",
-            f"Unusually heavy traffic with {ip}",
-            (f"Sent {hour_bytes/1e6:.0f} MB to {ip} in the last hour --"
-             f" more than {VOLUME_FACTOR:.0f}x its usual"
+            f"Unusually heavy traffic: {dev} with {ip}",
+            (f"{dev_s} sent {hour_bytes/1e6:.0f} MB to {ip} in the last"
+             f" hour -- more than {VOLUME_FACTOR:.0f}x its usual"
              f" ~{baseline_hourly/1e6:.1f} MB/hour over the past 7 days."),
-            meaning=("One of your regular internet contacts suddenly"
-                     " received far more data than it ever has before --"
-                     " like a faucet that was dripping and is now running"
-                     " full blast. Sometimes that's a big upload or backup;"
-                     " sometimes it's data quietly leaving the machine."),
-            is_normal=("Normal if you were uploading a large file, backing"
-                       " up photos, or syncing a cloud drive to that"
-                       " service. Not normal if nobody was doing anything"
-                       " data-heavy."),
-            what_to_do=("Match the time to what you were doing. If you were"
-                        " uploading or syncing, this is expected. Otherwise,"
-                        " check which app sent the data and consider running"
-                        " an antivirus scan."),
+            meaning=("One of your network's regular internet contacts"
+                     f" suddenly received far more data from {dev} than"
+                     " ever before -- like a faucet that was dripping and"
+                     " is now running full blast. Sometimes that's a big"
+                     " upload or backup; sometimes it's data quietly"
+                     " leaving the device."),
+            is_normal=("Normal if someone was uploading a large file,"
+                       f" backing up photos, or syncing a cloud drive from"
+                       f" that device ({dev}). Not normal if nobody was"
+                       " doing anything data-heavy."),
+            what_to_do=("Match the time to what that device was doing. If"
+                        " someone was uploading or syncing, this is"
+                        " expected. Otherwise, check which app sent the data"
+                        " and consider running an antivirus scan."),
             ts=now,
 )
-        fired.append(("volume_anomaly", ip))
+        fired.append(("volume_anomaly", vol_key))
     return fired
 
 
@@ -369,26 +423,31 @@ def check_dns_anomalies(now=None):
     """
     now = now or time.time()
     rows = dbm.query(
-        "SELECT name, COUNT(*) FROM dns_queries WHERE ts >? GROUP BY name",
+        "SELECT COALESCE(src_ip,'unknown'), name, COUNT(*) FROM dns_queries"
+        " WHERE ts >? GROUP BY COALESCE(src_ip,'unknown'), name",
         (now - DNS_WINDOW,))
-    counts = {name: c for name, c in rows if name}
+    counts = {(s, name): c for s, name, c in rows if name}
     names = dbm.query(
-        "SELECT DISTINCT name FROM dns_queries WHERE ts >?",
+        "SELECT DISTINCT COALESCE(src_ip,'unknown'), name FROM dns_queries"
+        " WHERE ts >?",
         (now - DNS_WINDOW,))
     fired = []
 
-    # (a) lookup burst for a single domain
-    for name in sorted(counts):
-        if counts[name] <= DNS_BURST_COUNT:
+    # (a) lookup burst for a single domain, per device
+    for src_ip, name in sorted(counts):
+        if counts[(src_ip, name)] <= DNS_BURST_COUNT:
             continue
-        if dbm.recent_alert_kind("dns_lookup_burst", name, DNS_COOLDOWN):
+        key = f"{src_ip}|{name}"
+        if dbm.recent_alert_kind("dns_lookup_burst", key, DNS_COOLDOWN):
             continue
+        dev = _device_label(src_ip if src_ip != "unknown" else None)
+        dev_s = _device_sentence(src_ip if src_ip != "unknown" else None)
         dbm.add_alert(
             "dns_lookup_burst", "Medium",
-            f"Lots of lookups for {name}",
-            (f"{name} was looked up {counts[name]} times in the last"
-             " 10 minutes."),
-            meaning=("Your computer asked 'where is this address?' for the"
+            f"Lots of lookups for {name} ({dev})",
+            (f"{dev_s} looked up {name} {counts[(src_ip, name)]} times in"
+             " the last 10 minutes."),
+            meaning=(f"{dev_s} asked 'where is this address?' for the"
                      " same domain hundreds of times in a few minutes --"
                      " like calling directory assistance over and over for"
                      " the same number. Glitchy apps do this, but attackers"
@@ -396,30 +455,34 @@ def check_dns_anomalies(now=None):
             is_normal=("Often just a misconfigured or chatty app retrying"
                        " too fast. Suspicious if the domain looks random or"
                        " you don't recognize it."),
-            what_to_do=("Note which program was running at the time. If you"
-                        " recognize the domain as one of your apps, you can"
-                        " ignore this; if not, search the web for the"
-                        " domain."),
+            what_to_do=("Note which program was running on that device at"
+                        " the time. If you recognize the domain as one of"
+                        " its apps, you can ignore this; if not, search the"
+                        " web for the domain."),
             ts=now,
 )
-        fired.append(("dns_lookup_burst", name))
+        fired.append(("dns_lookup_burst", key))
 
-    # (b) many distinct subdomains under one parent domain
+    # (b) many distinct subdomains under one parent domain, per device
     subs = {}
-    for (name,) in names:
+    for src_ip, name in names:
         if not name:
             continue
-        subs.setdefault(_parent_domain(name), set()).add(name.strip().lower())
-    for parent in sorted(subs):
-        if len(subs[parent]) <= DNS_TUNNEL_SUBDOMAINS:
+        subs.setdefault((src_ip, _parent_domain(name)),
+                        set()).add(name.strip().lower())
+    for (src_ip, parent), qnames in sorted(subs.items()):
+        if len(qnames) <= DNS_TUNNEL_SUBDOMAINS:
             continue
-        if dbm.recent_alert_kind("dns_tunneling", parent, DNS_COOLDOWN):
+        key = f"{src_ip}|{parent}"
+        if dbm.recent_alert_kind("dns_tunneling", key, DNS_COOLDOWN):
             continue
+        dev = _device_label(src_ip if src_ip != "unknown" else None)
+        dev_s = _device_sentence(src_ip if src_ip != "unknown" else None)
         dbm.add_alert(
             "dns_tunneling", "High",
-            f"Possible DNS tunneling via {parent}",
-            (f"{len(subs[parent])} different {parent} addresses were looked"
-             " up in the last 10 minutes."),
+            f"Possible DNS tunneling via {parent} ({dev})",
+            (f"{dev_s} looked up {len(qnames)} different {parent} addresses"
+             " in the last 10 minutes."),
             meaning=("Lots of strange, one-time-looking addresses under the"
                      " same domain were asked about in a hurry. That is the"
                      " classic shape of 'DNS tunneling' -- sneaking data out"
@@ -427,44 +490,49 @@ def check_dns_anomalies(now=None):
                      " like passing notes written on the back of postcards."),
             is_normal=("Rarely normal on a home network. Some antivirus and"
                        " corporate security tools do rapid lookups like"
-                       " this, but a home computer usually has no reason to"
+                       " this, but a home device usually has no reason to"
                        " ask about dozens of odd subdomains at once."),
-            what_to_do=("Note the time and which program was running. If you"
-                        " don't recognize the domain, search the web for it,"
-                        " and consider disconnecting and running an"
-                        " antivirus scan."),
+            what_to_do=("Note the time and which program was running on"
+                        f" that device ({dev}). If you don't recognize the"
+                        " domain, search the web for it, and consider"
+                        " disconnecting the device and running an antivirus"
+                        " scan."),
             ts=now,
 )
-        fired.append(("dns_tunneling", parent))
+        fired.append(("dns_tunneling", key))
 
-    # (c) first-seen domain suddenly popular
-    for name in sorted(counts):
-        if counts[name] <= DNS_NEW_DOMAIN_COUNT:
+    # (c) first-seen domain suddenly popular, per device
+    for src_ip, name in sorted(counts):
+        if counts[(src_ip, name)] <= DNS_NEW_DOMAIN_COUNT:
             continue
-        if dbm.get_first_seen("domain", name) is not None:
+        seen_key = f"{src_ip}|{name}"
+        if dbm.get_first_seen("domain", seen_key) is not None:
             continue
-        dbm.note_first_seen("domain", name, now)
-        if dbm.recent_alert_kind("new_busy_domain", name, DNS_COOLDOWN):
+        dbm.note_first_seen("domain", seen_key, now)
+        if dbm.recent_alert_kind("new_busy_domain", seen_key, DNS_COOLDOWN):
             continue
+        dev = _device_label(src_ip if src_ip != "unknown" else None)
+        dev_s = _device_sentence(src_ip if src_ip != "unknown" else None)
         dbm.add_alert(
             "new_busy_domain", "Low",
-            f"New domain getting lots of lookups: {name}",
-            (f"{name} was looked up {counts[name]} times in the last"
-             " 10 minutes, and this is the first time it has shown up."),
-            meaning=("A domain your computer never asked about before"
+            f"New domain getting lots of lookups: {name} ({dev})",
+            (f"{dev_s} looked up {name} {counts[(src_ip, name)]} times in"
+             " the last 10 minutes, and this is the first time it has"
+             " shown up for that device."),
+            meaning=(f"A domain {dev} never asked about before"
                      " suddenly got asked about dozens of times -- like a"
                      " stranger's name popping up all over your call log."
                      " New apps do this when they phone home for the first"
                      " time."),
-            is_normal=("Normal if you just installed or opened something new"
-                       " that talks to this domain. Worth a look if nothing"
-                       " new was started."),
-            what_to_do=("Think about what you opened recently. If something"
-                        " matches the domain, ignore this. If not, search"
-                        " the web for the domain name."),
+            is_normal=("Normal if something new was just installed or"
+                       f" opened on that device ({dev}). Worth a look if"
+                       " nothing new was started."),
+            what_to_do=("Think about what was opened on that device"
+                        " recently. If something matches the domain, ignore"
+                        " this. If not, search the web for the domain name."),
             ts=now,
 )
-        fired.append(("new_busy_domain", name))
+        fired.append(("new_busy_domain", seen_key))
     return fired
 
 

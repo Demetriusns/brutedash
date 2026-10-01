@@ -221,20 +221,42 @@ def rule_based_summary(evidence, window_min=WINDOW_MIN, now=None):
         "SELECT severity, title, meaning, what_to_do FROM alerts"
         " WHERE ts > ? ORDER BY ts DESC", (since,))
 
+    wn = os.environ.get(
+        "NETMON_WHOLE_NETWORK", "").strip().lower() in ("1", "true", "yes")
+    subject = "your network" if wn else "this computer"
+    dev_breakdown = ""
+    if wn:
+        devs = dbm.query(
+            "SELECT src_ip, COALESCE(SUM(bytes),0) FROM flows WHERE ts > ?"
+            " AND direction='outbound' GROUP BY src_ip"
+            " ORDER BY SUM(bytes) DESC LIMIT 3", (since,))
+        devs = [(ip, b) for ip, b in devs if ip]
+        if devs:
+            try:
+                names = dbm.ip_name_map()
+            except Exception:
+                names = {}
+            parts = [f"{names.get(ip, ip)} ({b/1e6:.1f} MB)"
+                     for ip, b in devs]
+            dev_breakdown = (f" {len(devs)} device(s) were active."
+                             f" Busiest: {'; '.join(parts)}.")
+
     if ports:
         uses = "; ".join(
             f"{b/1e6:.1f} MB on port {p} ({_port_words(p)})"
             for p, b in ports)
         happening = (
-            f"In the last {window_min} minutes this computer moved"
+            f"In the last {window_min} minutes {subject} moved"
             f" {total_mb:.1f} MB across {total_packets} packets, talking to"
-            f" {ext} different outside addresses. The breakdown: {uses}.")
+            f" {ext} different outside addresses.{dev_breakdown}"
+            f" The breakdown: {uses}.")
     elif total_packets:
         happening = (
-            f"In the last {window_min} minutes this computer moved"
-            f" {total_mb:.1f} MB across {total_packets} packets.")
+            f"In the last {window_min} minutes {subject} moved"
+            f" {total_mb:.1f} MB across {total_packets} packets."
+            f"{dev_breakdown}")
     else:
-        happening = (f"In the last {window_min} minutes this computer sent"
+        happening = (f"In the last {window_min} minutes {subject} sent"
                      " almost no traffic -- it was quiet.")
 
     if alerts:

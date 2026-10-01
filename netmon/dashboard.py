@@ -63,6 +63,7 @@ a{color:#58a6ff} button{background:#238636;color:#fff;border:0;padding:.5em 1.2e
 .badge.warn{background:#3d2e12;color:#f0b429;border:1px solid #8a6d1f}
 input,textarea,select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;font-family:monospace;padding:.4em;border-radius:4px}
 .banner-red{background:#3d1113;border:1px solid #f85149;color:#f85149;padding:.8em 1em;border-radius:6px;margin-bottom:1em}
+.banner-blue{background:#0d2137;border:1px solid #58a6ff;color:#58a6ff;padding:.8em 1em;border-radius:6px;margin-bottom:1em}
 pre{background:#161b22;padding:1em;white-space:pre-wrap;border:1px solid #30363d;border-radius:6px}
 .alert{border-left:4px solid #d29922;background:#161b22;padding:.6em 1em;margin:.5em 0}
 .alert.High{border-color:#f85149} .alert.Critical{border-color:#f85149;background:#2a1215}
@@ -103,7 +104,8 @@ INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <style>""" + STYLE + """</style></head><body>
 <h1>netmon &mdash; your network, explained</h1>
 <div id="stalebanner" class="banner-red" style="display:none"></div>
-<p class="note">This page watches your computer's network traffic and explains
+<div id="wnbanner" class="banner-blue" style="display:none">📡 Whole-network view: this computer is relaying the LAN, so every device's traffic is monitored.</div>
+<p class="note" id="pagesub">This page watches your computer's network traffic and explains
 it in plain English. It never reads <i>what</i> you send or receive -- only
 <i>who</i> your computer talks to and <i>how much</i> data moves.
 <span id="clock"></span></p>
@@ -238,6 +240,18 @@ async function refresh(){
     sb.style.display = "none";
   }
   document.getElementById("logoutlink").style.display = d.auth_required ? "inline" : "none";
+  const wb = document.getElementById("wnbanner");
+  if (d.whole_network) {
+    wb.style.display = "block";
+    document.getElementById("pagesub").innerHTML =
+      "This page watches <b>every device on your home network</b> and explains " +
+      "it in plain English. It never reads <i>what</i> anyone sends or receives -- only " +
+      "<i>who</i> each device talks to and <i>how much</i> data moves. " +
+      "<span id=\"clock\"></span>";
+    document.getElementById("clock").textContent = "updated " + d.now;
+  } else {
+    wb.style.display = "none";
+  }
 
   // Group repeat alerts (same severity + title) into one card so the
   // list stays readable; expanders reveal individual occurrences.
@@ -372,12 +386,13 @@ async function loadDevices(){
   document.getElementById("devices").innerHTML =
     (nprob ? `<p><span class="badge warn">🟡 ${nprob} device${nprob>1?"s":""} on 24h probation watch</span></p>` : "") +
     (d.devices.length ?
-    `<table><tr><th>Device</th><th>Status</th><th>Last address</th><th>First seen</th><th>Last seen</th><th></th></tr>` +
+    `<table><tr><th>Device</th><th>Status</th><th>Last address</th><th>Traffic (15 min)</th><th>First seen</th><th>Last seen</th><th></th></tr>` +
     d.devices.map(v=>{
       const status = v.on_probation
         ? `<span class="badge warn">🟡 Probation · trusted in ${v.probation_left_h}h</span>`
         : `<span class="badge ok">✅ Trusted</span>`;
-      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
+      const traf = `<span class="note">↑${v.up_mb} ↓${v.down_mb} MB</span>`;
+      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
     }).join("") + `</table>`
     : '<p class="note">No devices seen yet.</p>');
 }
@@ -620,13 +635,22 @@ def alert_dismiss(aid):
 def api_devices():
     now = time.time()
     devs = dbm.known_devices(limit=100)
+    up = {ip: (b or 0) for ip, b in dbm.query(
+        "SELECT src_ip, SUM(bytes) FROM flows WHERE ts > ?"
+        " AND direction='outbound' GROUP BY src_ip", (now - 900,)) if ip}
+    down = {ip: (b or 0) for ip, b in dbm.query(
+        "SELECT dst_ip, SUM(bytes) FROM flows WHERE ts > ?"
+        " AND direction='inbound' GROUP BY dst_ip", (now - 900,)) if ip}
     out = []
     for d in devs:
         left_h = ((d["probation_ends"] - now) / 3600
                   if d["on_probation"] else 0)
+        lip = d["last_ip"]
         out.append({
             "mac": d["mac"], "name": d["name"],
-            "last_ip": d["last_ip"],
+            "last_ip": lip,
+            "up_mb": round(up.get(lip, 0) / 1e6, 2),
+            "down_mb": round(down.get(lip, 0) / 1e6, 2),
             "last_seen": _fmt_ts(d["last_seen"]) if d["last_seen"] else "",
             "first_seen": _fmt_ts(d["first_seen"])
             if d["first_seen"] else "",
@@ -948,8 +972,11 @@ def api_stats():
         device_names = dbm.ip_name_map()
     except Exception:
         device_names = {}
+    whole_network = os.environ.get(
+        "NETMON_WHOLE_NETWORK", "").strip().lower() in ("1", "true", "yes")
     return jsonify({
         "now": _fmt_ts(now),
+        "whole_network": whole_network,
         "throughput_mbps": mbps,
         "packets_1m": one_min[1],
         "packets_total": total_pkts or 0,

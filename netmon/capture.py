@@ -12,7 +12,16 @@ FLUSH_INTERVAL seconds as (packets, bytes) counts per bucket.
 Port-scan tracking happens inline: every TCP SYN is fed to a ScanTracker
 with a sliding window; a burst of SYNs to many distinct ports from one
 source raises an alert.
+
+Whole-network mode: set NETMON_WHOLE_NETWORK=1 when this machine is
+relaying the LAN (e.g. via bettercap ARP spoofing, see netmon/wifimon.cap).
+Traffic between other LAN devices and the internet is then classified as
+outbound/inbound instead of local, so every detection rule analyzes every
+device -- not just this machine. NETMON_LAN_SUBNET overrides the detected
+LAN subnet (default: the /24 containing this machine's primary IP).
 """
+import ipaddress
+import os
 import socket
 import threading
 import time
@@ -49,6 +58,35 @@ def get_local_ips():
     except Exception:
         pass
     return ips
+
+
+def whole_network_mode():
+    """True when this machine relays the LAN (see module docstring)."""
+    return os.environ.get("NETMON_WHOLE_NETWORK", "").strip().lower() in (
+        "1", "true", "yes")
+
+
+def lan_subnet():
+    """The LAN subnet for whole-network mode.
+
+    NETMON_LAN_SUBNET overrides; otherwise the /24 containing this
+    machine's primary IPv4 address. Returns an ipaddress network or
+    None if it cannot be determined.
+    """
+    override = os.environ.get("NETMON_LAN_SUBNET", "").strip()
+    if override:
+        try:
+            return ipaddress.ip_network(override, strict=False)
+        except ValueError:
+            pass
+    for ip in get_local_ips():
+        if "." not in ip or ip.startswith("127."):
+            continue
+        try:
+            return ipaddress.ip_network(f"{ip}/24", strict=False)
+        except ValueError:
+            continue
+    return None
 
 
 class ScanTracker:
@@ -104,8 +142,10 @@ class FlowAggregator:
 
     def __init__(self):
         self.local_ips = get_local_ips()
+        self.whole_network = whole_network_mode()
+        self.lan = lan_subnet() if self.whole_network else None
         self.flows = {}  # (src, dst, sport, dport, proto) -> [pkts, bytes, first, last]
-        self.dns_buf = []   # [(ts, name, qtype)]
+        self.dns_buf = []   # [(ts, src_ip, name, qtype)]
         self.arp_buf = []   # [(ts, ip, mac)]
         self._mac_seen = set()  # (ip, mac) already buffered this run
         self.lock = threading.Lock()
@@ -119,10 +159,22 @@ class FlowAggregator:
             return "outbound"
         if dst in self.local_ips:
             return "inbound"
+        if self.whole_network and self.lan is not None:
+            # Another LAN device talking to the internet: treat it like
+            # this machine's own traffic so every rule analyzes it.
+            try:
+                s_in = ipaddress.ip_address(src) in self.lan
+                d_in = ipaddress.ip_address(dst) in self.lan
+            except ValueError:
+                s_in = d_in = False
+            if s_in and not d_in:
+                return "outbound"
+            if d_in and not s_in:
+                return "inbound"
         return "local"
 
-    def _dns_query_row(self, pkt, ts):
-        """Return a (ts, name, qtype) row for a DNS question, or None.
+    def _dns_query_row(self, pkt, ts, src):
+        """Return a (ts, src_ip, name, qtype) row for a DNS question, or None.
 
         Only called for UDP packets headed to port 53, so ordinary
         traffic never pays for DNS parsing.
@@ -143,7 +195,7 @@ class FlowAggregator:
                 qtype = int(qtype)
             except (TypeError, ValueError):
                 qtype = str(qtype)
-            return (ts, name, qtype)
+            return (ts, src, name, qtype)
         except Exception:
             return None
 
@@ -164,7 +216,7 @@ class FlowAggregator:
             u = pkt[UDP]
             proto, sport, dport = "UDP", u.sport, u.dport
             if u.dport == 53 and pkt.haslayer(DNS):
-                dns_row = self._dns_query_row(pkt, ts)
+                dns_row = self._dns_query_row(pkt, ts, src)
         try:
             size = len(pkt)
         except Exception:
