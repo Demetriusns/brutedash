@@ -22,6 +22,7 @@ instead of spamming.
 
 
 import ipaddress
+import ipaddress
 import time
 
 from. import db as dbm
@@ -41,6 +42,19 @@ COMMON_PORTS = {
     3478, 3479, 3480, # STUN / video calls
     5222, 5223, # chat push notifications
 }
+
+# Windows NetBIOS chatter (network name lookups, file/printer sharing
+# discovery). Completely normal *inside* a home network -- only worth
+# flagging when it leaves the LAN, which never happens legitimately.
+LAN_ONLY_PORTS = {137, 138, 139}
+
+
+def _is_lan_ip(ip):
+    """True for LAN-local addresses (never the public internet)."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
 
 
 SPIKE_WINDOW = 300 # compare the last 5 minutes...
@@ -159,6 +173,8 @@ def check_unusual_ports(now=None):
     for dst_ip, dst_port, nbytes in rows:
         if dst_port in COMMON_PORTS:
             continue
+        if dst_port in LAN_ONLY_PORTS and _is_lan_ip(dst_ip):
+            continue  # normal Windows chatter inside the home network
         key = f"{dst_ip}:{dst_port}"
         if _suppressed("unusual_port", key):
             continue
