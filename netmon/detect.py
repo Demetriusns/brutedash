@@ -184,7 +184,9 @@ def check_unusual_ports(now=None):
             ts=now,
 )
         fired.append(key)
-    return fireddef check_beaconing(now=None):
+    return fired
+
+def check_beaconing(now=None):
     """Flag steady, clockwork check-ins with one outside address.
 
     Legit apps do this (email checking for new mail), but malware also
