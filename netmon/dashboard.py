@@ -101,8 +101,8 @@ section.block>h2{font-size:1.25em;margin-bottom:.4em}
 details.settings{border:1px solid #30363d;border-radius:8px;margin:.6em 0;background:#0d1117}
 details.settings>summary{cursor:pointer;padding:.75em 1em;font-weight:bold;color:#c9d1d9;list-style:none}
 details.settings>summary::-webkit-details-marker{display:none}
-details.settings>summary::before{content:"\25B8  ";color:#58a6ff}
-details.settings[open]>summary::before{content:"\25BE  "}
+details.settings>summary::before{content:"\\25B8  ";color:#58a6ff}
+details.settings[open]>summary::before{content:"\\25BE  "}
 details.settings .inner{padding:0 1.2em 1.2em}
 footer.site{margin-top:2.5em;padding-top:1em;border-top:1px solid #30363d}
 """
@@ -139,7 +139,7 @@ def logout():
 
 INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>" + STYLE + "</style></head><body>
+<style>""" + STYLE + """</style></head><body>
 <nav class="top">
 <a class="brand" href="/">netmon</a>
 <span id="status-pill" class="pill ok">&#9679; LIVE</span>
