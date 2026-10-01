@@ -3,74 +3,82 @@
 The live port-scan check runs inline in capture.py (it needs per-packet
 SYN timing). Everything here runs on a schedule against the flows table:
 
-  traffic_spike        this 5-minute bucket moved far more bytes than usual
-  unusual_port         outbound traffic to a port outside the common set
-  beaconing            steady, clockwork check-ins with one outside address
-  new_external_ip      first-ever contact with an outside address (baseline)
-  volume_anomaly       known address suddenly moving far more than its baseline
-  dns_lookup_burst     one domain looked up hundreds of times in minutes
-  dns_tunneling        many distinct subdomains of one parent (tunnel shape)
-  new_busy_domain      never-seen domain suddenly looked up a lot
-  new_device           a never-seen device joined the local network
-  arp_spoof            ARP lies: one MAC claiming many IPs, or an IP changing MAC
+  traffic_spike this 5-minute bucket moved far more bytes than usual
+  unusual_port outbound traffic to a port outside the common set
+  beaconing steady, clockwork check-ins with one outside address
+  new_external_ip first-ever contact with an outside address (baseline)
+  volume_anomaly known address suddenly moving far more than its baseline
+  dns_lookup_burst one domain looked up hundreds of times in minutes
+  dns_tunneling many distinct subdomains of one parent (tunnel shape)
+  new_busy_domain never-seen domain suddenly looked up a lot
+  new_device a never-seen device joined the local network
+  arp_spoof ARP lies: one MAC claiming many IPs, or an IP changing MAC
 
 Every alert carries plain-English fields (meaning / is_this_normal /
 what_to_do) so a non-technical reader can understand it. Each rule
 checks the alerts table first so it only fires once per cooldown window
 instead of spamming.
 """
+
+
 import ipaddress
 import time
 
-from . import db as dbm
+from. import db as dbm
+
 
 # Ports a normal home machine talks to every day. Anything outbound to a
 # port NOT on this list is worth a second look (not proof of evil -- game
 # servers, dev tools, and VoIP apps all use odd ports).
 COMMON_PORTS = {
-    80, 443,                      # web
-    53,                           # DNS
-    123,                          # NTP time sync
-    22,                           # SSH
-    25, 465, 587, 993, 995,       # email
-    67, 68,                       # DHCP
-    1900, 5353,                   # local discovery (SSDP/mDNS)
-    3478, 3479, 3480,             # STUN / video calls
-    5222, 5223,                   # chat push notifications
+    80, 443, # web
+    53, # DNS
+    123, # NTP time sync
+    22, # SSH
+    25, 465, 587, 993, 995, # email
+    67, 68, # DHCP
+    1900, 5353, # local discovery (SSDP/mDNS)
+    3478, 3479, 3480, # STUN / video calls
+    5222, 5223, # chat push notifications
 }
 
-SPIKE_WINDOW = 300        # compare the last 5 minutes ...
-SPIKE_BASELINE = 3600     # ... against the previous hour
-SPIKE_FACTOR = 5.0        # alert when recent >= 5x the hourly average
+
+SPIKE_WINDOW = 300 # compare the last 5 minutes...
+SPIKE_BASELINE = 3600 #... against the previous hour
+SPIKE_FACTOR = 5.0 # alert when recent >= 5x the hourly average
 SPIKE_COOLDOWN = 1800
 PORT_COOLDOWN = 3600
 
-BEACON_WINDOW = 3600      # look back one hour, in 5-minute buckets
+
+BEACON_WINDOW = 3600 # look back one hour, in 5-minute buckets
 BEACON_BUCKET = 300
-BEACON_MIN_BUCKETS = 8    # active in at least 8 of 12 buckets
+BEACON_MIN_BUCKETS = 8 # active in at least 8 of 12 buckets
 BEACON_COOLDOWN = 3600
 
+
 # --- baseline / first-contact checks (phase 3) -------------------------
-BASELINE_WINDOW = 3600            # per-IP traffic over the last hour ...
-BASELINE_MIN_BYTES = 1_000_000    # ... >1 MB to a never-seen IP is worth noting
-BASELINE_COOLDOWN = 86400         # 24h per IP
-VOLUME_MIN_BYTES = 50_000_000     # volume alerts need >50 MB absolute ...
-VOLUME_FACTOR = 10.0              # ... AND >10x the 7-day hourly baseline
+BASELINE_WINDOW = 3600 # per-IP traffic over the last hour...
+BASELINE_MIN_BYTES = 1_000_000 #... >1 MB to a never-seen IP is worth noting
+BASELINE_COOLDOWN = 86400 # 24h per IP
+VOLUME_MIN_BYTES = 50_000_000 # volume alerts need >50 MB absolute...
+VOLUME_FACTOR = 10.0 #... AND >10x the 7-day hourly baseline
 VOLUME_BASELINE_SECS = 7 * 86400
 VOLUME_COOLDOWN = 86400
 
+
 # --- DNS checks (phase 3) ----------------------------------------------
-DNS_WINDOW = 600              # last 10 minutes of lookups
-DNS_BURST_COUNT = 200         # >200 lookups of one domain: burst/misconfig
-DNS_TUNNEL_SUBDOMAINS = 25    # >25 distinct subdomains of one parent: tunnel shape
-DNS_NEW_DOMAIN_COUNT = 50     # never-seen domain with >50 lookups
+DNS_WINDOW = 600 # last 10 minutes of lookups
+DNS_BURST_COUNT = 200 # >200 lookups of one domain: burst/misconfig
+DNS_TUNNEL_SUBDOMAINS = 25 # >25 distinct subdomains of one parent: tunnel shape
+DNS_NEW_DOMAIN_COUNT = 50 # never-seen domain with >50 lookups
 DNS_COOLDOWN = 3600
 
+
 # --- LAN device checks (phase 3) ---------------------------------------
-ARP_NEW_WINDOW = 3600         # ARP sightings over the last hour
-ARP_NEW_COOLDOWN = 86400      # 24h per MAC
-ARP_SPOOF_WINDOW = 1800       # ARP sightings over the last 30 minutes
-ARP_SPOOF_MIN_IPS = 3         # one MAC claiming 3+ IPs looks like spoofing
+ARP_NEW_WINDOW = 3600 # ARP sightings over the last hour
+ARP_NEW_COOLDOWN = 86400 # 24h per MAC
+ARP_SPOOF_WINDOW = 1800 # ARP sightings over the last 30 minutes
+ARP_SPOOF_MIN_IPS = 3 # one MAC claiming 3+ IPs looks like spoofing
 ARP_SPOOF_COOLDOWN = 3600
 
 
@@ -81,6 +89,15 @@ def _is_external_ip(ip):
     try:
         return ipaddress.ip_address(ip).is_global
     except ValueError:
+        return False
+
+
+def _suppressed(kind, text):
+    """Allowlist check: True if the user whitelisted this pattern, in
+    which case the rule stays silent. Never breaks detection."""
+    try:
+        return dbm.is_allowlisted(kind, text)
+    except Exception:
         return False
 
 
@@ -96,11 +113,11 @@ def check_traffic_spike(now=None):
     """Alert when recent throughput dwarfs the recent baseline."""
     now = now or time.time()
     recent = dbm.query(
-        "SELECT COALESCE(SUM(bytes),0) FROM flows WHERE ts > ?",
+        "SELECT COALESCE(SUM(bytes),0) FROM flows WHERE ts >?",
         (now - SPIKE_WINDOW,))
     base = dbm.query(
         "SELECT COALESCE(SUM(bytes),0) FROM flows"
-        " WHERE ts > ? AND ts <= ?",
+        " WHERE ts >? AND ts <=?",
         (now - SPIKE_WINDOW - SPIKE_BASELINE, now - SPIKE_WINDOW))
     recent_bytes = recent[0][0] or 0
     base_bytes = base[0][0] or 0
@@ -135,7 +152,7 @@ def check_unusual_ports(now=None):
     now = now or time.time()
     rows = dbm.query(
         "SELECT DISTINCT dst_ip, dst_port, SUM(bytes) FROM flows"
-        " WHERE ts > ? AND direction='outbound' AND proto IN ('TCP','UDP')"
+        " WHERE ts >? AND direction='outbound' AND proto IN ('TCP','UDP')"
         " GROUP BY dst_ip, dst_port",
         (now - 900,))
     fired = []
@@ -143,6 +160,8 @@ def check_unusual_ports(now=None):
         if dst_port in COMMON_PORTS:
             continue
         key = f"{dst_ip}:{dst_port}"
+        if _suppressed("unusual_port", key):
+            continue
         if dbm.recent_alert_kind("unusual_port", key, PORT_COOLDOWN):
             continue
         mb = (nbytes or 0) / 1e6
@@ -161,14 +180,11 @@ def check_unusual_ports(now=None):
             what_to_do=("Match the time to what you were doing. Gaming or on"
                         " a work call? Expected. Otherwise, search the web"
                         " for 'port {0}' to see what normally uses it."
-                        .format(dst_port)),
+.format(dst_port)),
             ts=now,
-        )
+)
         fired.append(key)
-    return fired
-
-
-def check_beaconing(now=None):
+    return fireddef check_beaconing(now=None):
     """Flag steady, clockwork check-ins with one outside address.
 
     Legit apps do this (email checking for new mail), but malware also
@@ -177,8 +193,8 @@ def check_beaconing(now=None):
     """
     now = now or time.time()
     rows = dbm.query(
-        "SELECT dst_ip, CAST(ts / ? AS INTEGER) AS bkt, SUM(bytes)"
-        " FROM flows WHERE ts > ? AND direction='outbound'"
+        "SELECT dst_ip, CAST(ts /? AS INTEGER) AS bkt, SUM(bytes)"
+        " FROM flows WHERE ts >? AND direction='outbound'"
         " AND proto IN ('TCP','UDP')"
         " GROUP BY dst_ip, bkt",
         (BEACON_BUCKET, now - BEACON_WINDOW))
@@ -218,7 +234,7 @@ def check_beaconing(now=None):
                         " not, note when it started and consider running an"
                         " antivirus scan."),
             ts=now,
-        )
+)
         fired.append(dst_ip)
     return fired
 
@@ -227,7 +243,7 @@ def _hourly_bytes_by_ip(now, window=BASELINE_WINDOW):
     """{external dst_ip: bytes} for outbound TCP/UDP in the last `window`."""
     rows = dbm.query(
         "SELECT dst_ip, SUM(bytes) FROM flows"
-        " WHERE ts > ? AND direction='outbound' AND proto IN ('TCP','UDP')"
+        " WHERE ts >? AND direction='outbound' AND proto IN ('TCP','UDP')"
         " GROUP BY dst_ip",
         (now - window,))
     return {ip: (nbytes or 0) for ip, nbytes in rows if _is_external_ip(ip)}
@@ -280,7 +296,7 @@ def check_baseline_anomalies(now=None):
                         " If not, search the web for the address to see who"
                         " owns it."),
             ts=now,
-        )
+)
         fired.append(("new_external_ip", ip))
 
     # 2) known address suddenly moving far more than its own baseline
@@ -290,12 +306,12 @@ def check_baseline_anomalies(now=None):
             continue
         base = dbm.query(
             "SELECT COALESCE(SUM(bytes),0) FROM flows"
-            " WHERE ts > ? AND direction='outbound' AND dst_ip=?"
+            " WHERE ts >? AND direction='outbound' AND dst_ip=?"
             " AND proto IN ('TCP','UDP')",
             (now - VOLUME_BASELINE_SECS, ip))[0][0] or 0
         baseline_hourly = base / (VOLUME_BASELINE_SECS / 3600)
         if baseline_hourly <= 0:
-            continue  # zero baseline: covered by the first-seen check above
+            continue # zero baseline: covered by the first-seen check above
         if hour_bytes < baseline_hourly * VOLUME_FACTOR:
             continue
         if dbm.recent_alert_kind("volume_anomaly", ip, VOLUME_COOLDOWN):
@@ -320,7 +336,7 @@ def check_baseline_anomalies(now=None):
                         " check which app sent the data and consider running"
                         " an antivirus scan."),
             ts=now,
-        )
+)
         fired.append(("volume_anomaly", ip))
     return fired
 
@@ -336,11 +352,11 @@ def check_dns_anomalies(now=None):
     """
     now = now or time.time()
     rows = dbm.query(
-        "SELECT name, COUNT(*) FROM dns_queries WHERE ts > ? GROUP BY name",
+        "SELECT name, COUNT(*) FROM dns_queries WHERE ts >? GROUP BY name",
         (now - DNS_WINDOW,))
     counts = {name: c for name, c in rows if name}
     names = dbm.query(
-        "SELECT DISTINCT name FROM dns_queries WHERE ts > ?",
+        "SELECT DISTINCT name FROM dns_queries WHERE ts >?",
         (now - DNS_WINDOW,))
     fired = []
 
@@ -368,7 +384,7 @@ def check_dns_anomalies(now=None):
                         " ignore this; if not, search the web for the"
                         " domain."),
             ts=now,
-        )
+)
         fired.append(("dns_lookup_burst", name))
 
     # (b) many distinct subdomains under one parent domain
@@ -401,7 +417,7 @@ def check_dns_anomalies(now=None):
                         " and consider disconnecting and running an"
                         " antivirus scan."),
             ts=now,
-        )
+)
         fired.append(("dns_tunneling", parent))
 
     # (c) first-seen domain suddenly popular
@@ -430,7 +446,7 @@ def check_dns_anomalies(now=None):
                         " matches the domain, ignore this. If not, search"
                         " the web for the domain name."),
             ts=now,
-        )
+)
         fired.append(("new_busy_domain", name))
     return fired
 
@@ -444,7 +460,7 @@ def check_new_devices(now=None):
     """
     now = now or time.time()
     rows = dbm.query(
-        "SELECT mac, ip, MAX(ts) FROM arp_observations WHERE ts > ?"
+        "SELECT mac, ip, MAX(ts) FROM arp_observations WHERE ts >?"
         " GROUP BY mac",
         (now - ARP_NEW_WINDOW,))
     fired = []
@@ -454,6 +470,8 @@ def check_new_devices(now=None):
         if dbm.get_first_seen("mac", mac) is not None:
             continue
         dbm.note_first_seen("mac", mac, now)
+        if _suppressed("new_device", mac):
+            continue
         if dbm.recent_alert_kind("new_device", mac, ARP_NEW_COOLDOWN):
             continue
         detail = (f"A new device ({mac}) appeared on the local network"
@@ -474,7 +492,7 @@ def check_new_devices(now=None):
                         " the connected-devices list. If every device there"
                         " is yours, you can ignore this."),
             ts=now,
-        )
+)
         fired.append(mac)
     return fired
 
@@ -482,7 +500,7 @@ def check_new_devices(now=None):
 def check_arp_spoof(now=None):
     """Flag ARP weirdness over the last 30 minutes.
 
-    ARP is how devices on your local network introduce themselves ("I'm
+    ARP is how devices on your local network introduce themselves ("I'm"
     192.168.1.5, talk to this hardware address"). An attacker can lie in
     these introductions to intercept other devices' traffic -- called ARP
     spoofing. Two shapes worth flagging: one hardware address claiming 3+
@@ -495,14 +513,14 @@ def check_arp_spoof(now=None):
     # shape 1: one MAC claiming several different IPs
     rows = dbm.query(
         "SELECT mac, COUNT(DISTINCT ip) FROM arp_observations"
-        " WHERE ts > ? GROUP BY mac HAVING COUNT(DISTINCT ip) >= ?",
+        " WHERE ts >? GROUP BY mac HAVING COUNT(DISTINCT ip) >=?",
         (now - ARP_SPOOF_WINDOW, ARP_SPOOF_MIN_IPS))
     for mac, nip in rows:
         if not mac:
             continue
         ips = sorted(r[0] for r in dbm.query(
             "SELECT DISTINCT ip FROM arp_observations"
-            " WHERE ts > ? AND mac = ?", (now - ARP_SPOOF_WINDOW, mac))
+            " WHERE ts >? AND mac =?", (now - ARP_SPOOF_WINDOW, mac))
             if r[0])
         if dbm.recent_alert_kind("arp_spoof", mac, ARP_SPOOF_COOLDOWN):
             continue
@@ -526,19 +544,19 @@ def check_arp_spoof(now=None):
                         " disconnect it from the network and change your"
                         " Wi-Fi password."),
             ts=now,
-        )
+)
         fired.append(("mac", mac))
 
     # shape 2: an IP answering with a different MAC than first recorded
     rows = dbm.query(
-        "SELECT DISTINCT ip FROM arp_observations WHERE ts > ?",
+        "SELECT DISTINCT ip FROM arp_observations WHERE ts >?",
         (now - ARP_SPOOF_WINDOW,))
     for (ip,) in rows:
         if not ip:
             continue
         macs = sorted(r[0] for r in dbm.query(
             "SELECT DISTINCT mac FROM arp_observations"
-            " WHERE ts > ? AND ip = ?", (now - ARP_SPOOF_WINDOW, ip))
+            " WHERE ts >? AND ip =?", (now - ARP_SPOOF_WINDOW, ip))
             if r[0])
         if not macs:
             continue
@@ -570,7 +588,7 @@ def check_arp_spoof(now=None):
                         " unfamiliar, disconnect it and change your Wi-Fi"
                         " password."),
             ts=now,
-        )
+)
         fired.append(("ip", ip))
     return fired
 
