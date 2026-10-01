@@ -66,6 +66,10 @@ def main():
     ap.add_argument("--weekly-report", action="store_true",
                     help="print the weekly report and exit (no capture)")
     ap.add_argument("--port", type=int, default=5001)
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="interface to bind the dashboard to;"
+                    " use 0.0.0.0 to reach it from other devices on your LAN"
+                    " (set NETMON_PASSWORD first)")
     args = ap.parse_args()
 
     if args.weekly_report:
@@ -120,9 +124,9 @@ def main():
     except Exception:
         pass
 
-    print(f"Dashboard: http://127.0.0.1:{args.port}")
+    print(f"Dashboard: http://{args.host}:{args.port}")
     try:
-        dash.app.run(host="127.0.0.1", port=args.port,
+        dash.app.run(host=args.host, port=args.port,
                      use_reloader=False)
     except KeyboardInterrupt:
         pass
