@@ -135,6 +135,51 @@ the monitor flags those for you automatically.</p>
 <h2>Internet drops</h2>
 <div id="outages"><p class="note">Loading...</p></div>
 
+<h2>Your devices</h2>
+<p class="note">Name your devices so alerts read like English instead of hardware addresses.</p>
+<div id="devices"><p class="note">Loading...</p></div>
+
+<h2>Quiet hours</h2>
+<p class="note">Email alerts stay silent during these windows. The dashboard still records everything.</p>
+<div id="quiethours"><p class="note">Loading...</p></div>
+<p class="note">Add a window:
+<input id="qh_start" type="time" value="22:00"> to <input id="qh_end" type="time" value="07:00">
+<label><input type="checkbox" class="qh_day" value="0" checked>Mon</label>
+<label><input type="checkbox" class="qh_day" value="1" checked>Tue</label>
+<label><input type="checkbox" class="qh_day" value="2" checked>Wed</label>
+<label><input type="checkbox" class="qh_day" value="3" checked>Thu</label>
+<label><input type="checkbox" class="qh_day" value="4" checked>Fri</label>
+<label><input type="checkbox" class="qh_day" value="5" checked>Sat</label>
+<label><input type="checkbox" class="qh_day" value="6" checked>Sun</label>
+<button class="btn-sm" onclick="addQuietWindow()">Add</button></p>
+
+<h2>Rule health</h2>
+<p class="note">How often each detection rule earns its keep, judged by your own Ack / Dismiss history over the last 30 days.</p>
+<div id="rulehealth"><p class="note">Loading...</p></div>
+
+<h2>Allowlist</h2>
+<p class="note">Patterns the monitor should never alert on again. A pattern matches when it appears anywhere in the alert's identifying text -- a MAC, an IP:port, a domain.</p>
+<div id="allowlist"><p class="note">Loading...</p></div>
+<p class="note">Add:
+<select id="al_kind">
+<option value="new_device">new_device</option>
+<option value="unusual_port">unusual_port</option>
+<option value="traffic_spike">traffic_spike</option>
+<option value="beaconing">beaconing</option>
+<option value="new_external_ip">new_external_ip</option>
+<option value="volume_anomaly">volume_anomaly</option>
+<option value="dns_lookup_burst">dns_lookup_burst</option>
+<option value="dns_tunneling">dns_tunneling</option>
+<option value="new_busy_domain">new_busy_domain</option>
+<option value="arp_spoof">arp_spoof</option>
+</select>
+<input id="al_pattern" placeholder="e.g. aa:bb:cc:dd:ee:ff or 8080" size="28">
+<button class="btn-sm" onclick="addAllow()">Add</button></p>
+
+<h2>Email digest</h2>
+<p><button class="btn-sm" onclick="sendDigest()">Send digest now</button> <span class="note" id="digestmsg"></span></p>
+<p class="note">A digest email goes out automatically once a day (set NETMON_DIGEST_HOURS to change it, 0 to disable). It covers Medium alerts and up, skipping anything you dismissed.</p>
+
 <p><a href="/pcap">Analyze a pcap file</a> | <a href="/ask">Ask your network</a> | <a href="/logout" id="logoutlink" style="display:none">Logout</a></p>
 
 <script>
@@ -187,9 +232,11 @@ async function refresh(){
     + `</p>`;
 
   const maxB = Math.max(1, ...d.talkers.map(t=>t.bytes));
+  const dnames = d.device_names || {};
+  const named = ip => dnames[ip] ? `<br><span class="note">${esc(dnames[ip])}</span>` : "";
   document.getElementById("talkers").innerHTML = d.talkers.length ?
     `<table><tr><th>From</th><th>To</th><th>Channel (port)</th><th>MB</th><th></th></tr>` +
-    d.talkers.map(t=>`<tr><td>${esc(t.src)}</td><td>${esc(t.dst)}</td><td>${t.port} (${esc(t.port_words)})</td><td>${(t.bytes/1e6).toFixed(2)}</td><td><div class="bar"><div style="width:${(100*t.bytes/maxB).toFixed(0)}%"></div></div></td></tr>`).join("") + `</table>`
+    d.talkers.map(t=>`<tr><td>${esc(t.src)}${named(t.src)}</td><td>${esc(t.dst)}${named(t.dst)}</td><td>${t.port} (${esc(t.port_words)})</td><td>${(t.bytes/1e6).toFixed(2)}</td><td><div class="bar"><div style="width:${(100*t.bytes/maxB).toFixed(0)}%"></div></div></td></tr>`).join("") + `</table>`
     : '<p class="note">No conversations yet.</p>';
 
   document.getElementById("outages").innerHTML =
@@ -218,7 +265,96 @@ async function explain(){
   await fetch("/explain", {method:"POST"});
   refresh();
 }
+let DEV_NAMES = {};
+async function loadDevices(){
+  const r = await fetch("/api/devices");
+  const d = await r.json();
+  DEV_NAMES = {};
+  d.devices.forEach(v => { DEV_NAMES[v.mac] = v.name; });
+  document.getElementById("devices").innerHTML = d.devices.length ?
+    `<table><tr><th>Device</th><th>Last address</th><th>Last seen</th><th></th></tr>` +
+    d.devices.map(v=>`<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${esc(v.last_ip)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`).join("") + `</table>`
+    : '<p class="note">No devices seen yet.</p>';
+}
+async function renameDevice(mac){
+  const name = prompt("Name for " + mac + " (blank clears it):", DEV_NAMES[mac] || "");
+  if (name === null) return;
+  await fetch("/api/devices/name", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({mac: mac, name: name})});
+  loadDevices();
+}
+const DAY_NAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+let QH_CACHE = [];
+async function loadQuietHours(){
+  const r = await fetch("/api/settings/quiet_hours");
+  const d = await r.json();
+  QH_CACHE = d.windows || [];
+  document.getElementById("quiethours").innerHTML = QH_CACHE.length ?
+    `<table><tr><th>Days</th><th>From</th><th>To</th><th>Applies to</th><th></th></tr>` +
+    QH_CACHE.map((x,i)=>`<tr><td>${x.days.map(dd=>DAY_NAMES[dd]).join(", ")}</td><td>${esc(x.start)}</td><td>${esc(x.end)}</td><td>${esc((x.kinds||["all"]).join(", "))}</td><td><button class="btn-sm ghost" onclick="delQuietWindow(${i})">Remove</button></td></tr>`).join("") + `</table>`
+    : '<p class="note">No quiet hours set -- emails send any time.</p>';
+}
+async function saveQuietWindows(wins){
+  await fetch("/api/settings/quiet_hours", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({windows: wins})});
+  loadQuietHours();
+}
+async function addQuietWindow(){
+  const days = [...document.querySelectorAll(".qh_day:checked")].map(c=>parseInt(c.value,10));
+  saveQuietWindows(QH_CACHE.concat([{days: days,
+    start: document.getElementById("qh_start").value || "22:00",
+    end: document.getElementById("qh_end").value || "07:00",
+    kinds: ["all"]}]));
+}
+async function delQuietWindow(i){
+  saveQuietWindows(QH_CACHE.filter((_,j)=>j!==i));
+}
+async function loadRuleHealth(){
+  const r = await fetch("/api/rule_health");
+  const d = await r.json();
+  let html = d.suggestions.map(s=>
+    `<p class="note" style="border-left:4px solid #d29922;padding:.4em .8em;background:#161b22">${esc(s.text)}</p>`
+  ).join("");
+  html += d.rules.length ?
+    `<table><tr><th>Rule</th><th>Alerts (30d)</th><th>Acknowledged</th><th>Dismissed</th><th>Precision</th></tr>` +
+    d.rules.map(x=>`<tr><td>${esc(x.kind)}</td><td>${x.total}</td><td>${x.acknowledged}</td><td>${x.dismissed}</td><td>${x.precision===null?"--":(x.precision*100).toFixed(0)+"%"}</td></tr>`).join("") + `</table>`
+    : '<p class="note">No alert history yet -- rule health appears once alerts have been acknowledged or dismissed.</p>';
+  document.getElementById("rulehealth").innerHTML = html;
+}
+async function loadAllowlist(){
+  const r = await fetch("/api/allowlist");
+  const d = await r.json();
+  document.getElementById("allowlist").innerHTML = d.entries.length ?
+    `<table><tr><th>Rule</th><th>Pattern</th><th>Note</th><th></th></tr>` +
+    d.entries.map(e=>`<tr><td>${esc(e.kind)}</td><td>${esc(e.pattern)}</td><td class="note">${esc(e.note)}</td><td><button class="btn-sm ghost" onclick="delAllow(${e.id})">Remove</button></td></tr>`).join("") + `</table>`
+    : '<p class="note">Allowlist is empty.</p>';
+}
+async function addAllow(){
+  const kind = document.getElementById("al_kind").value;
+  const pattern = document.getElementById("al_pattern").value.trim();
+  if (!pattern) return;
+  await fetch("/api/allowlist", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({kind: kind, pattern: pattern})});
+  document.getElementById("al_pattern").value = "";
+  loadAllowlist();
+}
+async function delAllow(id){
+  await fetch("/api/allowlist/" + id, {method:"DELETE"});
+  loadAllowlist();
+}
+async function sendDigest(){
+  const el = document.getElementById("digestmsg");
+  el.textContent = "sending...";
+  const r = await fetch("/api/digest/send", {method:"POST"});
+  const d = await r.json();
+  el.textContent = d.sent ? "Digest sent."
+    : "Nothing to send (no recent alerts, or email isn't configured).";
+}
 refresh(); setInterval(refresh, 5000);
+loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist();
 </script></body></html>"""
 
 
@@ -369,6 +505,167 @@ def alert_dismiss(aid):
         return jsonify({"ok": False,
                         "error": "triage is not available yet"}), 500
     return jsonify({"ok": True})
+
+
+# --- devices: friendly names ---------------------------------------------
+# Name your hardware ("PS5", "Mom's iPhone") so alerts and tables read
+# like English instead of MAC addresses.
+
+@app.route("/api/devices")
+def api_devices():
+    devs = dbm.known_devices(limit=100)
+    return jsonify({"devices": [
+        {"mac": d["mac"], "name": d["name"], "last_ip": d["last_ip"],
+         "last_seen": _fmt_ts(d["last_seen"]) if d["last_seen"] else ""}
+        for d in devs]})
+
+
+@app.route("/api/devices/name", methods=["POST"])
+def api_device_name():
+    data = request.get_json(silent=True) or {}
+    mac = (data.get("mac") or "").strip().lower()
+    name = (data.get("name") or "").strip()
+    if not mac:
+        return jsonify({"ok": False, "error": "mac is required"}), 400
+    if len(name) > 40:
+        return jsonify({"ok": False, "error": "name is too long"}), 400
+    try:
+        dbm.set_device_name(mac, name)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True})
+
+
+# --- quiet hours ------------------------------------------------------------
+# Email silencing windows. The dashboard still records everything; only
+# the emails go quiet.
+
+_VALID_DAYS = set(range(7))
+
+
+def _clean_windows(windows):
+    """Validate/normalize quiet-hour windows; raises ValueError."""
+    import re
+    if not isinstance(windows, list):
+        raise ValueError("windows must be a list")
+    clean = []
+    for w in windows:
+        if not isinstance(w, dict):
+            raise ValueError("each window must be an object")
+        start = (w.get("start") or "").strip()
+        end = (w.get("end") or "").strip()
+        if not re.fullmatch(r"\d{2}:\d{2}", start) or \
+                not re.fullmatch(r"\d{2}:\d{2}", end):
+            raise ValueError("start/end must look like HH:MM")
+        days = w.get("days")
+        if days is None:
+            days = list(range(7))
+        try:
+            days = [int(d) for d in days]
+        except (TypeError, ValueError):
+            raise ValueError("days must be numbers 0-6 (Mon-Sun)")
+        if any(d not in _VALID_DAYS for d in days):
+            raise ValueError("days must be 0-6 (Mon-Sun)")
+        kinds = w.get("kinds") or ["all"]
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        kinds = [str(k).strip() for k in kinds if str(k).strip()]
+        if not kinds:
+            kinds = ["all"]
+        clean.append({"days": sorted(set(days)), "start": start,
+                      "end": end, "kinds": kinds})
+    return clean
+
+
+@app.route("/api/settings/quiet_hours")
+def api_quiet_hours_get():
+    return jsonify({"windows": dbm.get_quiet_hours()})
+
+
+@app.route("/api/settings/quiet_hours", methods=["POST"])
+def api_quiet_hours_set():
+    data = request.get_json(silent=True) or {}
+    try:
+        windows = _clean_windows(data.get("windows", []))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    dbm.set_quiet_hours(windows)
+    return jsonify({"ok": True, "windows": windows})
+
+
+# --- rule health + allowlist -------------------------------------------------
+# How often each detection rule earns its keep, judged by your own
+# Ack/Dismiss history -- plus the allowlist that silences patterns
+# you've decided are fine.
+
+@app.route("/api/rule_health")
+def api_rule_health():
+    now = time.time()
+    rows = dbm.query(
+        "SELECT kind, status, COUNT(*) FROM alerts WHERE ts > ?"
+        " GROUP BY kind, status", (now - 30 * 86400,))
+    by_kind = {}
+    for kind, status, n in rows:
+        d = by_kind.setdefault(
+            kind or "unknown",
+            {"kind": kind or "unknown", "total": 0,
+             "acknowledged": 0, "dismissed": 0})
+        d["total"] += n
+        if status == "acknowledged":
+            d["acknowledged"] += n
+        elif status == "dismissed":
+            d["dismissed"] += n
+    rules = []
+    suggestions = []
+    for kind in sorted(by_kind):
+        d = by_kind[kind]
+        judged = d["acknowledged"] + d["dismissed"]
+        d["precision"] = (round(d["acknowledged"] / judged, 2)
+                          if judged else None)
+        rules.append(d)
+        if d["dismissed"] >= 5 and d["precision"] is not None \
+                and d["precision"] < 0.4:
+            suggestions.append({
+                "kind": kind,
+                "text": (f"You've dismissed '{kind}' {d['dismissed']} times"
+                         f" in the last 30 days. Add a pattern to the"
+                         f" allowlist below so it stops bothering you?"),
+            })
+    return jsonify({"rules": rules, "suggestions": suggestions})
+
+
+@app.route("/api/allowlist")
+def api_allowlist_get():
+    return jsonify({"entries": dbm.list_allowlist()})
+
+
+@app.route("/api/allowlist", methods=["POST"])
+def api_allowlist_add():
+    data = request.get_json(silent=True) or {}
+    kind = (data.get("kind") or "").strip()
+    pattern = (data.get("pattern") or "").strip()
+    note = (data.get("note") or "").strip()
+    if not kind or not pattern:
+        return jsonify({"ok": False,
+                        "error": "kind and pattern are required"}), 400
+    try:
+        eid = dbm.add_allowlist(kind, pattern, note)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "id": eid})
+
+
+@app.route("/api/allowlist/<int:eid>", methods=["DELETE"])
+def api_allowlist_del(eid):
+    dbm.remove_allowlist(eid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/digest/send", methods=["POST"])
+def api_digest_send():
+    from . import notify as notifm
+    sent = notifm.send_digest()
+    return jsonify({"ok": True, "sent": bool(sent)})
 
 
 # --- AI: ask-your-network + AI triage verdict -------------------------------
@@ -529,6 +826,10 @@ def api_stats():
     n15 = dbm.query(
         "SELECT COALESCE(SUM(bytes),0), COUNT(*) FROM flows WHERE ts > ?",
         (now - 900,))[0]
+    try:
+        device_names = dbm.ip_name_map()
+    except Exception:
+        device_names = {}
     return jsonify({
         "now": _fmt_ts(now),
         "throughput_mbps": mbps,
@@ -548,6 +849,7 @@ def api_stats():
         "stale": stale,
         "last_flow_ts": last_flow_ts,
         "auth_required": bool(NETMON_PASSWORD),
+        "device_names": device_names,
     })
 
 
