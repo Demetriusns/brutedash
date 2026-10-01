@@ -4,6 +4,44 @@ A mini SOC analyst: parses SSH auth logs and writes technical briefs — now
 with **netmon**, a Phase 2 home-network traffic monitor with a live
 dashboard and plain-English explanations anyone can read.
 
+## Project phases — what was added when
+
+- **Phase 1 — SSH log triage (the original brutedash).** Parses SSH auth
+  logs into SQLite and writes per-IP technical briefs through a Flask app.
+  Added along the way: structured JSON briefs with schema validation, an
+  IP-intel enricher (24h cache) so briefs name the attacker, and brief
+  quality evals (3/3 passing). The LLM writes the brief when
+  `OPENAI_API_KEY` is set; otherwise a rule-based template does.
+- **Phase 2 — netmon, the live network monitor.** Watches this machine's
+  interface, rolls packets into flow metadata (never packet contents),
+  and serves a dashboard written for non-technical readers: plain-English
+  alerts (what happened / is it normal / what to do), a 15-minute
+  plain-English summary, and a live "right now" readout. Detection rules:
+  port scans, unusual outbound ports, traffic spikes, beaconing. A
+  watchdog pings the gateway and logs every outage. Also analyzes pcap
+  files uploaded on the `/pcap` page.
+- **Phase 3 — depth (shipped 2026-09-30).** The monitor learns the network
+  over time: email alerts on High/Critical, dashboard password login,
+  alert triage (Ack / Dismiss / AI verdict), weekly plain-English
+  reports, run-as-a-service setup with a `/api/health` endpoint,
+  first-seen baselining (flags an address suddenly moving 10x its norm),
+  DNS anomaly detection, new-device + ARP-spoof detection, and AI
+  tie-ins (triage verdicts, "ask your network" Q&A).
+- **Phase 3.5 batch 1 — operator comfort.** Friendly device names,
+  allowlist tables with suppression in detection, quiet hours, an
+  alert-fatigue circuit breaker, and scheduled digest emails — all with
+  dashboard UI.
+- **Phase 3.5 batch 2 — probation + live graph (2026-10-01).** New
+  devices sit on a 24-hour probation watch (flags >500 MB/hr, 100+
+  outside addresses, or unusual ports); the static packet card became a
+  live MB-per-tick traffic graph; `/api/stats` ships cumulative totals;
+  `--host` flag so other devices on the LAN can reach the dashboard.
+- **Phase 4 — planned.** Raspberry Pi sensor by the router for
+  whole-network visibility (one machine only sees its own traffic today).
+- **Phase 5 — planned.** Cloud console: per-site sensors report summaries
+  and alerts over TLS to a central multi-tenant dashboard; raw packets
+  never leave the site.
+
 ## netmon — live network monitor (Phase 2)
 
 Watches **this machine's** network interface, rolls packets into flow
@@ -162,7 +200,7 @@ sudo -E python -m netmon.run --port 8080   # -E keeps the exports for sudo
 
 On a switched home network, one machine only sees **its own** traffic.
 Whole-home visibility (every device) is Phase 4: a Raspberry Pi sensor by
-the router. Phase 1 monitors the machine it runs on.
+the router. Phases 2–3.5 monitor the machine the software runs on.
 
 ---
 
