@@ -63,6 +63,39 @@ def _validate(data):
                 [x.strip() for x in v]) for k, v in data.items()}
 
 
+_SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+MAX_STANDS_OUT = 5
+
+
+def compact_stands_out(alerts):
+    """Turn raw alert rows into a short, readable bullet list.
+
+    alerts: iterable of (severity, title, meaning, what_to_do).
+    Repeats collapse into one bullet ("Possible ARP spoofing (x4)"),
+    ordered worst-first, capped at MAX_STANDS_OUT. The full detail
+already lives in the alerts section, so bullets stay one line.
+    """
+    groups = {}
+    for sev, title, _meaning, _action in alerts:
+        key = (sev, title)
+        g = groups.get(key)
+        if g is None:
+            groups[key] = {"sev": sev, "title": title, "n": 1}
+        else:
+            g["n"] += 1
+    ordered = sorted(groups.values(),
+                     key=lambda g: (_SEV_RANK.get(g["sev"], 9), -g["n"]))
+    bullets = [
+        f"{g['title']} (x{g['n']})" if g["n"] > 1 else g["title"]
+        for g in ordered[:MAX_STANDS_OUT]
+    ]
+    if len(ordered) > MAX_STANDS_OUT:
+        bullets.append(
+            f"...and {len(ordered) - MAX_STANDS_OUT} more --"
+            " see the alerts above for detail.")
+    return bullets
+
+
 def build_evidence(window_min=WINDOW_MIN, now=None):
     """Compact text summary of the last `window_min` minutes."""
     now = now or time.time()
@@ -205,9 +238,7 @@ def rule_based_summary(evidence, window_min=WINDOW_MIN, now=None):
         n = len(alerts)
         headline = (f"{n} thing{'s' if n > 1 else ''} worth a look"
                     f" in the last {window_min} minutes")
-        stands_out = [
-            f"{title}: {meaning}" if meaning else title
-            for _, title, meaning, _ in alerts]
+        stands_out = compact_stands_out(alerts)
         actions = [a for _, _, _, a in alerts if a]
         # de-dupe while keeping order
         seen, suggested = set(), []
@@ -223,7 +254,7 @@ def rule_based_summary(evidence, window_min=WINDOW_MIN, now=None):
 
     return {
         "headline": headline,
-        "whats_happening": happening,
+        "whats_happening": whats_happening,
         "stands_out": stands_out,
         "suggested_actions": suggested,
     }
@@ -252,6 +283,11 @@ def summarize(window_min=WINDOW_MIN, save=True, now=None):
                 candidate = _validate(
                     json.loads(resp.choices[0].message.content))
                 if candidate:
+                    # keep the AI's list as tight as the rule-based one
+                    if len(candidate["stands_out"]) > MAX_STANDS_OUT:
+                        candidate["stands_out"] = (
+                            candidate["stands_out"][:MAX_STANDS_OUT]
+                            + ["...and more -- see the alerts above."])
                     summary, origin = candidate, "llm"
             except Exception:
                 pass
