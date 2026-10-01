@@ -11,7 +11,10 @@ Config comes from the environment (see docstring of _smtp_config):
   NETMON_ALERT_TO (recipient), NETMON_SMTP_FROM (optional, default USER).
 
 Only High/Critical alerts send mail, at most one email per alert kind
-per hour. Nothing here ever raises: any failure means False.
+per hour. Quiet hours (set on the dashboard) silence email without
+dropping the alerts themselves. When one alert kind fires 5+ times in an
+hour, a single "still happening" escalation replaces the stream.
+Nothing here ever raises: any failure means False.
 """
 import os
 import smtplib
@@ -21,6 +24,9 @@ from datetime import datetime
 from email.message import EmailMessage
 
 COOLDOWN_SECONDS = 3600  # one email per alert kind per hour
+
+CIRCUIT_WINDOW = 3600    # look back one hour ...
+CIRCUIT_THRESHOLD = 5    # ... 5+ alerts of one kind -> escalate, then hush
 
 _SENDABLE = {"High", "Critical"}
 
@@ -177,12 +183,232 @@ def _maybe_send_alert(alert):
     if not cfg["host"] or not cfg["to"]:
         return False  # not configured: silent no-op
     kind = (alert.get("kind") or "general").strip() or "general"
+    if in_quiet_hours(kind):
+        return False  # silenced by the user's quiet hours; alert kept
     if not _cooldown_allows(kind):
         return False
-    subject, body = build_email(alert)
+    trip = _circuit_state(kind)
+    if trip is True:
+        return False  # already escalated this hour: stay quiet
+    if trip == "escalate":
+        subject, body = build_escalation_email(alert, kind)
+    else:
+        subject, body = build_email(alert)
     try:
         _send(cfg, subject, body)
     except Exception:
         return False
     record_cooldown(kind)
+    return True
+
+
+# --- quiet hours ---------------------------------------------------------
+# Windows come from db.get_quiet_hours(): each is {days:[0..6 Mon..Sun],
+# start:"HH:MM", end:"HH:MM", kinds:["all"] or [alert kinds]}. Overnight
+# windows (end <= start) wrap past midnight.
+
+def _parse_hhmm(s):
+    try:
+        h, m = str(s).split(":")
+        h, m = int(h), int(m)
+        if 0 <= h < 24 and 0 <= m < 60:
+            return h * 60 + m
+    except Exception:
+        pass
+    return None
+
+
+def in_quiet_hours(kind, now=None):
+    """True if `now` falls inside a user quiet window for this alert kind."""
+    now = now if now is not None else time.time()
+    try:
+        from . import db as dbm
+        windows = dbm.get_quiet_hours()
+    except Exception:
+        return False
+    if not windows:
+        return False
+    lt = datetime.fromtimestamp(now)
+    day = lt.weekday()  # 0 = Monday
+    mins = lt.hour * 60 + lt.minute
+    kind = (kind or "").strip()
+    for w in windows:
+        if not isinstance(w, dict):
+            continue
+        days = w.get("days")
+        if days and day not in days:
+            continue
+        start = _parse_hhmm(w.get("start") or "")
+        end = _parse_hhmm(w.get("end") or "")
+        if start is None or end is None:
+            continue
+        kinds = w.get("kinds") or ["all"]
+        if "all" not in kinds and kind not in kinds:
+            continue
+        if start < end:
+            inside = start <= mins < end
+        else:  # wraps midnight
+            inside = mins >= start or mins < end
+        if inside:
+            return True
+    return False
+
+
+# --- fatigue circuit breaker ----------------------------------------------
+# When one alert kind fires CIRCUIT_THRESHOLD+ times in CIRCUIT_WINDOW,
+# email one "still happening" escalation and then go quiet for the hour
+# instead of sending (or worse, wanting to send) a stream of mails.
+
+def _circuit_state(kind):
+    """None = normal; "escalate" = tripped, send one summary mail;
+    True = already escalated this hour, stay quiet."""
+    now = time.time()
+    try:
+        from . import db as dbm
+        rows = dbm.query(
+            "SELECT COUNT(*) FROM alerts WHERE kind=? AND ts > ?",
+            (kind, now - CIRCUIT_WINDOW))
+        count = rows[0][0] if rows else 0
+    except Exception:
+        return None
+    if count < CIRCUIT_THRESHOLD:
+        return None
+    key = f"circuit_escalated_{kind}"
+    last = _meta_get(key)
+    try:
+        escalated = last is not None and \
+            now - float(last) < CIRCUIT_WINDOW
+    except (TypeError, ValueError):
+        escalated = False
+    if escalated:
+        return True
+    _meta_set(key, str(now))
+    return "escalate"
+
+
+def build_escalation_email(alert, kind):
+    """One rolled-up email for a chatty alert kind. Never raises."""
+    try:
+        from . import db as dbm
+        rows = dbm.query(
+            "SELECT COUNT(*) FROM alerts WHERE kind=? AND ts > ?",
+            (kind, time.time() - CIRCUIT_WINDOW))
+        count = rows[0][0] if rows else 0
+    except Exception:
+        count = 0
+    title = (alert.get("title") or "Something on your network").strip()
+    detail = (alert.get("detail") or "").strip()
+    subject = f"[netmon] Still happening: {title} (x{count} in the last hour)"
+    lines = [
+        "Hi -- this keeps firing, so I'm rolling it into one email"
+        " instead of sending you a stream of them.",
+        "",
+        f"What: {title} -- fired {count} times in the last hour.",
+    ]
+    if detail:
+        lines += ["", f"Latest detail: {detail}"]
+    lines += [
+        "",
+        "If you recognize this as normal, dismiss one of these alerts on"
+        " the dashboard -- the monitor learns from your dismissals and"
+        " will quiet down.",
+    ]
+    return subject, "\n".join(lines)
+
+
+# --- daily digest ----------------------------------------------------------
+# One rolled-up email of recent Medium+ alerts, for people who don't want
+# per-alert mail at all. Scheduled by run.py; also sendable on demand
+# from the dashboard.
+
+def build_digest(rows):
+    """rows: (kind, severity, title, detail, ts). Returns (subject, body).
+    Never raises."""
+    try:
+        return _build_digest(rows)
+    except Exception:
+        return "[netmon] Network digest", \
+            "Your network monitor has updates -- open the dashboard."
+
+
+def _build_digest(rows):
+    groups = {}
+    order = []
+    for kind, severity, title, detail, ts in rows:
+        g = groups.get(kind)
+        if g is None:
+            g = groups[kind] = {"severity": severity or "", "title": title,
+                                "count": 0, "latest": None}
+            order.append(kind)
+        g["count"] += 1
+        if g["latest"] is None:
+            g["latest"] = (detail, ts)
+    n = len(rows)
+    subject = (f"[netmon] Digest: {n} alert{'s' if n != 1 else ''}"
+               f" across {len(groups)} kind{'s' if len(groups) != 1 else ''}")
+    lines = ["Hi -- here's what your network monitor noticed recently.", ""]
+    for kind in order:
+        g = groups[kind]
+        head = f"- [{g['severity']}] {g['title']}"
+        if g["count"] > 1:
+            head += f" (x{g['count']})"
+        lines.append(head)
+        detail, ts = g["latest"]
+        if detail:
+            lines.append(f"  Latest: {detail}")
+        try:
+            when = datetime.fromtimestamp(float(ts)).strftime(
+                "%b %d at %I:%M %p")
+            lines.append(f"  When: {when}")
+        except (TypeError, ValueError):
+            pass
+    lines += ["",
+              "Open your dashboard to acknowledge or dismiss these --",
+              " the monitor learns from what you dismiss."]
+    return subject, "\n".join(lines)
+
+
+def send_digest():
+    """Email one digest of recent Medium+ alerts. True on send.
+
+    Never raises. Advances the digest watermark only after a successful
+    send, so a failure retries on the next run."""
+    try:
+        return _send_digest()
+    except Exception as exc:  # never raise; one stderr line at most
+        try:
+            print(f"netmon notify: failed to send digest: {exc}",
+                  file=sys.stderr)
+        except Exception:
+            pass
+        return False
+
+
+def _send_digest():
+    cfg = _smtp_config()
+    if not cfg["host"] or not cfg["to"]:
+        return False  # not configured: silent no-op
+    try:
+        from . import db as dbm
+    except Exception:
+        return False
+    last = _meta_get("last_digest_ts")
+    try:
+        since = float(last) if last else time.time() - 24 * 3600
+    except (TypeError, ValueError):
+        since = time.time() - 24 * 3600
+    rows = dbm.query(
+        "SELECT kind, severity, title, detail, ts FROM alerts"
+        " WHERE ts > ? AND severity IN ('High','Critical','Medium')"
+        " AND (status IS NULL OR status != 'dismissed')"
+        " ORDER BY ts DESC",
+        (since,))
+    if not rows:
+        return False
+    subject, body = build_digest(rows)
+    try:
+        _send(cfg, subject, body)
+    except Exception:
+        return False
+    _meta_set("last_digest_ts", str(time.time()))
     return True
