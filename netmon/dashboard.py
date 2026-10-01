@@ -20,6 +20,17 @@ from . import db as dbm
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("NETMON_SECRET_KEY", "") or os.urandom(24)
+
+
+@app.after_request
+def _no_cache_html(resp):
+    # The dashboard is a live view. A stale cached copy after an update
+    # looks exactly like a broken monitor, so browsers must never cache
+    # the HTML pages (API JSON is fetched fresh every 5s anyway).
+    if resp.content_type.startswith("text/html"):
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+    return resp
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Optional password gate for the dashboard. When NETMON_PASSWORD is set,
@@ -226,7 +237,7 @@ function drawTrafficGraph(){
 }
 const VERDICTS = {};   // alert id -> AI verdict text; survives the 5s re-render
 let ALERT_GROUPS = []; // groups from the latest refresh(), for triageGroup/toggleGroup
-async function refresh(){
+async function refreshInner(){
   const sf = document.getElementById("alertstatusfilter");
   const r = await fetch("/api/stats?status=" + (sf ? sf.value : "all"));
   const d = await r.json();
@@ -330,6 +341,18 @@ async function refresh(){
       d.outages.map(o=>`<tr><td>${esc(o.target)}</td><td>${o.gap_s.toFixed(0)}s</td><td class="note">${esc(o.when)}</td></tr>`).join("") + `</table>`
       : '<p class="note">No drops recorded. Your connection has been steady.</p>');
 }
+// refresh() wraps refreshInner so a failed update can never leave the
+// whole page stuck on "Loading..." -- the error is shown instead, and
+// the next 5-second tick retries automatically.
+async function refresh(){
+  try { await refreshInner(); }
+  catch(e) {
+    const el = document.getElementById("alerts");
+    if (el) el.innerHTML = '<div class="banner-red">Dashboard refresh hit a snag: '
+      + esc(String((e && e.message) || e))
+      + ' — the monitor keeps recording; this is a display hiccup. Retrying…</div>';
+  }
+}
 async function triageGroup(gi, action){
   const g = ALERT_GROUPS[gi];
   if (!g) return;
@@ -378,8 +401,10 @@ async function explain(){
 }
 let DEV_NAMES = {};
 async function loadDevices(){
-  const r = await fetch("/api/devices");
-  const d = await r.json();
+  try {
+    const r = await fetch("/api/devices");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
   DEV_NAMES = {};
   d.devices.forEach(v => { DEV_NAMES[v.mac] = v.name; });
   const nprob = d.devices.filter(v => v.on_probation).length;
@@ -395,6 +420,11 @@ async function loadDevices(){
       return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
     }).join("") + `</table>`
     : '<p class="note">No devices seen yet.</p>');
+  } catch(e) {
+    document.getElementById("devices").innerHTML =
+      '<p class="banner-red">Could not load devices: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
 }
 async function renameDevice(mac){
   const name = prompt("Name for " + mac + " (blank clears it):", DEV_NAMES[mac] || "");
@@ -631,6 +661,9 @@ def alert_dismiss(aid):
 # Name your hardware ("PS5", "Mom's iPhone") so alerts and tables read
 # like English instead of MAC addresses.
 
+PROBATION_HOURS = 24  # new devices stay on probation watch this long
+
+
 @app.route("/api/devices")
 def api_devices():
     now = time.time()
@@ -643,18 +676,19 @@ def api_devices():
         " AND direction='inbound' GROUP BY dst_ip", (now - 900,)) if ip}
     out = []
     for d in devs:
-        left_h = ((d["probation_ends"] - now) / 3600
-                  if d["on_probation"] else 0)
-        lip = d["last_ip"]
+        first = d.get("first_seen") or 0
+        probation_ends = first + PROBATION_HOURS * 3600
+        on_prob = bool(first) and now < probation_ends
+        left_h = max(0.0, (probation_ends - now) / 3600) if on_prob else 0
+        lip = d.get("last_ip", "")
         out.append({
-            "mac": d["mac"], "name": d["name"],
+            "mac": d.get("mac", ""), "name": d.get("name", ""),
             "last_ip": lip,
             "up_mb": round(up.get(lip, 0) / 1e6, 2),
             "down_mb": round(down.get(lip, 0) / 1e6, 2),
-            "last_seen": _fmt_ts(d["last_seen"]) if d["last_seen"] else "",
-            "first_seen": _fmt_ts(d["first_seen"])
-            if d["first_seen"] else "",
-            "on_probation": d["on_probation"],
+            "last_seen": _fmt_ts(d["last_seen"]) if d.get("last_seen") else "",
+            "first_seen": _fmt_ts(first) if first else "",
+            "on_probation": on_prob,
             "probation_left_h": round(left_h, 1),
         })
     return jsonify({"devices": out})

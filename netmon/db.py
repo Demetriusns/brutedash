@@ -319,17 +319,18 @@ def device_name_map():
 def known_devices(limit=100):
     """Devices ever seen on the LAN, newest first.
 
-    Returns [{mac, name, last_ip, last_seen}]; name is "" when unnamed.
+    Returns [{mac, name, last_ip, last_seen, first_seen}];
+    name is "" when unnamed.
     """
     with _lock:
         conn = _db()
         rows = conn.execute(
-            "SELECT mac, MAX(ts) FROM arp_observations"
+            "SELECT mac, MAX(ts), MIN(ts) FROM arp_observations"
             " WHERE mac IS NOT NULL AND mac != ''"
             " GROUP BY mac ORDER BY MAX(ts) DESC LIMIT ?",
             (limit,)).fetchall()
         out = []
-        for mac, last_seen in rows:
+        for mac, last_seen, first_seen in rows:
             iprow = conn.execute(
                 "SELECT ip FROM arp_observations WHERE mac=?"
                 " ORDER BY ts DESC LIMIT 1", (mac,)).fetchone()
@@ -341,6 +342,7 @@ def known_devices(limit=100):
                 "name": nmrow[0] if nmrow else "",
                 "last_ip": iprow[0] if iprow and iprow[0] else "",
                 "last_seen": last_seen,
+                "first_seen": first_seen,
             })
         return out
 
