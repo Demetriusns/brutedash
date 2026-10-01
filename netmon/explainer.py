@@ -275,7 +275,8 @@ def summarize(window_min=WINDOW_MIN, save=True, now=None):
         if api_key:
             try:
                 from openai import OpenAI  # optional dependency
-                client = OpenAI(api_key=api_key)
+                # short timeout: a stuck API call must never wedge the dashboard
+                client = OpenAI(api_key=api_key, timeout=30)
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content":

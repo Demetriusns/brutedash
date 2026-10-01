@@ -127,7 +127,7 @@ def main():
     print(f"Dashboard: http://{args.host}:{args.port}")
     try:
         dash.app.run(host=args.host, port=args.port,
-                     use_reloader=False)
+                     use_reloader=False, threaded=True)
     except KeyboardInterrupt:
         pass
     finally:

@@ -270,7 +270,7 @@ async function refresh(){
   }).join("") : '<p class="note">No alerts in the last hour. All quiet.</p>';
 
   const s = d.summary;
-  if (s) document.getElementById("summary").innerHTML =
+  if (s && !EXPLAINING) document.getElementById("summary").innerHTML =
     `<p><b>${esc(s.headline)}</b> <span class="note">(${esc(s.origin)}, ${s.window_min} min window)</span></p>`
     + `<p>${esc(s.whats_happening)}</p>`
     + (s.stands_out.length ? "<b>Stands out:</b><ul>" + s.stands_out.map(x=>`<li>${esc(x)}</li>`).join("") + "</ul>" : "")
@@ -344,9 +344,22 @@ async function aiVerdict(aid){
   const el2 = document.getElementById("verdict-" + aid);
   if (el2) el2.textContent = txt;
 }
+let EXPLAINING = false;
 async function explain(){
-  document.getElementById("summary").innerHTML = '<p class="note">Writing summary...</p>';
-  await fetch("/explain", {method:"POST"});
+  const sdiv = document.getElementById("summary");
+  EXPLAINING = true;
+  sdiv.innerHTML = '<p class="note">Writing summary...</p>';
+  try {
+    const r = await fetch("/explain", {method:"POST"});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "server refused");
+    sdiv.innerHTML = '<p class="note">Summary updated (' + esc(d.origin) + ').</p>';
+  } catch(e) {
+    sdiv.innerHTML = '<p class="note">Could not regenerate the summary: '
+      + esc(e.message) + '. It retries on its own every 15 minutes.</p>';
+  } finally {
+    EXPLAINING = false;
+  }
   refresh();
 }
 let DEV_NAMES = {};
@@ -963,8 +976,9 @@ def api_stats():
 @app.route("/explain", methods=["POST"])
 def explain_now():
     from . import explainer as expl
-    summary, _origin = expl.summarize(save=True)
-    return jsonify({"ok": True, "headline": summary["headline"]})
+    summary, origin = expl.summarize(save=True)
+    return jsonify({"ok": True, "headline": summary["headline"],
+                    "origin": origin})
 
 
 @app.route("/pcap", methods=["GET", "POST"])
