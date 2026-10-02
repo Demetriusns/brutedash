@@ -106,6 +106,26 @@ details.settings>summary::before{content:"\\25B8  ";color:#58a6ff}
 details.settings[open]>summary::before{content:"\\25BE  "}
 details.settings .inner{padding:0 1.2em 1.2em}
 footer.site{margin-top:2.5em;padding-top:1em;border-top:1px solid #30363d}
+/* ---- mobile: phones and narrow tablets ---- */
+@media (max-width:640px){
+  body{margin:0 auto;padding:0 .7em;font-size:15px}
+  h1{font-size:1.35em} h2{font-size:1.1em}
+  nav.top{gap:.5em;padding:.5em .7em;margin:0 -.7em .8em}
+  nav.top .brand{font-size:1em}
+  .hero{padding:.9em 1em;margin-bottom:1em}
+  .card{display:block;min-width:0;margin:.5em 0;padding:.9em 1em}
+  .card.graphcard{min-width:0}
+  .card .v{font-size:1.4em} .card.kpi .v{font-size:1.7em}
+  table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  th,td{padding:.45em;font-size:.82em;white-space:nowrap}
+  th:first-child,td:first-child{white-space:normal}
+  button,.btn-sm{min-height:44px;min-width:44px;font-size:1em}
+  .btn-sm{padding:.5em 1em}
+  input,textarea,select{font-size:16px;max-width:100%}
+  pre{font-size:.78em}
+  .alert{padding:.6em .8em}
+  section.block{margin-bottom:1.5em}
+}
 """
 
 LOGIN_HTML = """<html><head><title>netmon -- sign in</title>
