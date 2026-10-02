@@ -56,8 +56,20 @@ def _monitor_loop(stop_event, digest_hours=24):
 def main():
     # Product config: first run creates ~/.config/brutedash/config.yaml
     # with commented defaults. CLI flags > env vars > config file.
-    cfg_path = cfgm.ensure_bootstrap()
-    cfg = cfgm.load(cfg_path)
+    # A broken config file must never prevent startup: fall back to
+    # defaults with a warning instead of crashing.
+    try:
+        cfg_path = cfgm.ensure_bootstrap()
+        cfg = cfgm.load(cfg_path)
+    except Exception as exc:
+        print(f"WARNING: could not load config ({exc}); using defaults.")
+        cfg = {s: dict(keys) for s, keys in cfgm.DEFAULTS.items()}
+
+    def _safe_int(value, fallback):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
 
     ap = argparse.ArgumentParser(description="netmon Phase 1 monitor")
     ap.add_argument("--iface", default=cfgm.get(cfg, "capture.interface") or None,
@@ -68,8 +80,9 @@ def main():
     ap.add_argument("--weekly-report", action="store_true",
                     help="print the weekly report and exit (no capture)")
     ap.add_argument("--port", type=int,
-                    default=int(os.environ.get("NETMON_PORT")
-                                or cfgm.get(cfg, "dashboard.port", 5001)))
+                    default=_safe_int(os.environ.get("NETMON_PORT")
+                                      or cfgm.get(cfg, "dashboard.port", 5001),
+                                      5001))
     ap.add_argument("--host",
                     default=os.environ.get("NETMON_HOST")
                     or cfgm.get(cfg, "dashboard.host", "127.0.0.1"),
@@ -78,12 +91,13 @@ def main():
                     " (set NETMON_PASSWORD first)")
     args = ap.parse_args()
 
-    # Digest cadence: env wins, then config file.
+    # Digest cadence: env wins, then config file. Never crash on a bad
+    # value (empty YAML key, typo): fall back to 24h.
     digest_env = os.environ.get("NETMON_DIGEST_HOURS", "").strip()
     try:
         digest_hours = (float(digest_env) if digest_env
                         else float(cfgm.get(cfg, "alerts.digest_hours", 24)))
-    except ValueError:
+    except (TypeError, ValueError):
         digest_hours = 24
 
     if args.weekly_report:

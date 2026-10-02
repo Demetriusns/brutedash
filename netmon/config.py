@@ -135,14 +135,33 @@ def load(path: Path | None = None) -> dict:
     """Load effective config: defaults < config.yaml < BRUTEDASH_* env."""
     path = path or config_path()
     cfg = {section: dict(keys) for section, keys in DEFAULTS.items()}
-    if path.exists() and yaml is not None:
-        try:
-            data = yaml.safe_load(path.read_text()) or {}
-            if isinstance(data, dict):
-                cfg = _deep_merge(cfg, data)
-        except Exception:
-            pass  # corrupt file: fall back to defaults rather than crash
+    if path.exists():
+        if yaml is None:
+            _warn_no_yaml(path)
+        else:
+            try:
+                data = yaml.safe_load(path.read_text()) or {}
+                if isinstance(data, dict):
+                    cfg = _deep_merge(cfg, data)
+            except Exception:
+                pass  # corrupt file: fall back to defaults rather than crash
     return _apply_env(cfg)
+
+
+_WARNED_NO_YAML = False
+
+
+def _warn_no_yaml(path):
+    """A config file the user bothered to write should never be silently
+    ignored: say so once, loudly, instead of running on defaults."""
+    global _WARNED_NO_YAML
+    if _WARNED_NO_YAML:
+        return
+    _WARNED_NO_YAML = True
+    import sys
+    print(f"WARNING: {path} exists but PyYAML is not installed --"
+          " config file ignored. Run: pip install pyyaml",
+          file=sys.stderr)
 
 
 def get(cfg: dict, dotted: str, default=None):
