@@ -26,8 +26,27 @@ triage in one box. That is the product.
 - Home: low monthly or one-time license, self-installed.
 - Small business: ~$50–200/mo per site, depending on device count.
 
-## Ship checklist — what it still needs before anyone pays
+## Ship checklist — product first, business in later phases (his call 2026-10-02)
 
+### Product — now (Phase 3.5)
+- [ ] **False-positive tuning** — per-device baselines exist; need confidence
+      scoring and auto-suppression so non-technical owners trust every alert.
+- [ ] **First-run onboarding** — guided setup inside the dashboard: name the
+      network, confirm devices, set quiet hours. Zero terminal required.
+- [ ] **Self-update** — safe auto-update that can't brick a running monitor.
+- [ ] **Remote access (personal)** — Tailscale private tunnel so the owner
+      views the dashboard from anywhere; stepping stone to the Phase 5
+      cloud console. Parked per his call 2026-10-02; mobile CSS shipped.
+
+### Business — later phases
+- [ ] **Polished installer** — native-feel package (exe/msi or equivalent)
+      for non-technical buyers.
+- [ ] **Diagnostics bundle** — one-click "send diagnostics" for support.
+- [ ] **Licensing** — key validation for paid tiers.
+- [ ] **Hardening pass** — the monitor runs with elevated network privileges;
+      needs a proper security review before it touches customer networks.
+
+### Shipped
 - [x] Secrets via environment variables (no hardcoded keys) — done
 - [x] **Unified config file** — one human-readable `config.yaml`, first-run
       bootstrap, env overrides. Wired through run.py, dashboard, capture,
@@ -38,20 +57,6 @@ triage in one box. That is the product.
 - [x] **One-command install script** — `python install.py` (Windows: `py
       install.py`): checks Python, creates venv, installs deps, bootstraps
       config, idempotent re-runs. (shipped 2026-10-02)
-- [ ] **Polished installer** — native-feel package (exe/msi or equivalent)
-      for non-technical buyers. Comes after the product is sale-ready.
-- [ ] **First-run onboarding** — guided setup inside the dashboard: name the
-      network, confirm devices, set quiet hours. Zero terminal required.
-- [ ] **False-positive tuning** — per-device baselines exist; need confidence
-      scoring and auto-suppression so non-technical owners trust every alert.
-- [ ] **Self-update** — safe auto-update that can't brick a running monitor.
-- [ ] **Remote access (personal)** — Tailscale private tunnel so the owner
-      views the dashboard from anywhere; stepping stone to the Phase 5
-      cloud console. Parked per his call 2026-10-02; mobile CSS shipped.
-- [ ] **Diagnostics bundle** — one-click "send diagnostics" for support.
-- [ ] **Licensing** — key validation for paid tiers.
-- [ ] **Hardening pass** — the monitor runs with elevated network privileges;
-      needs a proper security review before it touches customer networks.
 
 ## Rules
 
