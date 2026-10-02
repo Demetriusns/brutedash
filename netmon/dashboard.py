@@ -18,6 +18,7 @@ from flask import Flask, request, jsonify, render_template_string, redirect, \
 
 from . import db as dbm
 from . import config as cfgm
+from . import relay as relaym
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("NETMON_SECRET_KEY", "") or os.urandom(24)
@@ -76,6 +77,7 @@ a{color:#58a6ff} button{background:#238636;color:#fff;border:0;padding:.5em 1.2e
 input,textarea,select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;font-family:monospace;padding:.4em;border-radius:4px}
 .banner-red{background:#3d1113;border:1px solid #f85149;color:#f85149;padding:.8em 1em;border-radius:6px;margin-bottom:1em}
 .banner-blue{background:#0d2137;border:1px solid #58a6ff;color:#58a6ff;padding:.8em 1em;border-radius:6px;margin-bottom:1em}
+.banner-amber{background:#2e1f0d;border:1px solid #d29922;color:#d29922;padding:.8em 1em;border-radius:6px;margin-bottom:1em}
 pre{background:#161b22;padding:1em;white-space:pre-wrap;border:1px solid #30363d;border-radius:6px}
 .alert{border-left:4px solid #d29922;background:#161b22;padding:.6em 1em;margin:.5em 0}
 .alert.High{border-color:#f85149} .alert.Critical{border-color:#f85149;background:#2a1215}
@@ -316,6 +318,7 @@ const VERDICTS = {};   // alert id -> AI verdict text; survives the 5s re-render
 let DEV_COUNT = null;  // devices seen, filled by loadDevices(), shown as a KPI
 const SEV_RANK = {Critical: 0, High: 1, Medium: 2, Low: 3};  // triage order
 let ALERT_GROUPS = []; // groups from the latest refresh(), for triageGroup/toggleGroup
+const PAGESUB_DEFAULT = document.getElementById("pagesub").innerHTML; // restore when relay drops
 async function refreshInner(){
   const sf = document.getElementById("alertstatusfilter");
   const r = await fetch("/api/stats?status=" + (sf ? sf.value : "all"));
@@ -345,16 +348,29 @@ async function refreshInner(){
   if (nb) nb.innerHTML = urgent ? '<span class="badge-count">' + urgent + '</span>' : "";
   document.getElementById("logoutlink").style.display = d.auth_required ? "inline" : "none";
   const wb = document.getElementById("wnbanner");
-  if (d.whole_network) {
+  const ps = document.getElementById("pagesub");
+  if (d.whole_network && d.relay_active) {
     wb.style.display = "block";
-    document.getElementById("pagesub").innerHTML =
+    wb.className = "banner-blue";
+    wb.innerHTML = "&#128225; Whole-network view: this computer is relaying the LAN, so every device's traffic is monitored.";
+    ps.innerHTML =
       'This page watches <b>every device on your home network</b> and explains ' +
       'it in plain English. It never reads <i>what</i> anyone sends or receives -- only ' +
       '<i>who</i> each device talks to and <i>how much</i> data moves. ' +
       '<span id="clock"></span>';
     document.getElementById("clock").textContent = "updated " + d.now;
+  } else if (d.whole_network) {
+    wb.style.display = "block";
+    wb.className = "banner-amber";
+    wb.innerHTML = "&#9888;&#65039; Whole-network mode is on, but the relay isn't running right now &mdash; showing this computer's traffic only.";
+    ps.innerHTML = PAGESUB_DEFAULT;
+    document.getElementById("clock").textContent = "updated " + d.now;
   } else {
     wb.style.display = "none";
+    if (ps.innerHTML !== PAGESUB_DEFAULT) {
+      ps.innerHTML = PAGESUB_DEFAULT;
+      document.getElementById("clock").textContent = "updated " + d.now;
+    }
   }
 
   // Group repeat alerts (same severity + title) into one card so the
@@ -1120,6 +1136,7 @@ def api_stats():
     except Exception:
         device_names = {}
     whole_network = cfgm.whole_network_enabled()
+    relay_active = relaym.relay_active()
     try:
         _cnt = dbm.query(
             "SELECT status, severity, COUNT(*) FROM alerts WHERE ts > ?"
@@ -1132,6 +1149,7 @@ def api_stats():
     return jsonify({
         "now": _fmt_ts(now),
         "whole_network": whole_network,
+        "relay_active": relay_active,
         "throughput_mbps": mbps,
         "packets_1m": one_min[1],
         "packets_total": total_pkts or 0,
