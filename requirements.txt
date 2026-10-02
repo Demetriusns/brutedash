@@ -3,3 +3,5 @@ scapy>=2.5
 # optional — enables LLM-powered triage in app.py and AI summaries in netmon/
 # (rule-based fallbacks otherwise)
 openai>=1.0
+
+pyyaml>=6.0  # config.yaml parsing (netmon/config.py)
