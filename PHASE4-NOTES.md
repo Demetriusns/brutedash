@@ -152,17 +152,53 @@ A junior analyst costs ~$70k/year. This is a box plus a subscription.
   navigation, plain-English loading/empty states. Polish the look, not the
   reading level.
 
-### AI backend (his ideas 2026-09-30)
-- Self-hosted personal AI server — local open-source LLM (Ollama etc.) to
-  replace OpenAI: no key, no per-call cost, data never leaves the network.
-  Open questions: hardware capacity, model choice, rewiring `ai_assist.py`,
-  quality checks vs. rule-based explainer.
-- Meta Model API (dev.meta.ai) as a possible keyed alternative — check
-  format compatibility and pricing.
-- Research free dev API tiers (his lead): Gemini API, OpenRouter, Groq,
-  GitHub Models, Hugging Face, Together/Fireworks, OpenAI trial credits.
-  Verify: actually free? OpenAI-compatible endpoints? Rate limits? Training
-  on his data?
+### AI backend (his ideas 2026-09-30, refreshed 2026-10-02)
+
+Orion's AI has three jobs: narrate alerts in plain English, help triage,
+and get smarter over time. The design principle stands: **AI narrates,
+code decides** -- deterministic rules fire alerts; models explain them.
+
+**Provider picks (his call 2026-10-02):**
+1. **Google Gemini free tier first** -- most generous free API (~1,500
+   req/day, no card), OpenAI-compatible endpoint, zero hardware questions.
+2. **Self-hosted Qwen3 second** -- Apache 2.0, runs on a normal PC via
+   Ollama (`ollama pull qwen3:8b`), zero cost forever, data never leaves
+   the network. The long-term answer for customer sites.
+3. Bench: Groq (fastest), Cerebras, OpenRouter (`:free` models, one key),
+   GitHub Models, Mistral, DeepSeek. Open-weight frontier in 2026 is
+   Qwen / DeepSeek / Kimi / GLM (all downloadable); Llama 4 has slipped.
+
+**Keys:** one API key per provider, always as environment variables, never
+in config or code. The config selects the active provider + model + base
+URL, so swapping providers is a config change, not a rewrite. `ai_assist.py`
+stays provider-agnostic (OpenAI-compatible interface).
+
+**The night shift (his vision 2026-10-02):** when he's asleep/inactive,
+Orion itself is the overnight agent -- it never sleeps, it runs on his PC.
+Detect -> consult the model council -> act within his pre-approved
+playbook -> notify him. He pre-approves *what the agent may do alone*
+(e.g. quarantine a device beaconing to a known-malicious IP) and everything
+else waits for morning review. Response stays approval-only by default;
+autonomous actions are opt-in per playbook, never silent.
+
+**Model council (his vision 2026-10-02):** for High/Critical or ambiguous
+alerts, Orion asks 2-3 models at once (e.g. local Qwen3 + Gemini free tier
++ Groq) and compares verdicts. Agreement -> act per playbook. Disagreement
+-> escalate to the human. Only alert metadata and flow summaries go out --
+never packet contents, never PII (free tiers may train on prompts). Home
+alert volume is a handful per day; free-tier rate limits are plenty.
+
+**Constant learning:** every council verdict plus his morning review feeds
+the dismissal-learning loop (Phase 3.5 priority 1: quiet-first). The system
+gets smarter every night -- rules tuned, thresholds adjusted, new patterns
+proposed by the council and approved by him. The nurse (the watching agent)
+monitors the heartbeat, triages software bugs, and delivers the overnight
+report each morning: what happened, what the agent did, what needs him.
+
+**Escalation path:** critical -> push notification to his phone via the
+Muse app (note: cannot override Do Not Disturb/silent mode) + email;
+everything else -> morning briefing. If the heartbeat itself dies, the
+nurse wakes and investigates.
 
 ---
 
