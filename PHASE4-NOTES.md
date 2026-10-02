@@ -43,7 +43,15 @@ A junior analyst costs ~$70k/year. This is a box plus a subscription.
 - Learning from dismissals — tune thresholds and suggest allowlists from
   his triage feedback; stop crying wolf.
 - Per-device behavior profiles — "this laptop never uploads 2GB at 3am"
-  without hand-written rules.
+  without hand-written rules. DONE 2026-10-02 (batch 3): per-MAC,
+  per-hour baselines learned from 14 days of flows
+  (`device_profiles` table: avg bytes + avg outside contacts per local
+  hour); new `behavior_deviation` rule (Medium) fires only when a device
+  moves >=4x its own baseline for the current hour AND clears a 250 MB
+  floor, needs 3+ days behind the baseline hour, ignores devices <24h
+  old (probation watch covers them), 24h cooldown per MAC; dashboard
+  devices table shows a "Normal for this device" column ("~90 MB/hr ·
+  busiest 6-7am · learned over 5d") via /api/devices profile summaries.
 - Device naming (new 2026-09-30) — MAC → friendly-name table ("PS5",
   "Mom's iPhone") so alerts read like English instead of IP addresses.
   Trivial to build, huge readability win.

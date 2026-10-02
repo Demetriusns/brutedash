@@ -9,6 +9,7 @@ Tables:
   arp_observations  (ip, mac) pairs seen on the wire (ts, ip, mac)
   first_seen  first-seen timestamps keyed by (kind, key)
   device_names  user-chosen friendly names keyed by MAC
+  device_profiles  per-MAC, per-hour behavior baselines (bytes/contacts)
   allowlist  user-approved (kind, pattern) pairs that suppress alerts
   meta        small key/value store (heartbeats, watermarks, ...)
 
@@ -96,6 +97,16 @@ CREATE TABLE IF NOT EXISTS device_names(
     mac TEXT PRIMARY KEY,        -- lowercased hardware address
     name TEXT NOT NULL,          -- user-chosen friendly name ("PS5")
     updated_ts REAL
+);
+
+CREATE TABLE IF NOT EXISTS device_profiles(
+    mac TEXT NOT NULL,           -- lowercased hardware address
+    hour INTEGER NOT NULL,       -- local hour of day, 0..23
+    avg_bytes REAL NOT NULL,     -- average bytes moved in that hour
+    avg_contacts REAL NOT NULL,  -- average distinct outside IPs in that hour
+    days INTEGER NOT NULL,       -- distinct days behind this row
+    built_ts REAL,
+    PRIMARY KEY(mac, hour)
 );
 
 CREATE TABLE IF NOT EXISTS allowlist(
@@ -361,7 +372,179 @@ def ip_name_map():
             if mac in names}
 
 
-# --- quiet hours -------------------------------------------------------
+# --- behavior profiles -------------------------------------------------
+# Per-device "what's normal": for each MAC and each local hour of the day,
+# the average bytes moved and the average number of distinct outside IPs
+# contacted, learned from the last two weeks of flows. Quiet devices get a
+# tiny baseline (so they never fire); deviations need a high absolute floor
+# too, so a phone that usually sits idle can't page over 300 MB.
+# The detector rebuilds these lazily when the build watermark is stale
+# (>6h) -- "quiet is a feature", so stale by a few hours is fine.
+
+PROFILES_LEARN_DAYS = 14  # window of flow history the profiles learn from
+PROFILES_MIN_DAYS = 3     # a profile hour is trusted only with this many
+PROFILE_MAX_AGE = 6 * 3600  # rebuild when the watermark is older than this
+
+
+def ip_to_mac_map():
+    """{local ip: mac} using each IP's most recently observed MAC."""
+    with _lock:
+        conn = _db()
+        latest = {}
+        for ip, mac, ts in conn.execute(
+                "SELECT ip, mac, MAX(ts) FROM arp_observations"
+                " WHERE ip IS NOT NULL AND mac IS NOT NULL AND mac != ''"
+                " GROUP BY ip, mac"):
+            if ip not in latest or ts > latest[ip][1]:
+                latest[ip] = (mac, ts)
+        return {ip: mac for ip, (mac, _ts) in latest.items()}
+
+
+def build_device_profiles(now=None, days=PROFILES_LEARN_DAYS):
+    """Learn per-MAC, per-hour baselines from recent flows.
+
+    Attributes each flow to the LAN-side IP's MAC (the non-LAN side of an
+    outbound flow is usually an outside address; for inbound it's the
+    reverse). Counts only bytes -- direction is irrelevant for "how much
+    did this device normally move at 8pm".
+    """
+    import ipaddress
+    import time
+    now = now if now is not None else time.time()
+    cutoff = now - days * 86400
+    ip2mac = ip_to_mac_map()
+
+    def _lan_mac(src_ip, dst_ip):
+        if src_ip in ip2mac:
+            return ip2mac[src_ip], (dst_ip if dst_ip not in ip2mac else None)
+        if dst_ip in ip2mac:
+            return ip2mac[dst_ip], (src_ip if src_ip not in ip2mac else None)
+        return None, None
+
+    per_hour = {}  # (mac, hour, daykey) -> [bytes, {outside ips}]
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT ts, src_ip, dst_ip, bytes FROM flows WHERE ts > ?",
+            (cutoff,)).fetchall()
+
+    for ts, src_ip, dst_ip, nbytes in rows:
+        mac, outside = _lan_mac(src_ip, dst_ip)
+        if not mac:
+            continue
+        lt = time.localtime(ts)
+        key = (mac, lt.tm_hour, f"{lt.tm_year}-{lt.tm_mon}-{lt.tm_mday}")
+        cell = per_hour.setdefault(key, [0, set()])
+        cell[0] += (nbytes or 0)
+        if outside:
+            try:
+                if ipaddress.ip_address(outside).is_global:
+                    cell[1].add(outside)
+            except ValueError:
+                pass
+
+    agg = {}  # (mac, hour) -> [total_bytes, set-of-outside-ips, {daykeys}]
+    for (mac, hour, daykey), (nbytes, contacts) in per_hour.items():
+        cell = agg.setdefault((mac, hour), [0, set(), set()])
+        cell[0] += nbytes
+        cell[1] |= contacts
+        cell[2].add(daykey)
+
+    with _lock:
+        conn = _db()
+        conn.execute("DELETE FROM device_profiles")
+        for (mac, hour), (total, contacts, daykeys) in agg.items():
+            ndays = len(daykeys)
+            if ndays < 1:
+                continue
+            conn.execute(
+                "INSERT INTO device_profiles"
+                " (mac, hour, avg_bytes, avg_contacts, days, built_ts)"
+                " VALUES (?,?,?,?,?,?)",
+                (mac, hour, total / ndays, len(contacts) / ndays, ndays,
+                 now))
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('profiles_built_ts', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(now),))
+        conn.commit()
+    return len(agg)
+
+
+def device_profiles_stale(now=None, max_age=PROFILE_MAX_AGE):
+    """True when the behavior profiles need a rebuild."""
+    import time
+    now = now if now is not None else time.time()
+    raw = get_meta("profiles_built_ts")
+    try:
+        built = float(raw) if raw else 0
+    except (TypeError, ValueError):
+        built = 0
+    return (now - built) > max_age
+
+
+def get_device_profile(mac, hour):
+    """Baseline row for one MAC at one local hour, or None."""
+    mac = (mac or "").strip().lower()
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT avg_bytes, avg_contacts, days FROM device_profiles"
+            " WHERE mac=? AND hour=?", (mac, hour)).fetchone()
+    if not row:
+        return None
+    return {"avg_bytes": row[0], "avg_contacts": row[1], "days": row[2]}
+
+
+def device_profile_summaries():
+    """Compact per-MAC profile for the dashboard devices table.
+
+    Returns {mac: {hours_covered, avg_mb_per_hr, days, busy}} where busy is
+    plain text like "8-9pm" for the three busiest hours.
+    """
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT mac, hour, avg_bytes, days FROM device_profiles"
+            " ORDER BY mac, avg_bytes DESC").fetchall()
+    out = {}
+    for mac, hour, avg_bytes, days in rows:
+        cell = out.setdefault(
+            mac, {"hours_covered": 0, "total_bytes": 0.0,
+                  "days": 0, "busy": []})
+        cell["hours_covered"] += 1
+        cell["total_bytes"] += avg_bytes
+        cell["days"] = max(cell["days"], days)
+        if len(cell["busy"]) < 3:
+            cell["busy"].append(hour)
+
+    def _hour_text(h):
+        if h == 0:
+            return "12-1am"
+        if h < 12:
+            return f"{h}-{h+1}am"
+        if h == 12:
+            return "12-1pm"
+        return f"{h-12}-{h-11}pm"
+
+    return {mac: {
+        "hours_covered": c["hours_covered"],
+        "avg_mb_per_hr": round(c["total_bytes"] / max(c["hours_covered"], 1)
+                               / 1e6, 1),
+        "days": c["days"],
+        "busy": ", ".join(_hour_text(h) for h in c["busy"]),
+    } for mac, c in out.items()}
+
+
+def device_first_seen(mac):
+    """Earliest ARP sighting of a MAC (device join time), or None."""
+    mac = (mac or "").strip().lower()
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT MIN(ts) FROM arp_observations WHERE mac=?",
+            (mac,)).fetchone()
+    return row[0] if row and row[0] else None
 # Email silencing windows, stored as a JSON list in meta under
 # "quiet_hours". Each window: {days:[0..6 Mon..Sun], start:"HH:MM",
 # end:"HH:MM", kinds:["all"] or [alert kinds]}.

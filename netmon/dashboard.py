@@ -494,13 +494,16 @@ async function loadDevices(){
   document.getElementById("devices").innerHTML =
     (nprob ? `<p><span class="badge warn">🟡 ${nprob} device${nprob>1?"s":""} on 24h probation watch</span></p>` : "") +
     (d.devices.length ?
-    `<table><tr><th>Device</th><th>Status</th><th>Last address</th><th>Traffic (15 min)</th><th>First seen</th><th>Last seen</th><th></th></tr>` +
+    `<table><tr><th>Device</th><th>Status</th><th>Last address</th><th>Traffic (15 min)</th><th>Normal for this device</th><th>First seen</th><th>Last seen</th><th></th></tr>` +
     d.devices.map(v=>{
       const status = v.on_probation
         ? `<span class="badge warn">🟡 Probation · trusted in ${v.probation_left_h}h</span>`
         : `<span class="badge ok">✅ Trusted</span>`;
       const traf = `<span class="note">↑${v.up_mb} ↓${v.down_mb} MB</span>`;
-      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
+      const prof = v.profile
+        ? `<span class="note">~${v.profile.avg_mb_per_hr} MB/hr · busiest ${esc(v.profile.busy)} · learned over ${v.profile.days}d</span>`
+        : `<span class="note">Still learning (needs 3 days)</span>`;
+      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
     }).join("") + `</table>`
     : '<p class="note">No devices seen yet.</p>');
   } catch(e) {
@@ -758,6 +761,7 @@ def api_devices():
     down = {ip: (b or 0) for ip, b in dbm.query(
         "SELECT dst_ip, SUM(bytes) FROM flows WHERE ts > ?"
         " AND direction='inbound' GROUP BY dst_ip", (now - 900,)) if ip}
+    profiles = dbm.device_profile_summaries()
     out = []
     for d in devs:
         first = d.get("first_seen") or 0
@@ -765,8 +769,10 @@ def api_devices():
         on_prob = bool(first) and now < probation_ends
         left_h = max(0.0, (probation_ends - now) / 3600) if on_prob else 0
         lip = d.get("last_ip", "")
+        mac = d.get("mac", "")
+        prof = profiles.get(mac or "", None)
         out.append({
-            "mac": d.get("mac", ""), "name": d.get("name", ""),
+            "mac": mac, "name": d.get("name", ""),
             "last_ip": lip,
             "up_mb": round(up.get(lip, 0) / 1e6, 2),
             "down_mb": round(down.get(lip, 0) / 1e6, 2),
@@ -774,6 +780,7 @@ def api_devices():
             "first_seen": _fmt_ts(first) if first else "",
             "on_probation": on_prob,
             "probation_left_h": round(left_h, 1),
+            "profile": prof,  # None until 3+ days of history are learned
         })
     return jsonify({"devices": out})
 

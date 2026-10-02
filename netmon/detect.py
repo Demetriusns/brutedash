@@ -13,6 +13,8 @@ SYN timing). Everything here runs on a schedule against the flows table:
   new_busy_domain never-seen domain suddenly looked up a lot
   new_device a never-seen device joined the local network
   arp_spoof ARP lies: one MAC claiming many IPs, or an IP changing MAC
+  behavior_deviation a device moving far more than its own learned
+    hourly baseline (per-device profiles -- quiet-first)
 
 Every alert carries plain-English fields (meaning / is_this_normal /
 what_to_do) so a non-technical reader can understand it. Each rule
@@ -125,6 +127,20 @@ ARP_NEW_COOLDOWN = 86400 # 24h per MAC
 ARP_SPOOF_WINDOW = 1800 # ARP sightings over the last 30 minutes
 ARP_SPOOF_MIN_IPS = 3 # one MAC claiming 3+ IPs looks like spoofing
 ARP_SPOOF_COOLDOWN = 3600
+
+
+# --- per-device behavior deviation (phase 3.5: quiet-first) -------------
+# Each device gets a learned baseline of "how much it normally moves in
+# each hour of the day" (see db.device_profiles). This rule fires only
+# when a device moves >=4x its own baseline AND clears a 250 MB absolute
+# floor, so idle devices can't page over pocket change, and devices
+# younger than 24h are left to the probation_watch rule. AI narrates,
+# code decides: the LLM never invents a baseline, only explains this one.
+BEHAVIOR_WINDOW = 3600 # compare the last hour...
+BEHAVIOR_FACTOR = 4.0 # ...against >=4x this device's learned hourly normal
+BEHAVIOR_MIN_BYTES = 250_000_000 # ...plus a 250 MB absolute floor
+BEHAVIOR_MIN_DAYS = 3 # the baseline hour needs 3+ days behind it
+BEHAVIOR_COOLDOWN = 86400 # one alert per device per day
 
 
 def _is_external_ip(ip):
@@ -678,6 +694,84 @@ def check_arp_spoof(now=None):
     return fired
 
 
+def check_behavior_deviation(now=None):
+    """Fire when a device moves far more than its own learned baseline.
+
+    Every device behaves differently -- the TV streams all evening, the
+    printer never talks to the internet -- so network-wide thresholds cry
+    wolf. The learned profile answers "what's normal for THIS device at
+    this hour", and the rule stays silent otherwise. Quiet is a feature.
+    """
+    now = now or time.time()
+    fired = []
+
+    # Keep the profiles fresh without a cron: rebuild at most every 6h.
+    if dbm.device_profiles_stale(now):
+        dbm.build_device_profiles(now)
+
+    hour = time.localtime(now).tm_hour
+    ip2mac = dbm.ip_to_mac_map()
+    mac_to_ips = {}
+    for ip, mac in ip2mac.items():
+        mac_to_ips.setdefault(mac, []).append(ip)
+    names = dbm.device_name_map()
+
+    for mac, ips in sorted(mac_to_ips.items()):
+        profile = dbm.get_device_profile(mac, hour)
+        if not profile or profile["days"] < BEHAVIOR_MIN_DAYS:
+            continue
+        # Brand-new devices are on probation watch; this rule watches
+        # devices that have lived here long enough to have a "normal".
+        first = dbm.device_first_seen(mac)
+        if first and now - first < 24 * 3600:
+            continue
+
+        placeholders = ",".join("?" for _ in ips)
+        row = dbm.query(
+            f"SELECT COALESCE(SUM(bytes),0) FROM flows"
+            f" WHERE ts > ? AND (src_ip IN ({placeholders})"
+            f" OR dst_ip IN ({placeholders}))",
+            (now - BEHAVIOR_WINDOW, *ips, *ips))[0]
+        observed = row[0] or 0
+        baseline = profile["avg_bytes"] or 0
+        threshold = max(baseline * BEHAVIOR_FACTOR, BEHAVIOR_MIN_BYTES)
+        if observed < threshold:
+            continue
+        if dbm.recent_alert_kind("behavior_deviation", mac,
+                                 BEHAVIOR_COOLDOWN):
+            continue
+
+        name = names.get(mac, "")
+        label = name or f"device {mac}"
+        multiple = max(1, round(observed / max(baseline, 1)))
+        dbm.add_alert(
+            "behavior_deviation", "Medium",
+            f"{label} moved far more than its usual",
+            (f"In the last hour {label} ({mac}) moved {observed/1e6:.0f}"
+             f" MB -- about {multiple}x what it usually moves at this hour"
+             f" ({baseline/1e6:.1f} MB, learned over {profile['days']}"
+             f" days)."),
+            meaning=(f"One of your devices is moving far more data than it"
+                     f" usually does at this time of day -- like a roommate"
+                     f" who normally takes a ten-minute shower suddenly"
+                     f" running the water for two hours. Something on that"
+                     f" device is unusually busy, or the device itself may"
+                     f" be doing something you didn't ask it to do."),
+            is_normal=("Normal if the device was doing something big -- a"
+                       f" game or OS update, a cloud backup, uploading"
+                       f" video. It is not normal if nobody touched it"
+                       f" and nothing was scheduled."),
+            what_to_do=("Think about what was running on that device in the"
+                        " last hour. If nothing explains it, check the"
+                        " per-device traffic on the dashboard to see where"
+                        " the data went, and consider naming the device if"
+                        " you haven't."),
+            ts=now,
+        )
+        fired.append(("behavior_deviation", mac))
+    return fired
+
+
 def run_all(now=None):
     """Run every periodic rule once. Called on a schedule by run.py.
 
@@ -690,3 +784,4 @@ def run_all(now=None):
     check_dns_anomalies(now=now)
     check_new_devices(now=now)
     check_arp_spoof(now=now)
+    check_behavior_deviation(now=now)
