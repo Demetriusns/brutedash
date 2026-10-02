@@ -111,6 +111,12 @@ def main():
         return
 
     from . import dashboard as dash  # lazy: weekly-report exits above
+    from . import health as healthm
+
+    # The nurse's toolkit: persistent logs, crash bundles, heartbeat.
+    # None of this changes behavior when unconfigured.
+    healthm.setup_logging()
+    healthm.install_crash_handlers()
 
     if args.pcap:
         from . import capture as capm
@@ -154,12 +160,33 @@ def main():
         pass
 
     print(f"Dashboard: http://{args.host}:{args.port}")
+
+    # Vital-signs monitor: pings the heartbeat URL (healthchecks.io) every
+    # few minutes. The nurse (watching agent) wakes up when pings stop.
+    hb_url = (os.environ.get("BRUTEDASH_MONITOR_HEARTBEAT_URL", "").strip()
+              or cfgm.get(cfg, "monitor.heartbeat_url", ""))
+    try:
+        hb_minutes = int(cfgm.get(cfg, "monitor.heartbeat_minutes", 5))
+    except (TypeError, ValueError):
+        hb_minutes = 5
+
+    def _health():
+        if (capture_thread is not None and not args.dashboard_only
+                and not capture_thread.is_alive()):
+            return False, "capture thread died"
+        return healthm.local_health()
+
+    heartbeat = healthm.Heartbeat(hb_url, hb_minutes, _health)
+    heartbeat.start()
+    if hb_url:
+        print(f"Heartbeat: every {hb_minutes} min")
     try:
         dash.app.run(host=args.host, port=args.port,
                      use_reloader=False, threaded=True)
     except KeyboardInterrupt:
         pass
     finally:
+        heartbeat.stop()
         stop_event.set()
         watchdog.stop()
 

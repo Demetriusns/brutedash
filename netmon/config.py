@@ -48,6 +48,15 @@ DEFAULTS = {
         # Hours between email digest sends; 0 disables.
         "digest_hours": 24,
     },
+    "monitor": {
+        # healthchecks.io ping URL for the heartbeat. Empty = disabled.
+        # Prefer the BRUTEDASH_MONITOR_HEARTBEAT_URL env var for this --
+        # anyone with the URL can fake heartbeats.
+        "heartbeat_url": "",
+        # Minutes between heartbeats. Match the check's Period on
+        # healthchecks.io (set the check's Grace to ~2x this).
+        "heartbeat_minutes": 5,
+    },
 }
 
 ENV_PREFIX = "BRUTEDASH_"
@@ -76,6 +85,10 @@ ai:
 alerts:
   min_confidence: 0    # 0-100; alerts below this stay logged but don't notify
   digest_hours: 24     # hours between email digests; 0 disables
+
+monitor:
+  heartbeat_url: ""  # healthchecks.io ping URL; empty = heartbeat disabled
+  heartbeat_minutes: 5  # match the check's Period on healthchecks.io
 """
 
 
