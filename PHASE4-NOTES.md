@@ -7,6 +7,30 @@ analyst" review that night. Everything else was already on the roadmap.
 
 ---
 
+## Continuous testing & council review (his directive, 2026-10-02)
+
+"Treat it like family" means it gets checked constantly, not just built.
+
+- **Test suite is the enforcement arm.** `tests/` (unittest, stdlib only,
+  no new dependencies) covers secret-scrubbing of diagnostics bundles,
+  relay detection, and config parsing. The daily build cron runs the full
+  suite, plus py_compile, a dashboard smoke boot against a scratch DB,
+  and a secret-scan of the staged diff. ALL GREEN or no commit; unfixable
+  failures get reported to Demetrius instead of pushed.
+- **Weekly council review** (Sundays): three independent reviewers --
+  security, plain-language UX, robustness -- return structured verdicts
+  (Critical/High/Medium/Low, file:line, concrete fix). The agent, as head
+  of council, ships only on quorum: 2-of-3 agreement, or 1 Critical the
+  head endorses. One focused batch per session, under Add → Test →
+  Release.
+- **The council is general-purpose**, not Orion-only: the same review
+  pattern serves every project. External heavyweight models (DeepSeek V4,
+  Kimi K2, Qwen3.5-max, GLM-5.2) plug into the council once their API
+  keys are provided; until then the council runs as independent reviewer
+  agents.
+
+---
+
 ## Phase 3.5 — the true automated SOC analyst (Demetrius's call, 2026-09-30)
 
 Goal: one system doing the job of a senior analyst for small companies —
