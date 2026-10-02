@@ -62,8 +62,8 @@ def get_local_ips():
 
 def whole_network_mode():
     """True when this machine relays the LAN (see module docstring)."""
-    return os.environ.get("NETMON_WHOLE_NETWORK", "").strip().lower() in (
-        "1", "true", "yes")
+    from . import config as cfgm
+    return cfgm.whole_network_enabled()
 
 
 def lan_subnet():

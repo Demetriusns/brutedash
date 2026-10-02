@@ -18,6 +18,7 @@ import os
 import time
 
 from . import db as dbm
+from . import config as cfgm
 
 SUMMARY_INTERVAL = 900  # 15 minutes
 WINDOW_MIN = 15
@@ -294,13 +295,13 @@ def summarize(window_min=WINDOW_MIN, save=True, now=None):
         evidence = build_evidence(window_min, now=now)
         api_key = os.environ.get("OPENAI_API_KEY")
         summary, origin = None, "rule-based"
-        if api_key:
+        if api_key and cfgm.ai_enabled():
             try:
                 from openai import OpenAI  # optional dependency
                 # short timeout: a stuck API call must never wedge the dashboard
                 client = OpenAI(api_key=api_key, timeout=30)
                 resp = client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=cfgm.ai_model(),
                     messages=[{"role": "user", "content":
                                SUMMARY_PROMPT.format(evidence=evidence)}],
                     response_format={"type": "json_object"},

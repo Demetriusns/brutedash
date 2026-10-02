@@ -17,6 +17,7 @@ from flask import Flask, request, jsonify, render_template_string, redirect, \
     session
 
 from . import db as dbm
+from . import config as cfgm
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("NETMON_SECRET_KEY", "") or os.urandom(24)
@@ -163,11 +164,11 @@ it in plain English. It never reads <i>what</i> you send or receive -- only
 
 <section class="block" id="alerts">
 <h2>&#128680; What needs your eyes</h2>
-<p class="note">Triage queue &mdash; most urgent first. Show: <select id="alertstatusfilter" onchange="refresh()">
+<p class="note">Most urgent first. Show: <select id="alertstatusfilter" onchange="refresh()">
 <option value="all" selected>All</option><option value="new">New</option>
 <option value="acknowledged">Acknowledged</option>
 <option value="dismissed">Dismissed</option></select>
-Severity: <select id="alertsevfilter" onchange="refresh()">
+Urgency: <select id="alertsevfilter" onchange="refresh()">
 <option value="all" selected>All</option><option value="Critical">Critical</option>
 <option value="High">High</option><option value="Medium">Medium</option>
 <option value="Low">Low</option></select></p>
@@ -175,7 +176,7 @@ Severity: <select id="alertsevfilter" onchange="refresh()">
 </section>
 
 <section class="block" id="summary">
-<h2>&#128172; Plain-English summary <button onclick="explain()">Explain now</button></h2>
+<h2>&#128172; Summary <button onclick="explain()">Explain now</button></h2>
 <div id="summarybody"><p class="note">Loading...</p></div>
 <h2>&#127968; What's normal?</h2>
 <p>On a normal day, almost everything your computer does online is one of a few
@@ -216,13 +217,13 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 <button class="btn-sm" onclick="addQuietWindow()">Add</button></p>
 </div></details>
 
-<details class="settings"><summary>Rule health</summary><div class="inner">
-<p class="note">How often each detection rule earns its keep, judged by your own Ack / Dismiss history over the last 30 days.</p>
+<details class="settings"><summary>Detection rules</summary><div class="inner">
+<p class="note">How useful each detection has been, based on what you've acknowledged or dismissed in the last 30 days.</p>
 <div id="rulehealth"><p class="note">Loading...</p></div>
 </div></details>
 
-<details class="settings"><summary>Allowlist</summary><div class="inner">
-<p class="note">Patterns the monitor should never alert on again. A pattern matches when it appears anywhere in the alert's identifying text -- a MAC, an IP:port, a domain.</p>
+<details class="settings"><summary>Never alert me about</summary><div class="inner">
+<p class="note">Things the monitor should never bother you about again. A pattern matches when it appears anywhere in the alert's identifying text -- a hardware address, an IP:port, a domain.</p>
 <div id="allowlist"><p class="note">Loading...</p></div>
 <p class="note">Add:
 <select id="al_kind">
@@ -243,10 +244,10 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 
 <details class="settings"><summary>Email digest</summary><div class="inner">
 <p><button class="btn-sm" onclick="sendDigest()">Send digest now</button> <span class="note" id="digestmsg"></span></p>
-<p class="note">A digest email goes out automatically once a day (set NETMON_DIGEST_HOURS to change it, 0 to disable). It covers Medium alerts and up, skipping anything you dismissed.</p>
+<p class="note">A digest email goes out automatically once a day (Medium alerts and up, skipping anything you dismissed). Change the timing in config.yaml under alerts &rarr; digest_hours (0 turns it off).</p>
 </div></details>
 
-<details class="settings"><summary>Port guide &mdash; what the numbers mean</summary><div class="inner">
+<details class="settings"><summary>What the numbers mean</summary><div class="inner">
 <p class="note">Apps talk on numbered "channels" called ports. Here are the
 ones you'll actually see. Anything not on this list is an uncommon channel --
 the monitor flags those for you automatically.</p>
@@ -381,10 +382,10 @@ async function refreshInner(){
   const openN = Object.values(acNew).reduce((x, y) => x + y, 0);
   const critHighN = (acNew.Critical || 0) + (acNew.High || 0);
   const kpiCls = critHighN ? "kpi-bad" : (openN ? "kpi-warn" : "kpi-ok");
-  let cards = `<div class="card kpi ${kpiCls}"><div class="v">${openN}</div><div class="l">open alerts &middot; ${critHighN} high/critical</div></div>`;
-  cards += `<div class="card"><div class="v">${d.throughput_mbps.toFixed(2)}</div><div class="l">MB per second (last min)</div></div>`;
-  if (DEV_COUNT !== null) cards += `<div class="card"><div class="v">${DEV_COUNT}</div><div class="l">devices seen</div></div>`;
-  cards += `<div class="card graphcard"><div class="v"><span id="pktrate">&ndash;</span> MB</div><div class="l">traffic per tick, live &middot; <span id="pktrate2"></span> packets/tick</div><canvas id="pktgraph" width="280" height="72"></canvas></div>`;
+  let cards = `<div class="card kpi ${kpiCls}"><div class="v">${openN}</div><div class="l">things to look at &middot; ${critHighN} urgent</div></div>`;
+  cards += `<div class="card"><div class="v">${d.throughput_mbps.toFixed(2)}</div><div class="l">MB per second, right now</div></div>`;
+  if (DEV_COUNT !== null) cards += `<div class="card"><div class="v">${DEV_COUNT}</div><div class="l">devices on your network</div></div>`;
+  cards += `<div class="card graphcard"><div class="v"><span id="pktrate">&ndash;</span> MB</div><div class="l">live traffic &middot; <span id="pktrate2"></span> packets per tick</div><canvas id="pktgraph" width="280" height="72"></canvas></div>`;
   for (const [label, st] of Object.entries(d.connectivity))
     cards += `<div class="card"><div class="v ${st.up?"up":"down"}">${st.up?"UP":"DOWN"}</div><div class="l">${esc(label)}</div></div>`;
   document.getElementById("cards").innerHTML = cards;
@@ -939,7 +940,8 @@ def api_digest_send():
 # everything so the dashboard works with no AI configured.
 
 _AI_UNAVAILABLE = {"unavailable": True,
-                   "message": "AI answers need an API key -- set OPENAI_API_KEY."}
+                   "message": "AI answers are off -- set OPENAI_API_KEY "
+                              "and ai.provider in config.yaml to enable."}
 
 
 def _ai_assist():
@@ -1097,8 +1099,7 @@ def api_stats():
         device_names = dbm.ip_name_map()
     except Exception:
         device_names = {}
-    whole_network = os.environ.get(
-        "NETMON_WHOLE_NETWORK", "").strip().lower() in ("1", "true", "yes")
+    whole_network = cfgm.whole_network_enabled()
     try:
         _cnt = dbm.query(
             "SELECT status, severity, COUNT(*) FROM alerts WHERE ts > ?"

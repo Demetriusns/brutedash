@@ -21,21 +21,17 @@ import time
 
 from . import detect as detm
 from . import explainer as expl
+from . import config as cfgm
 from .watchdog import Watchdog
 
 DETECT_INTERVAL = 60  # seconds between periodic rule runs
 
 
-def _monitor_loop(stop_event):
+def _monitor_loop(stop_event, digest_hours=24):
     """Detection rules every minute; AI summary every SUMMARY_INTERVAL;
-    email digest every NETMON_DIGEST_HOURS (default 24, 0 disables)."""
+    email digest every digest_hours (0 disables)."""
     last_summary = 0
     last_digest = time.time()  # first digest waits a full interval
-    try:
-        digest_hours = float(os.environ.get("NETMON_DIGEST_HOURS", "24")
-                             or 24)
-    except ValueError:
-        digest_hours = 24
     while not stop_event.wait(DETECT_INTERVAL):
         try:
             detm.run_all()
@@ -58,19 +54,37 @@ def _monitor_loop(stop_event):
 
 
 def main():
+    # Product config: first run creates ~/.config/brutedash/config.yaml
+    # with commented defaults. CLI flags > env vars > config file.
+    cfg_path = cfgm.ensure_bootstrap()
+    cfg = cfgm.load(cfg_path)
+
     ap = argparse.ArgumentParser(description="netmon Phase 1 monitor")
-    ap.add_argument("--iface", default=None, help="interface to sniff")
+    ap.add_argument("--iface", default=cfgm.get(cfg, "capture.interface") or None,
+                    help="interface to sniff (default: config capture.interface)")
     ap.add_argument("--pcap", default=None, help="analyze a pcap and exit")
     ap.add_argument("--dashboard-only", action="store_true",
                     help="serve the dashboard without capturing")
     ap.add_argument("--weekly-report", action="store_true",
                     help="print the weekly report and exit (no capture)")
-    ap.add_argument("--port", type=int, default=5001)
-    ap.add_argument("--host", default="127.0.0.1",
+    ap.add_argument("--port", type=int,
+                    default=int(os.environ.get("NETMON_PORT")
+                                or cfgm.get(cfg, "dashboard.port", 5001)))
+    ap.add_argument("--host",
+                    default=os.environ.get("NETMON_HOST")
+                    or cfgm.get(cfg, "dashboard.host", "127.0.0.1"),
                     help="interface to bind the dashboard to;"
                     " use 0.0.0.0 to reach it from other devices on your LAN"
                     " (set NETMON_PASSWORD first)")
     args = ap.parse_args()
+
+    # Digest cadence: env wins, then config file.
+    digest_env = os.environ.get("NETMON_DIGEST_HOURS", "").strip()
+    try:
+        digest_hours = (float(digest_env) if digest_env
+                        else float(cfgm.get(cfg, "alerts.digest_hours", 24)))
+    except ValueError:
+        digest_hours = 24
 
     if args.weekly_report:
         from . import weekly as weekm
@@ -103,7 +117,8 @@ def main():
     watchdog.start()
     dash.watchdog = watchdog  # dashboard reads live status from here
 
-    monitor = threading.Thread(target=_monitor_loop, args=(stop_event,),
+    monitor = threading.Thread(target=_monitor_loop,
+                               args=(stop_event, digest_hours),
                                daemon=True)
     monitor.start()
 

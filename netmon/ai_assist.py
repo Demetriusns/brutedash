@@ -22,16 +22,27 @@ import time
 
 from . import db as dbm
 from . import explainer
+from . import config as cfgm
 
-MODEL = "gpt-4o-mini"
 QA_WINDOW_S = 24 * 3600  # context window for Q&A: last 24 hours
 VALID_VERDICTS = {"real concern", "likely benign", "uncertain"}
 
 
+def _model():
+    """Configured LLM model (falls back to gpt-4o-mini). Never raises."""
+    try:
+        return cfgm.ai_model()
+    except Exception:
+        return "gpt-4o-mini"
+
+
 def llm_available():
-    """True if an OpenAI key is configured and the package imports."""
+    """True if an OpenAI key is configured, the package imports,
+    and ai.provider in config.yaml is not "off"."""
     try:
         if not os.environ.get("OPENAI_API_KEY"):
+            return False
+        if cfgm.get(cfgm.load_cached(), "ai.provider", "openai") == "off":
             return False
         import openai  # noqa: F401  (optional dependency)
         return True
@@ -55,7 +66,7 @@ def _json_chat(client, prompt, max_tokens=400):
     """Ask the LLM for a JSON object. Returns the dict, or None. Never."""
     try:
         resp = client.chat.completions.create(
-            model=MODEL,
+            model=_model(),
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             max_tokens=max_tokens,

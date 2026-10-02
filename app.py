@@ -18,6 +18,7 @@ from flask import Flask, request, render_template_string
 
 from detector import detect_brute_force
 from ipintel import lookup_ip, describe as describe_intel
+from netmon import config as cfgm
 
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -118,12 +119,12 @@ def write_brief(ip, count, severity):
     if intel:
         evidence += f" IP intel: {describe_intel(intel)}."
     api_key = os.environ.get("OPENAI_API_KEY")
-    if api_key:
+    if api_key and cfgm.ai_enabled():
         try:
             from openai import OpenAI  # optional dependency
             client = OpenAI(api_key=api_key)
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=cfgm.ai_model(),
                 messages=[{"role": "user",
                            "content": BRIEF_PROMPT.format(evidence=evidence)}],
                 response_format={"type": "json_object"},

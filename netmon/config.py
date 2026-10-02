@@ -35,7 +35,7 @@ DEFAULTS = {
     },
     "dashboard": {
         "host": "127.0.0.1",
-        "port": 8080,
+        "port": 5001,
     },
     "ai": {
         # "openai" or "off". The API key always comes from OPENAI_API_KEY.
@@ -45,6 +45,8 @@ DEFAULTS = {
     "alerts": {
         # Future: minimum confidence (0-100) before an alert pages the owner.
         "min_confidence": 0,
+        # Hours between email digest sends; 0 disables.
+        "digest_hours": 24,
     },
 }
 
@@ -64,7 +66,7 @@ capture:
 
 dashboard:
   host: "127.0.0.1"    # bind address; use 0.0.0.0 for LAN access
-  port: 8080
+  port: 5001
 
 ai:
   provider: "openai"   # "openai" or "off" (rule-based summaries when off)
@@ -73,6 +75,7 @@ ai:
 
 alerts:
   min_confidence: 0    # 0-100; alerts below this stay logged but don't notify
+  digest_hours: 24     # hours between email digests; 0 disables
 """
 
 
@@ -150,3 +153,46 @@ def get(cfg: dict, dotted: str, default=None):
             return default
         node = node[part]
     return node
+
+
+_CACHE: dict = {}
+
+
+def load_cached(path: Path | None = None) -> dict:
+    """load() with a stat-based cache so hot paths don't re-read the file."""
+    path = path or config_path()
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    cached = _CACHE.get(key)
+    if cached is not None and cached[1] == mtime:
+        return cached[0]
+    cfg = load(path)
+    _CACHE[key] = (cfg, mtime)
+    return cfg
+
+
+def whole_network_enabled() -> bool:
+    """True when this machine relays the LAN.
+
+    Environment wins (backwards compatible with NETMON_WHOLE_NETWORK=1),
+    then the config file's ``capture.whole_network``.
+    """
+    env = os.environ.get("NETMON_WHOLE_NETWORK", "").strip().lower()
+    if env:
+        return env in ("1", "true", "yes", "on")
+    return bool(get(load_cached(), "capture.whole_network", False))
+
+
+def ai_enabled() -> bool:
+    """LLM features on? Needs an API key AND provider != "off"."""
+    if not os.environ.get("OPENAI_API_KEY"):
+        return False
+    return get(load_cached(), "ai.provider", "openai") != "off"
+
+
+def ai_model() -> str:
+    """Configured LLM model for briefs and Q&A."""
+    return get(load_cached(), "ai.model", "gpt-4o-mini")
