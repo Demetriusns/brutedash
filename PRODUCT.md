@@ -29,8 +29,12 @@ triage in one box. That is the product.
 ## Ship checklist — what it still needs before anyone pays
 
 - [x] Secrets via environment variables (no hardcoded keys) — done
-- [ ] **Unified config file** — one human-readable `config.yaml`, first-run
-      bootstrap, env overrides. (In progress — `netmon/config.py`)
+- [x] **Unified config file** — one human-readable `config.yaml`, first-run
+      bootstrap, env overrides. Wired through run.py, dashboard, capture,
+      explainer, ai_assist, app.py. (shipped 2026-10-02, commit 864f93d)
+- [x] **Detection demo tests** — `tests/demo_detection.py` proves the rules
+      flag real attack shapes on synthetic home + small-business networks
+      while quiet devices stay silent. (shipped 2026-10-02)
 - [ ] **One-command install** — no manual `pip install`, no terminal wizardry.
       Installer or packaged app per OS.
 - [ ] **First-run onboarding** — guided setup inside the dashboard: name the
