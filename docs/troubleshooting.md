@@ -92,8 +92,9 @@ the LAN loses internet until they time out (several minutes).
   expected; put the downstream unit in AP/bridge mode to see them
   individually.
 - bettercap may default to a dead adapter (self-assigned 169.254.x.x).
-  List adapters with `Get-NetAdapter`, take the right InterfaceGuid, and
-  launch with `-iface "\Device\NPF_{GUID}"`.
+  Generate a per-machine caplet instead of hand-picking the interface:
+  `python -m netmon.relay --write` detects the right adapter and subnet
+  on any machine and prints the exact command to run.
 
 ## Noisy alerts
 

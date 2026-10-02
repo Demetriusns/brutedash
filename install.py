@@ -90,10 +90,44 @@ def main():
     except Exception as exc:
         die(f"could not create the config file: {exc}")
 
-    # Optional pieces the user may want later -- report, don't require.
+    # Optional system pieces -- report, don't require. install.py must work
+    # on Windows, macOS, and Linux, so every check below is per-OS.
     print()
-    if shutil.which("bettercap") or Path(r"C:\Tools\bettercap.exe").exists():
+    if os.name == "nt":
+        npcap = (Path(r"C:\Windows\System32\Npcap").exists()
+                 or Path(r"C:\Windows\System32\wpcap.dll").exists())
+        if npcap:
+            print("install: Npcap found -- live capture will work.")
+        else:
+            print("install: Npcap NOT found -- live packet capture needs it.")
+            print("install: download it (free) from https://npcap.com/")
+            print("install: the dashboard alone works fine without it.")
+    elif sys.platform == "darwin":
+        print("install: macOS ships libpcap already; run capture with sudo")
+        print("install: (BPF access) for live monitoring.")
+    else:
+        try:
+            out = subprocess.run(["ldconfig", "-p"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            has_pcap = "libpcap" in out
+        except Exception:
+            has_pcap = False
+        if has_pcap:
+            print("install: libpcap found -- live capture will work.")
+        else:
+            print("install: libpcap NOT found -- live packet capture needs it:")
+            print("install:   Debian/Ubuntu: sudo apt install libpcap0.8")
+            print("install:   Fedora/RHEL:   sudo dnf install libpcap")
+            print("install: the dashboard alone works fine without it.")
+
+    bettercap_paths = [Path(r"C:\Tools\bettercap.exe"),
+                       Path.home() / "bettercap" / "bettercap.exe",
+                       Path("/usr/local/bin/bettercap"),
+                       Path("/usr/bin/bettercap")]
+    if shutil.which("bettercap") or any(p.exists() for p in bettercap_paths):
         print("install: bettercap found -- whole-network mode available.")
+        print("install: generate your per-machine relay caplet with:")
+        print("install:   python -m netmon.relay --write")
     else:
         print("install: bettercap not found (optional; only needed for"
               " whole-network relay mode).")
