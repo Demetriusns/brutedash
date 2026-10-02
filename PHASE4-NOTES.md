@@ -213,9 +213,14 @@ up to a central cloud server, and the dashboard lives in the cloud.
   console. The Flask dev server gets replaced by a production server
   (gunicorn/uvicorn behind a reverse proxy) before anything faces the
   internet.
-- **Stepping stone first:** Tailscale or Cloudflare Tunnel for his own
-  remote access — proves the remote story on his own network before
-  building the product version.
+- **Stepping stone first (parked per his call 2026-10-02):** Tailscale for
+  his own remote access — phone views the home dashboard from anywhere
+  over a private encrypted tunnel, no open ports, nothing internet-facing.
+  Needs: free Tailscale account, app on the PC + phone, NETMON_PASSWORD
+  set (non-negotiable off localhost), dashboard host bound to the tailnet
+  (config knob `dashboard.host` exists since 2026-10-02). Mobile-friendly
+  dashboard CSS shipped 2026-10-02. Build when he says go — proves the
+  remote story on his own network before the product version.
 
 Design principles carried forward from Phase 3.5: AI narrates, code
 decides; response is approval-only; quiet is a feature. Multi-site was

@@ -45,6 +45,9 @@ triage in one box. That is the product.
 - [ ] **False-positive tuning** — per-device baselines exist; need confidence
       scoring and auto-suppression so non-technical owners trust every alert.
 - [ ] **Self-update** — safe auto-update that can't brick a running monitor.
+- [ ] **Remote access (personal)** — Tailscale private tunnel so the owner
+      views the dashboard from anywhere; stepping stone to the Phase 5
+      cloud console. Parked per his call 2026-10-02; mobile CSS shipped.
 - [ ] **Diagnostics bundle** — one-click "send diagnostics" for support.
 - [ ] **Licensing** — key validation for paid tiers.
 - [ ] **Hardening pass** — the monitor runs with elevated network privileges;
