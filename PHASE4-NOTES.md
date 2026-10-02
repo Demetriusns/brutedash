@@ -210,6 +210,10 @@ Keep improving the software first. The Pi phase starts only on his word.
 - Pi likely too weak for local LLM — keep Pi as sensor, PC (or small box)
   as the AI server.
 - Multi-site / central console if it ever goes beyond one network.
+- Banner update when the Pi arrives (his call 2026-10-02): the dashboard
+  banner currently keys off a *local* bettercap process. Once the Pi is
+  the always-on relay, the banner must reflect the Pi's relay state
+  instead (e.g. via the sensor API), not the viewing machine's.
 
 ### Buying the Pi (researched 2026-09-30)
 
