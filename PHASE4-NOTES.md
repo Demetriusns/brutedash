@@ -274,7 +274,10 @@ up to a central cloud server, and the dashboard lives in the cloud.
 ### The council, expanded (his call 2026-10-02)
 
 The triage council grows to the biggest and smartest openly-usable
-models, tiered by cost and gravity:
+models, tiered by cost and gravity. And per his directive the same
+day: the council is a GENERAL capability, not an Orion-only one --
+the agent heads it and consults it across all work (big decisions,
+job hunt, analysis, coding), not just this project.
 
 - **Everyday tier (local, always):** Qwen3 8B via Ollama on the sensor
   box -- private, free, instant. Handles routine narration and
