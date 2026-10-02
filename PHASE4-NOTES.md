@@ -228,10 +228,14 @@ Keep improving the software first. The Pi phase starts only on his word.
 
 ---
 
-## Phase 5 — cloud console for remote monitoring (his call, 2026-10-01)
+## Phase 5 — cloud console for remote monitoring (his call, 2026-10-01;
+expanded 2026-10-02: the central multi-monitor system)
 
 The company version. Motivation, in his words: if we outsource this,
 companies want their network monitored without being on the network.
+And his bigger picture (2026-10-02): one center that watches many
+systems at once -- every customer site is a monitor on the wall, and the
+watching agent sees all of them.
 
 Architecture flip: the dashboard stops living on the monitored box.
 Instead, each client site runs a lightweight sensor that ships summaries
@@ -244,7 +248,16 @@ up to a central cloud server, and the dashboard lives in the cloud.
 - **Cloud server:** multi-tenant console — one login sees every client
   site. Alerting, digest emails, and AI briefs run centrally.
 - **Sensors dial out, never accept inbound.** Like a Cloudflare Tunnel:
-  no port forwarding at client sites, no open doors.
+  no port forwarding at client sites, no open doors. This is a security
+  property, not just convenience -- a sensor that accepts inbound is a
+  target, and Orion would flag it on anyone else's network.
+- **One center, many monitors:** each site is a monitor card -- health,
+  alert counts, traffic -- with drill-down per site. The site owner sees
+  their site; the operator (Demetrius) sees all of them.
+- **The nurse gets a badge:** the watching agent holds a read-only API
+  role on the console. Scheduled checks poll site health + new critical
+  alerts across every monitor, investigate, and notify. No inbound access
+  to customer networks is ever needed -- the console is the single pane.
 - **Security:** per-site API keys, TLS everywhere, password-gated
   console. The Flask dev server gets replaced by a production server
   (gunicorn/uvicorn behind a reverse proxy) before anything faces the
@@ -257,6 +270,25 @@ up to a central cloud server, and the dashboard lives in the cloud.
   (config knob `dashboard.host` exists since 2026-10-02). Mobile-friendly
   dashboard CSS shipped 2026-10-02. Build when he says go — proves the
   remote story on his own network before the product version.
+
+### The council, expanded (his call 2026-10-02)
+
+The triage council grows to the biggest and smartest openly-usable
+models, tiered by cost and gravity:
+
+- **Everyday tier (local, always):** Qwen3 8B via Ollama on the sensor
+  box -- private, free, instant. Handles routine narration and
+  low-severity triage.
+- **Heavyweight tier (API, High/Critical only):** the open-weight
+  frontier -- DeepSeek V4, Kimi K2, Qwen3.5-max, GLM-5.2 -- consulted
+  only when it matters. Home/small-business alert volume is a handful
+  per day, so API cost stays near zero.
+- **License rule for the product:** prefer Apache 2.0 / MIT models
+  (Qwen, GLM, DeepSeek, Mistral) for anything shipped commercially.
+  Kimi's weights are open but under a custom license -- read the
+  redistribution terms before building the product on it.
+- Only alert metadata and flow summaries ever leave the site -- never
+  packet contents, never PII. Free tiers may train on prompts.
 
 Design principles carried forward from Phase 3.5: AI narrates, code
 decides; response is approval-only; quiet is a feature. Multi-site was
