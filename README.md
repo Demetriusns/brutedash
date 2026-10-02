@@ -92,6 +92,25 @@ plain-English explanation.
 
 ### Run it
 
+**Easiest — one command** (sets up everything, safe to re-run):
+
+```bash
+python install.py          # Linux/macOS
+py install.py              # Windows
+```
+
+It creates a virtual environment, installs dependencies, and writes your
+first-run config file. Then:
+
+```bash
+# Dashboard only (no admin rights needed):
+venv/bin/python -m netmon.run --dashboard-only        # Linux/macOS
+venv\Scripts\python -m netmon.run --dashboard-only    # Windows
+# open http://127.0.0.1:5001
+```
+
+Manual setup still works too:
+
 ```bash
 pip install -r requirements.txt
 

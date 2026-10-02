@@ -35,8 +35,11 @@ triage in one box. That is the product.
 - [x] **Detection demo tests** — `tests/demo_detection.py` proves the rules
       flag real attack shapes on synthetic home + small-business networks
       while quiet devices stay silent. (shipped 2026-10-02)
-- [ ] **One-command install** — no manual `pip install`, no terminal wizardry.
-      Installer or packaged app per OS.
+- [x] **One-command install script** — `python install.py` (Windows: `py
+      install.py`): checks Python, creates venv, installs deps, bootstraps
+      config, idempotent re-runs. (shipped 2026-10-02)
+- [ ] **Polished installer** — native-feel package (exe/msi or equivalent)
+      for non-technical buyers. Comes after the product is sale-ready.
 - [ ] **First-run onboarding** — guided setup inside the dashboard: name the
       network, confirm devices, set quiet hours. Zero terminal required.
 - [ ] **False-positive tuning** — per-device baselines exist; need confidence
