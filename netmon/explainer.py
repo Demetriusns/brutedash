@@ -144,11 +144,25 @@ def build_evidence(window_min=WINDOW_MIN, now=None):
 
     alerts = dbm.query(
         "SELECT severity, title, detail FROM alerts WHERE ts > ?"
-        " ORDER BY ts DESC LIMIT 10", (since,))
+        " ORDER BY CASE severity"
+        "  WHEN 'Critical' THEN 0 WHEN 'High' THEN 1"
+        "  WHEN 'Medium' THEN 2 WHEN 'Low' THEN 3 ELSE 4 END,"
+        " ts DESC LIMIT 10",
+        (since,))
     if alerts:
-        lines.append("Alerts fired in window:")
+        lines.append("Alerts fired in window (worst first):")
         for sev, title, detail in alerts:
             lines.append(f"  [{sev}] {title}: {detail}")
+        total_alerts = dbm.query(
+            "SELECT COUNT(*) FROM alerts WHERE ts > ?", (since,))[0][0]
+        if total_alerts > len(alerts):
+            # Budget honesty: say what was cut. Severity-first ordering
+            # guarantees anything omitted is lower-or-equal severity to
+            # what is shown -- Critical/High can never be silently dropped
+            # by newer Low alerts.
+            lines.append(f"  (Note: {total_alerts - len(alerts)} more"
+                         " alert(s) omitted -- lower severity than those"
+                         " shown above.)")
     else:
         lines.append("Alerts fired in window: none.")
 
