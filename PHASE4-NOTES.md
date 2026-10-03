@@ -325,6 +325,12 @@ job hunt, analysis, coding), not just this project.
     bare free account -- thin, but council queries are low-volume. A
     one-time $10 credit top-up (sits unused) lifts it to 1,000/day;
     his call if we ever need it.
+    LIVE 2026-10-02: key connected, tested via `or-chat`. Free
+    rotation that day (17 models): NVIDIA Nemotron 3 family incl. the
+    550B Ultra, Qwen3.8-27B, Google Gemma 4s, poolside/thinkingmachines
+    -- no DeepSeek/GLM/Mistral :free that day, rotation changes.
+    Note: omit max_tokens on free reasoning models (reasoning eats the
+    budget and content comes back null).
   - **Mistral** free experimentation tier (no card): ~1 req/sec.
   - **Cerebras** free tier (no card): 30/min.
   - **Google AI Studio / Gemini** free tier (no card): 1,500 req/day,
