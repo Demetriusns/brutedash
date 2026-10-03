@@ -64,7 +64,18 @@ North star: the automated analyst for a network with nobody watching it.
 
 ### Stop crying wolf (priority 1)
 - Learning from dismissals — tune thresholds and suggest allowlists from
-  his triage feedback; stop crying wolf.
+  his triage feedback; stop crying wolf. DONE 2026-10-03 (batch 4): new
+  `netmon/learn.py` extracts a stable pattern from each dismissed alert
+  (domain for DNS rules, dest IP for port rules, MAC for device rules;
+  LAN IPs never candidates; timestamps/counts ignored), counts repeats
+  per (rule, pattern) with atomic UPSERTs, and at threshold (3 for
+  Low/Medium, 5 for High/Critical — the most demanding severity seen)
+  posts a pending suggestion on the dashboard Settings panel ("Learning
+  from your dismissals"). Only the human's Apply writes the allowlist row
+  (broad/whole-rule patterns are flagged and act as rule wildcards);
+  Ignore blocks re-suggestion. AI council security + robustness reviewed,
+  all findings fixed (rollback on failure, atomic counters, wildcard
+  semantics, substring-match warning).
 - Per-device behavior profiles — "this laptop never uploads 2GB at 3am"
   without hand-written rules. DONE 2026-10-02 (batch 3): per-MAC,
   per-hour baselines learned from 14 days of flows
@@ -343,3 +354,25 @@ job hunt, analysis, coding), not just this project.
 Design principles carried forward from Phase 3.5: AI narrates, code
 decides; response is approval-only; quiet is a feature. Multi-site was
 already hinted at in Phase 4 — Phase 5 is where it becomes the product.
+
+---
+
+## Hardening checklist (council bug review + security review, 2026-10-03)
+
+- [x] Fail-closed LAN binding — non-loopback bind without NETMON_PASSWORD exits(2). (H1)
+- [x] /pcap isolated scratch DB + notifications suppressed on that path; upload size cap. (B2/M4)
+- [x] Diagnostic redaction — heartbeat_url/webhook_url scrubbed, log tail scrubbed. (L5)
+- [x] Login rate limiting — 5 failures/60s per IP → 5-min block, HTTP 429. (H2)
+- [x] Alert email off the detection thread — queue + daemon worker. (B1)
+- [x] Env prefix consistency — BRUTEDASH_* canonical, NETMON_* deprecated with warning. (B3)
+- [x] local_health() under the DB lock — savepoint/rollback probe, no prod tables. (B4)
+- [x] debug=True removed; deps pinned; config.yaml chmod 600; /brief input validation; CR/LF stripped from email strings. (M1/M3/L6/L7/L3)
+- [ ] AI-question (/ask) rate limits.
+- [ ] Pipeline-liveness watermarks.
+- [ ] Rolling database retention + bounded dashboard stats.
+- [ ] Windows restart-on-failure supervision (docs/run-as-service.md is the start).
+- [ ] SSH detector: log rotation resets accumulated counts — read across rotations.
+- [ ] TLS + Secure/SameSite cookies (Phase 5 work). (M2)
+- [ ] CSRF tokens across dashboard routes + JS (own batch). (L1)
+- [ ] LIKE-wildcard alert suppression — needs his product call. (L2)
+- [ ] Prompt-injection sanitizer for LLM inputs (currently bounded by JSON-schema validation). (L4)

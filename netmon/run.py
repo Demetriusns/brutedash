@@ -16,6 +16,7 @@ Live capture needs root (raw sockets). The dashboard alone does not.
 """
 import argparse
 import os
+import sys
 import threading
 import time
 
@@ -48,9 +49,21 @@ def _monitor_loop(stop_event, digest_hours=24):
             last_digest = now
             try:
                 from . import notify as notifm
-                notifm.send_digest()
+                # Async: the monitor thread must never stall on SMTP (B1).
+                notifm.send_digest_async()
             except Exception:
                 pass
+
+
+def _bind_allowed(host):
+    """True if binding `host` is safe. Loopback is always fine; anything
+    else requires NETMON_PASSWORD (H1: fail closed, don't warn-and-bind).
+
+    Split out for unit testing.
+    """
+    if (host or "").strip() in ("127.0.0.1", "localhost", "::1"):
+        return True
+    return bool(os.environ.get("NETMON_PASSWORD"))
 
 
 def main():
@@ -80,20 +93,33 @@ def main():
     ap.add_argument("--weekly-report", action="store_true",
                     help="print the weekly report and exit (no capture)")
     ap.add_argument("--port", type=int,
-                    default=_safe_int(os.environ.get("NETMON_PORT")
-                                      or cfgm.get(cfg, "dashboard.port", 5001),
-                                      5001))
+                    default=_safe_int(
+                        cfgm.env_compat("BRUTEDASH_DASHBOARD_PORT",
+                                        "NETMON_PORT")
+                        or cfgm.get(cfg, "dashboard.port", 5001),
+                        5001))
     ap.add_argument("--host",
-                    default=os.environ.get("NETMON_HOST")
+                    default=cfgm.env_compat("BRUTEDASH_DASHBOARD_HOST",
+                                            "NETMON_HOST")
                     or cfgm.get(cfg, "dashboard.host", "127.0.0.1"),
                     help="interface to bind the dashboard to;"
                     " use 0.0.0.0 to reach it from other devices on your LAN"
-                    " (set NETMON_PASSWORD first)")
+                    " (requires NETMON_PASSWORD -- enforced, not advised)")
     args = ap.parse_args()
+
+    # H1: fail closed. A non-loopback bind with no dashboard password is an
+    # unauthenticated control panel for the whole monitor -- refuse it
+    # loudly instead of warning. Localhost stays usable for dev.
+    if not _bind_allowed(args.host):
+        print(f"ERROR: refusing to bind {args.host} without NETMON_PASSWORD"
+              " set. Set a dashboard password or bind 127.0.0.1.",
+              file=sys.stderr)
+        sys.exit(2)
 
     # Digest cadence: env wins, then config file. Never crash on a bad
     # value (empty YAML key, typo): fall back to 24h.
-    digest_env = os.environ.get("NETMON_DIGEST_HOURS", "").strip()
+    digest_env = cfgm.env_compat("BRUTEDASH_ALERTS_DIGEST_HOURS",
+                                 "NETMON_DIGEST_HOURS").strip()
     try:
         digest_hours = (float(digest_env) if digest_env
                         else float(cfgm.get(cfg, "alerts.digest_hours", 24)))

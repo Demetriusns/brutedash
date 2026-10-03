@@ -20,6 +20,7 @@ import json
 import os
 import sqlite3
 import threading
+import contextlib
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "netmon.db")
@@ -145,8 +146,9 @@ CREATE TABLE IF NOT EXISTS meta(
 """
 
 
-def _connect():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+def _connect(path=None):
+    path = path or DB_PATH
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.executescript(_SCHEMA)
     # Migrate older databases that lack the plain-English alert columns.
@@ -178,18 +180,99 @@ def _connect():
                      " idx_allowlist_kind_pattern ON allowlist(kind, pattern)")
     except Exception:
         pass  # belt and suspenders: allowlist dedupe is hygiene, not load-bearing
+    # B4 cleanup: older health checks created this table in prod on every
+    # tick. The probe is rolled back now; drop the leftover if present.
+    try:
+        conn.execute("DROP TABLE IF EXISTS _healthcheck")
+    except Exception:
+        pass
     conn.commit()
     return conn
 
 
 _conn = None
 
+# Thread-local overrides. The pcap-analysis path runs on a dashboard
+# worker thread and must not touch production state: isolated_db() gives
+# that thread its own scratch connection, and notifications_paused()
+# suppresses the email hook on that thread. Other threads (capture,
+# monitor, dashboard) keep using the shared connection undisturbed.
+_thread_state = threading.local()
+
 
 def _db():
+    """Shared connection, or this thread's isolated one (pcap analysis)."""
+    conn = getattr(_thread_state, "conn", None)
+    if conn is not None:
+        return conn
     global _conn
     if _conn is None:
         _conn = _connect()
     return _conn
+
+
+@contextlib.contextmanager
+def isolated_db(path):
+    """Redirect this thread's db access to a scratch database file.
+
+    B2: /pcap analysis must never write production tables. The scratch
+    DB gets the full schema via _connect(); on exit its connection is
+    closed and discarded (the caller deletes the file).
+    """
+    old = getattr(_thread_state, "conn", None)
+    conn = _connect(path)
+    _thread_state.conn = conn
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        if old is None:
+            try:
+                del _thread_state.conn
+            except AttributeError:
+                pass
+        else:
+            _thread_state.conn = old
+
+
+@contextlib.contextmanager
+def notifications_paused():
+    """Suppress the notify hook on this thread. B2: pcap-derived alerts
+    must never send real emails. Other threads are unaffected."""
+    old = getattr(_thread_state, "notify_paused", False)
+    _thread_state.notify_paused = True
+    try:
+        yield
+    finally:
+        _thread_state.notify_paused = old
+
+
+def writability_probe():
+    """True if the database accepts writes, without persisting anything.
+
+    B4: runs under the module lock on the shared connection -- a
+    rolled-back savepoint proves writability with no schema changes and
+    no row churn. (The old health check opened its own connection and
+    created a _healthcheck table in prod on every tick.)
+    """
+    with _lock:
+        conn = _db()
+        try:
+            conn.execute("SAVEPOINT netmon_health_probe")
+            conn.execute("INSERT INTO meta(key, value) VALUES('_probe','1')")
+            conn.execute("ROLLBACK TO SAVEPOINT netmon_health_probe")
+            conn.execute("RELEASE netmon_health_probe")
+            return True
+        except Exception:
+            try:
+                conn.execute("ROLLBACK TO SAVEPOINT netmon_health_probe")
+                conn.execute("RELEASE netmon_health_probe")
+            except Exception:
+                pass
+            return False
 
 
 def _notify_hook(alert_dict):
@@ -198,7 +281,12 @@ def _notify_hook(alert_dict):
     The notify module is maintained separately; if it's missing, broken,
     or sending fails, alerting itself must never break. This hook is
     always called outside the module lock.
+
+    B2: when notifications_paused() is active on this thread (pcap
+    analysis), the hook is a no-op -- diagnostic alerts never email.
     """
+    if getattr(_thread_state, "notify_paused", False):
+        return
     try:
         from . import notify
         notify.maybe_send_alert(alert_dict)

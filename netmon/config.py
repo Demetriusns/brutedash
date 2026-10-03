@@ -9,6 +9,12 @@ Resolution order (later wins): defaults < config.yaml < BRUTEDASH_* env vars.
 Env mapping: ``BRUTEDASH_DASHBOARD_PORT=9090`` sets ``dashboard.port``.
 Values are coerced to the type of the default (int/float/bool/str).
 
+Env-var rule (B3): BRUTEDASH_* is the canonical prefix for every
+config-file-backed setting. The legacy NETMON_* names still work as
+deprecated aliases, but they print a loud warning -- nothing is silently
+ignored anymore. Standalone secrets (NETMON_PASSWORD, NETMON_SECRET_KEY,
+NETMON_SMTP_*) keep their existing names; see INSTALL.md.
+
 This module has no import-time side effects: call ``load()`` explicitly.
 Secrets (API keys, dashboard password) stay in environment variables and are
 never written to the config file.
@@ -61,6 +67,23 @@ DEFAULTS = {
 
 ENV_PREFIX = "BRUTEDASH_"
 
+
+def env_compat(new_name, old_name, default=""):
+    """Read an env var by its canonical BRUTEDASH_* name, falling back to
+    the legacy NETMON_* name with a loud deprecation warning.
+
+    B3: run.py used to read NETMON_* directly while the docs promised
+    BRUTEDASH_*, so BRUTEDASH_PORT was silently ignored. Nothing here is
+    silent: the new name wins, the old name warns, and a missing var
+    returns the default.
+    """
+    import sys
+    if old_name in os.environ and new_name not in os.environ:
+        print(f"WARNING: {old_name} is deprecated; use {new_name} instead.",
+              file=sys.stderr)
+        return os.environ[old_name]
+    return os.environ.get(new_name, default)
+
 _TEMPLATE = """\
 # Project Orion configuration.
 # Edit values below, then restart Orion. Secrets (API keys, passwords) are
@@ -107,6 +130,11 @@ def ensure_bootstrap(path: Path | None = None) -> Path:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_TEMPLATE)
+        try:
+            # L6: the file may hold monitor.heartbeat_url -- not world-readable.
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     return path
 
 

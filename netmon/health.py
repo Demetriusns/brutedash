@@ -80,17 +80,16 @@ def local_health():
             return False, f"disk critically low ({free // 1024 // 1024} MB free)"
     except Exception as exc:
         return False, f"disk check failed: {exc}"
-    # Database: can we write?
+    # Database: can we write? Routed through the db module's lock; the
+    # probe uses a rolled-back savepoint, so no tables or rows persist
+    # (B4: the old check opened its own connection and created a
+    # _healthcheck table in prod on every tick).
     try:
-        conn = sqlite3.connect(dbm.DB_PATH, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("CREATE TABLE IF NOT EXISTS _healthcheck(id INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO _healthcheck DEFAULT VALUES")
-        conn.execute("DELETE FROM _healthcheck")
-        conn.commit()
-        conn.close()
+        from . import db as dbm
+        if not dbm.writability_probe():
+            return False, "database not writable"
     except Exception as exc:
-        return False, f"database not writable: {exc}"
+        return False, f"database check failed: {exc}"
     return True, "ok"
 
 
@@ -144,7 +143,8 @@ class Heartbeat(threading.Thread):
 def _scrub(text):
     """Redact anything that looks like a secret value."""
     import re
-    return re.sub(r"(?i)(key|token|password|secret)\s*[:=]\s*\S+",
+    return re.sub(r"(?i)(key|token|password|secret|heartbeat_url|webhook_url)"
+                  r"\s*[:=]\s*\S+",
                   r"\1=***", text)
 
 
@@ -196,14 +196,15 @@ def write_diagnostics_bundle(reason="manual"):
             (dest / "config.redacted.yaml").write_text(
                 f"<unreadable: {exc}>", encoding="utf-8")
 
-        # 3. Recent log tail.
+        # 3. Recent log tail, scrubbed like the config (L5: the tail used
+        # to ship unredacted -- secrets can land in log lines too).
         try:
             lp = log_path()
             if lp.exists():
                 lines = lp.read_text(encoding="utf-8",
                                      errors="replace").splitlines()
                 (dest / "orion.log.tail.txt").write_text(
-                    "\n".join(lines[-300:]), encoding="utf-8")
+                    _scrub("\n".join(lines[-300:])), encoding="utf-8")
         except Exception as exc:
             (dest / "orion.log.tail.txt").write_text(
                 f"<unreadable: {exc}>", encoding="utf-8")

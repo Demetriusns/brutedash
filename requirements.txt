@@ -1,7 +1,10 @@
-Flask>=3.0
-scapy>=2.5
+# Pinned runtime dependencies (M3). Verified working together 2026-10-03.
+# Regenerate with: pip freeze | grep -iE "^(flask|werkzeug|scapy|openai|pyyaml)=="
+Flask==3.1.3
+Werkzeug==3.1.9
+scapy==2.7.0
 # optional — enables LLM-powered triage in app.py and AI summaries in netmon/
 # (rule-based fallbacks otherwise)
-openai>=1.0
+openai==3.24.0
 
-pyyaml>=6.0  # config.yaml parsing (netmon/config.py)
+PyYAML==6.0.1  # config.yaml parsing (netmon/config.py)

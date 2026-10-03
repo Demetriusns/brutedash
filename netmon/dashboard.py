@@ -12,6 +12,7 @@ import hmac
 import os
 import sys
 import tempfile
+import threading
 import time
 
 from flask import Flask, request, jsonify, render_template_string, redirect, \
@@ -23,6 +24,10 @@ from . import relay as relaym
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("NETMON_SECRET_KEY", "") or os.urandom(24)
+
+# M4: cap uploads -- a multi-GB pcap is a disk/memory DoS. Flask aborts
+# oversized bodies with 413 before we ever touch them.
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 
 
 @app.after_request
@@ -150,12 +155,58 @@ password to continue.</p>
 def login():
     if request.method == "GET":
         return render_template_string(LOGIN_HTML, error=None)
+    ip = request.remote_addr or "unknown"
+    # H2: no unlimited guessing. 5 failures/minute per IP -> 5-min block.
+    if not _login_allowed(ip):
+        return render_template_string(
+            LOGIN_HTML, error="Too many attempts. Try again later."), 429
     password = request.form.get("password", "")
     if NETMON_PASSWORD and hmac.compare_digest(password, NETMON_PASSWORD):
+        _clear_login_failures(ip)
         session["authed"] = True
         return redirect("/")
+    _record_login_failure(ip)
     return render_template_string(
         LOGIN_HTML, error="Wrong password, try again.")
+
+
+# --- login rate limiting (H2, stdlib only) ---------------------------------
+# Per-IP sliding window: 5 failures in 60s earns a 5-minute block.
+# Successful logins clear the record. State is in-memory; a restart
+# resets it, which is fine for a single-owner home monitor.
+
+_LOGIN_ATTEMPTS = {}
+_LOGIN_LOCK = threading.Lock()
+_LOGIN_MAX = 5
+_LOGIN_WINDOW = 60
+_LOGIN_BLOCK = 300
+
+
+def _login_allowed(ip):
+    now = time.time()
+    with _LOGIN_LOCK:
+        stamps = [t for t in _LOGIN_ATTEMPTS.get(ip, [])
+                  if now - t < _LOGIN_BLOCK]
+        if not stamps:
+            _LOGIN_ATTEMPTS.pop(ip, None)
+            return True
+        _LOGIN_ATTEMPTS[ip] = stamps
+        recent = [t for t in stamps if now - t < _LOGIN_WINDOW]
+        return len(recent) < _LOGIN_MAX
+
+
+def _record_login_failure(ip):
+    now = time.time()
+    with _LOGIN_LOCK:
+        stamps = [t for t in _LOGIN_ATTEMPTS.get(ip, [])
+                  if now - t < _LOGIN_BLOCK]
+        stamps.append(now)
+        _LOGIN_ATTEMPTS[ip] = stamps
+
+
+def _clear_login_failures(ip):
+    with _LOGIN_LOCK:
+        _LOGIN_ATTEMPTS.pop(ip, None)
 
 
 @app.route("/logout")
@@ -1250,24 +1301,33 @@ def pcap():
     with tempfile.NamedTemporaryFile(suffix=".pcap", delete=False) as tmp:
         f.save(tmp.name)
         path = tmp.name
+    # B2: a diagnostic upload must never write production tables or send
+    # real emails. Analyze against an isolated scratch DB with the notify
+    # hook paused -- this thread only; the live monitor is unaffected.
+    scratch = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    scratch.close()
     try:
-        agg = capm.run_pcap(path)
+        with dbm.isolated_db(scratch.name), dbm.notifications_paused():
+            try:
+                agg = capm.run_pcap(path)
+            finally:
+                os.unlink(path)
+            # Anchor analysis windows at the newest packet, not wall-clock
+            # time, so old captures analyze against their own timeline.
+            anchor = agg.max_ts or time.time()
+            from . import detect as detm
+            detm.run_all(now=anchor)
+            alerts = [
+                {"severity": sev, "title": t, "detail": d, "meaning": m,
+                 "is_normal": n, "what_to_do": w}
+                for sev, t, d, m, n, w in dbm.query(
+                    "SELECT severity, title, detail, meaning, is_normal,"
+                    " what_to_do FROM alerts WHERE ts > ?"
+                    " ORDER BY ts DESC LIMIT 20", (anchor - 86400,))
+            ]
+            summary, _origin = expl.summarize(save=False, now=anchor)
     finally:
-        os.unlink(path)
-    # Anchor analysis windows at the newest packet, not wall-clock time,
-    # so old captures analyze against their own timeline.
-    anchor = agg.max_ts or time.time()
-    from . import detect as detm
-    detm.run_all(now=anchor)
-    alerts = [
-        {"severity": sev, "title": t, "detail": d, "meaning": m,
-         "is_normal": n, "what_to_do": w}
-        for sev, t, d, m, n, w in dbm.query(
-            "SELECT severity, title, detail, meaning, is_normal, what_to_do"
-            " FROM alerts WHERE ts > ?"
-            " ORDER BY ts DESC LIMIT 20", (anchor - 86400,))
-    ]
-    summary, _origin = expl.summarize(save=False, now=anchor)
+        os.unlink(scratch.name)
     return render_template_string(PCAP_RESULT_HTML, filename=f.filename,
                                   packets=agg.packets_seen,
                                   summary=summary, alerts=alerts)

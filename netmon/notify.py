@@ -17,8 +17,11 @@ hour, a single "still happening" escalation replaces the stream.
 Nothing here ever raises: any failure means False.
 """
 import os
+import queue
+import re
 import smtplib
 import sys
+import threading
 import time
 from datetime import datetime
 from email.message import EmailMessage
@@ -33,6 +36,55 @@ _SENDABLE = {"High", "Critical"}
 # In-memory fallback cooldown, keyed by alert kind -> last sent epoch.
 # Used only when the db meta helpers (added by a teammate) are missing.
 _mem_cooldown = {}
+
+
+# --- async delivery ---------------------------------------------------------
+# B1: SMTP used to run synchronously inside db.add_alert, i.e. on the
+# detection thread -- one slow mail server stalled detection up to 30s
+# per alert. Delivery now goes through a single daemon worker thread;
+# maybe_send_alert only enqueues and always returns fast.
+
+_job_queue = queue.Queue()
+_worker_lock = threading.Lock()
+_worker_started = False
+
+
+def _ensure_worker():
+    global _worker_started
+    with _worker_lock:
+        if not _worker_started:
+            threading.Thread(target=_worker_loop, name="notify-worker",
+                             daemon=True).start()
+            _worker_started = True
+
+
+def _worker_loop():
+    while True:
+        try:
+            job = _job_queue.get()
+        except Exception:
+            continue
+        try:
+            kind, payload = job
+            if kind == "alert":
+                _maybe_send_alert(payload)
+            elif kind == "digest":
+                _send_digest()
+        except Exception as exc:
+            try:
+                print(f"netmon notify: worker job failed: {exc}",
+                      file=sys.stderr)
+            except Exception:
+                pass
+        finally:
+            _job_queue.task_done()
+
+
+def _clean(text):
+    """Strip CR/LF from LAN-derived strings before they reach email
+    headers or bodies. L3: a crafted newline in an alert title made
+    EmailMessage raise, which silently dropped that alert's email."""
+    return re.sub(r"[\r\n]+", " ", str(text or "")).strip()
 
 
 def _meta_get(key):
@@ -91,8 +143,8 @@ def record_cooldown(kind):
 def build_email(alert):
     """Plain-English (subject, body) for an alert dict. Never raises."""
     try:
-        title = (alert.get("title") or "Something needs your attention").strip()
-        detail = (alert.get("detail") or "").strip()
+        title = _clean(alert.get("title")) or "Something needs your attention"
+        detail = _clean(alert.get("detail"))
         meaning = (alert.get("meaning") or "").strip() or \
             "We're still learning about this one."
         is_normal = (alert.get("is_normal") or "").strip() or \
@@ -157,17 +209,26 @@ def _send(config, subject, body):
 
 
 def maybe_send_alert(alert):
-    """Email the user about a High/Critical alert. Returns True on send.
+    """Queue an alert email for High/Critical alerts.
 
-    Returns False (never raises) when the alert isn't High/Critical,
-    email isn't configured, the per-kind hourly cooldown is active,
-    or sending fails for any reason.
+    Returns True when the alert was accepted for delivery -- NOT when the
+    email was sent (delivery is async). Returns False (never raises) for
+    anything that isn't a queueable alert.
+
+    Never blocks the caller: the detection thread must not stall on SMTP.
+    Severity/config/quiet-hours/cooldown filtering happens on the worker.
     """
     try:
-        return _maybe_send_alert(alert)
+        if not isinstance(alert, dict):
+            return False
+        if (alert.get("severity") or "").strip() not in _SENDABLE:
+            return False
+        _ensure_worker()
+        _job_queue.put(("alert", dict(alert)))
+        return True
     except Exception as exc:  # never raise; one stderr line at most
         try:
-            print(f"netmon notify: failed to send alert email: {exc}",
+            print(f"netmon notify: failed to queue alert email: {exc}",
                   file=sys.stderr)
         except Exception:
             pass
@@ -296,8 +357,8 @@ def build_escalation_email(alert, kind):
         count = rows[0][0] if rows else 0
     except Exception:
         count = 0
-    title = (alert.get("title") or "Something on your network").strip()
-    detail = (alert.get("detail") or "").strip()
+    title = _clean(alert.get("title")) or "Something on your network"
+    detail = _clean(alert.get("detail"))
     subject = f"[netmon] Still happening: {title} (x{count} in the last hour)"
     lines = [
         "Hi -- this keeps firing, so I'm rolling it into one email"
@@ -337,12 +398,13 @@ def _build_digest(rows):
     for kind, severity, title, detail, ts in rows:
         g = groups.get(kind)
         if g is None:
-            g = groups[kind] = {"severity": severity or "", "title": title,
+            g = groups[kind] = {"severity": severity or "",
+                                "title": _clean(title),
                                 "count": 0, "latest": None}
             order.append(kind)
         g["count"] += 1
         if g["latest"] is None:
-            g["latest"] = (detail, ts)
+            g["latest"] = (_clean(detail), ts)
     n = len(rows)
     subject = (f"[netmon] Digest: {n} alert{'s' if n != 1 else ''}"
                f" across {len(groups)} kind{'s' if len(groups) != 1 else ''}")
@@ -381,6 +443,19 @@ def send_digest():
                   file=sys.stderr)
         except Exception:
             pass
+        return False
+
+
+def send_digest_async():
+    """Queue a digest email for the worker thread. Returns True when
+    queued. Use this on the monitor thread (run.py) -- the dashboard's
+    "send now" button keeps the synchronous send_digest() so it can
+    report the outcome to the user."""
+    try:
+        _ensure_worker()
+        _job_queue.put(("digest", None))
+        return True
+    except Exception:
         return False
 
 

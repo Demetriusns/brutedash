@@ -10,6 +10,7 @@ Run:  python app.py   (then open http://127.0.0.1:5000)
 """
 import os
 import json
+import ipaddress
 import sqlite3
 import tempfile
 from datetime import datetime
@@ -246,12 +247,23 @@ def history():
 
 @app.route("/brief", methods=["POST"])
 def brief():
-    ip = request.form["ip"]
-    count = request.form["count"]
-    severity = request.form["severity"]
+    # L7: these fields feed the LLM prompt -- validate at the boundary.
+    ip = request.form.get("ip", "")
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return "Invalid IP", 400
+    try:
+        count = int(request.form.get("count", ""))
+    except (TypeError, ValueError):
+        return "Invalid count", 400
+    severity = request.form.get("severity", "")
+    if severity not in VALID_SEVERITIES:
+        return "Invalid severity", 400
     brief, source = write_brief(ip, count, severity)
     return render_template_string(BRIEF_HTML, ip=ip, brief=brief, origin=source)
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # M1: debug=True enables the Werkzeug debugger -- never ship it.
+    app.run()
