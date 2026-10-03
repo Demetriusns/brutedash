@@ -314,6 +314,24 @@ job hunt, analysis, coding), not just this project.
   frontier -- DeepSeek V4, Kimi K2, Qwen3.5-max, GLM-5.2 -- consulted
   only when it matters. Home/small-business alert volume is a handful
   per day, so API cost stays near zero.
+- **Free tiers first (his call 2026-10-02).** Verified 2026-10-02:
+  - **Groq** (no card): free Qwen models (qwen3.6-27b, qwen3.8-27b),
+    ~1,000 req/day each, 30/min. Best free deal on the board.
+  - **OpenRouter `:free`** (no card): one key, whatever's free that
+    week (DeepSeek, GLM, Mistral rotate through). 20/min, 50/day on a
+    bare free account -- thin, but council queries are low-volume. A
+    one-time $10 credit top-up (sits unused) lifts it to 1,000/day;
+    his call if we ever need it.
+  - **Mistral** free experimentation tier (no card): ~1 req/sec.
+  - **Cerebras** free tier (no card): 30/min.
+  - **Google AI Studio / Gemini** free tier (no card): 1,500 req/day,
+    1M context -- already a roadmap candidate, generous fallback.
+  - DeepSeek V4 / Kimi K2 official APIs are paid (cheap); reach them
+    free via OpenRouter `:free` when they're in rotation, paid direct
+    only if a week ever needs them and they're not.
+  - Free-tier prompts may be used for training -- only alert metadata
+    and flow summaries ever leave the site, never packet contents or
+    PII, same rule as before.
 - **License rule for the product:** prefer Apache 2.0 / MIT models
   (Qwen, GLM, DeepSeek, Mistral) for anything shipped commercially.
   Kimi's weights are open but under a custom license -- read the
