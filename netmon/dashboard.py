@@ -10,6 +10,7 @@ for viewing an existing database:  python -m netmon.dashboard
 """
 import hmac
 import os
+import sys
 import tempfile
 import time
 
@@ -74,6 +75,8 @@ a{color:#58a6ff} button{background:#238636;color:#fff;border:0;padding:.5em 1.2e
 .badge{display:inline-block;padding:.15em .6em;border-radius:999px;font-size:.8em;white-space:nowrap}
 .badge.ok{background:#1a3a24;color:#7ee787;border:1px solid #2d6a3f}
 .badge.warn{background:#3d2e12;color:#f0b429;border:1px solid #8a6d1f}
+.sugcard{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.8em 1em;margin:.6em 0}
+p.warn{background:#3d2e12;border:1px solid #8a6d1f;color:#f0b429;padding:.5em .8em;border-radius:4px}
 input,textarea,select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;font-family:monospace;padding:.4em;border-radius:4px}
 .banner-red{background:#3d1113;border:1px solid #f85149;color:#f85149;padding:.8em 1em;border-radius:6px;margin-bottom:1em}
 .banner-blue{background:#0d2137;border:1px solid #58a6ff;color:#58a6ff;padding:.8em 1em;border-radius:6px;margin-bottom:1em}
@@ -262,6 +265,11 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 </select>
 <input id="al_pattern" placeholder="e.g. aa:bb:cc:dd:ee:ff or 8080" size="28">
 <button class="btn-sm" onclick="addAllow()">Add</button></p>
+</div></details>
+
+<details class="settings"><summary>Learning from your dismissals</summary><div class="inner">
+<p class="note">When you dismiss the same kind of alert a few times, the monitor proposes a "never alert me about this" entry. Nothing changes until you click Apply.</p>
+<div id="learnsug"><p class="note">Loading...</p></div>
 </div></details>
 
 <details class="settings"><summary>Email digest</summary><div class="inner">
@@ -618,6 +626,23 @@ async function delAllow(id){
   await fetch("/api/allowlist/" + id, {method:"DELETE"});
   loadAllowlist();
 }
+async function loadSuggestions(){
+  const r = await fetch("/api/learn/suggestions");
+  const d = await r.json();
+  document.getElementById("learnsug").innerHTML = d.suggestions.length ?
+    d.suggestions.map(s=>
+      `<div class="sugcard"><p>${esc(s.why)}</p>` +
+      (s.broad ? `<p class="warn">This would silence every '${esc(s.kind)}' alert -- only apply if the whole rule is noise for you.</p>` : ``) +
+      `<p class="note">Pattern: <code>${esc(s.pattern)}</code> &middot; Rule: <code>${esc(s.kind)}</code><br>` +
+      `The pattern matches anywhere it appears in the alert text, so it can cover more than one exact case (e.g. "port 80" also matches "port 8000").</p>` +
+      `<button class="btn-sm" onclick="decideSug(${s.id},'apply')">Apply -- never alert me about this</button> ` +
+      `<button class="btn-sm ghost" onclick="decideSug(${s.id},'ignore')">Ignore</button></div>`).join("")
+    : '<p class="note">No suggestions yet. Dismiss a few alerts you don\'t care about and the monitor will start proposing these.</p>';
+}
+async function decideSug(id, what){
+  await fetch("/api/learn/suggestions/" + id + "/" + what, {method:"POST"});
+  loadSuggestions(); loadAllowlist();
+}
 async function sendDigest(){
   const el = document.getElementById("digestmsg");
   el.textContent = "sending...";
@@ -627,7 +652,7 @@ async function sendDigest(){
     : "Nothing to send (no recent alerts, or email isn't configured).";
 }
 refresh(); setInterval(refresh, 5000);
-loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist();
+loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions();
 </script></body></html>
 """
 
@@ -778,6 +803,13 @@ def alert_dismiss(aid):
     if not _set_alert_status(aid, "dismissed", note):
         return jsonify({"ok": False,
                         "error": "triage is not available yet"}), 500
+    # Learning from the dismissal must never break the dismiss itself,
+    # but a broken extractor should not be invisible either.
+    try:
+        dbm.learn_from_dismissal(aid)
+    except Exception as exc:
+        print(f"netmon dashboard: learn_from_dismissal failed: {exc!r}",
+              file=sys.stderr)
     return jsonify({"ok": True})
 
 
@@ -961,6 +993,30 @@ def api_allowlist_add():
 def api_allowlist_del(eid):
     dbm.remove_allowlist(eid)
     return jsonify({"ok": True})
+
+
+# --- learning from dismissals ------------------------------------------------
+# Pattern-level suggestions: dismissing alerts teaches the monitor; at
+# threshold a pending suggestion appears here, and only the human's Apply
+# click writes the allowlist row. Distinct from /api/rule_health's
+# rule-level hints ("this whole rule cries wolf").
+
+
+@app.route("/api/learn/suggestions")
+def api_learn_suggestions():
+    return jsonify({"suggestions": dbm.list_suggestions()})
+
+
+@app.route("/api/learn/suggestions/<int:sid>/apply", methods=["POST"])
+def api_learn_apply(sid):
+    ok = dbm.decide_suggestion(sid, "applied")
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/learn/suggestions/<int:sid>/ignore", methods=["POST"])
+def api_learn_ignore(sid):
+    ok = dbm.decide_suggestion(sid, "ignored")
+    return jsonify({"ok": ok})
 
 
 @app.route("/api/digest/send", methods=["POST"])

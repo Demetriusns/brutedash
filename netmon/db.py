@@ -117,6 +117,27 @@ CREATE TABLE IF NOT EXISTS allowlist(
     created_ts REAL
 );
 
+CREATE TABLE IF NOT EXISTS dismissal_lessons(
+    kind TEXT NOT NULL,          -- alert kind that was dismissed
+    pattern TEXT NOT NULL,       -- stable token learned from the dismissal
+    dismissals INTEGER NOT NULL DEFAULT 0,  -- times this (kind, pattern) was dismissed
+    sev TEXT,                    -- highest severity dismissed for it (Low|Medium|High|Critical)
+    last_ts REAL,
+    PRIMARY KEY(kind, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS suggestions(
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,          -- alert kind the suggestion would silence
+    pattern TEXT NOT NULL,       -- proposed allowlist pattern
+    broad INTEGER NOT NULL DEFAULT 0,  -- 1 if the pattern is the whole rule
+    why TEXT,                    -- plain-English reason for the human
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | applied | ignored
+    created_ts REAL,
+    decided_ts REAL,
+    UNIQUE(kind, pattern)
+);
+
 CREATE TABLE IF NOT EXISTS meta(
     key TEXT PRIMARY KEY,
     value TEXT
@@ -142,6 +163,21 @@ def _connect():
     dns_cols = {r[1] for r in conn.execute("PRAGMA table_info(dns_queries)")}
     if "src_ip" not in dns_cols:
         conn.execute("ALTER TABLE dns_queries ADD COLUMN src_ip TEXT")
+    # Dismissal-learning tables (Phase 3.5): older DBs get the sev column
+    # and the allowlist uniqueness index below.
+    lesson_cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(dismissal_lessons)")}
+    if "sev" not in lesson_cols:
+        conn.execute("ALTER TABLE dismissal_lessons ADD COLUMN sev TEXT")
+    try:
+        # De-dupe any legacy rows first so the index always builds.
+        conn.execute("DELETE FROM allowlist WHERE id NOT IN"
+                     " (SELECT MIN(id) FROM allowlist"
+                     " GROUP BY kind, pattern)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS"
+                     " idx_allowlist_kind_pattern ON allowlist(kind, pattern)")
+    except Exception:
+        pass  # belt and suspenders: allowlist dedupe is hygiene, not load-bearing
     conn.commit()
     return conn
 
@@ -572,7 +608,8 @@ def set_quiet_hours(windows):
 # identifying text (e.g. a MAC, an "ip:port" key, a domain).
 
 def add_allowlist(kind, pattern, note=""):
-    """Add an allowlist entry; returns its id."""
+    """Add an allowlist entry; returns its id. Idempotent on
+    (kind, pattern): a duplicate add returns the existing row's id."""
     import time
     kind = (kind or "").strip()
     pattern = (pattern or "").strip()
@@ -580,13 +617,17 @@ def add_allowlist(kind, pattern, note=""):
         raise ValueError("kind and pattern are required")
     with _lock:
         conn = _db()
-        cur = conn.execute(
+        conn.execute(
             "INSERT INTO allowlist (kind, pattern, note, created_ts)"
-            " VALUES (?,?,?,?)",
+            " VALUES (?,?,?,?)"
+            " ON CONFLICT(kind, pattern) DO NOTHING",
             (kind, pattern[:200], (note or "").strip()[:200],
              time.time()))
         conn.commit()
-        return cur.lastrowid
+        row = conn.execute(
+            "SELECT id FROM allowlist WHERE kind=? AND pattern=?",
+            (kind, pattern[:200])).fetchone()
+        return row[0] if row else None
 
 
 def remove_allowlist(entry_id):
@@ -609,15 +650,177 @@ def list_allowlist():
 
 def is_allowlisted(kind, text):
     """True if any allowlist pattern for this kind appears in text
-    (case-insensitive substring match)."""
+    (case-insensitive substring match). A pattern equal to the kind
+    name itself is a whole-rule wildcard (used for broad suggestions)."""
     text = (text or "").lower()
+    kind = (kind or "").lower()
     if not text:
         return False
     with _lock:
         conn = _db()
         rows = conn.execute(
             "SELECT pattern FROM allowlist WHERE kind=?", (kind,)).fetchall()
-    return any((p or "").lower() in text for (p,) in rows if p)
+    for (p,) in rows:
+        p = (p or "").lower()
+        if not p:
+            continue
+        if p == kind:
+            return True  # whole-rule wildcard
+        if p in text:
+            return True
+    return False
+
+
+# --- learning from dismissals --------------------------------------------
+# Dismissing an alert teaches the monitor. Patterns extracted from
+# dismissed alerts (see netmon/learn.py) are counted; at threshold a
+# pending suggestion appears on the dashboard, and only the human's
+# Apply click writes the allowlist row.
+
+
+def learn_from_dismissal(alert_id):
+    """Record one dismissal; maybe create a pending suggestion.
+
+    Loads the alert, extracts its pattern via netmon.learn, bumps the
+    (kind, pattern) counter atomically, and creates a suggestion when the
+    policy says so. Returns the suggestion dict, or None. Never raises: a
+    learning failure must not break dismissing, but it is logged and the
+    half-open transaction is rolled back so the shared connection stays
+    clean for the next caller.
+    """
+    import sys as _sys
+    import time
+    try:
+        from . import learn as learnm
+    except Exception:
+        return None
+    try:
+        with _lock:
+            conn = _db()
+            row = conn.execute(
+                "SELECT kind, severity, title, detail FROM alerts"
+                " WHERE id=?", (alert_id,)).fetchone()
+        if not row:
+            return None
+        kind, severity, title, detail = row
+        kind = (kind or "").strip()
+        alert = {"kind": kind, "severity": severity,
+                 "title": title, "detail": detail}
+        pattern, broad = learnm.extract_pattern(alert)
+        pattern = (pattern or "").strip()
+        if not kind or not pattern:
+            return None  # nothing stable to learn from
+        now = time.time()
+        sev = (severity or "Medium").strip()
+        # One lock, atomic single-statement upserts: safe in-process and
+        # across processes (WAL), no read-modify-write in Python.
+        with _lock:
+            conn = _db()
+            # Atomic increment; sev tracks the highest severity dismissed,
+            # so the suggestion threshold uses the most demanding one seen.
+            cur = conn.execute(
+                "INSERT INTO dismissal_lessons (kind, pattern, dismissals,"
+                " sev, last_ts) VALUES (?,?,1,?,?)"
+                " ON CONFLICT(kind, pattern) DO UPDATE SET"
+                " dismissals = dismissal_lessons.dismissals + 1,"
+                " sev = CASE WHEN dismissal_lessons.sev IS NULL THEN excluded.sev"
+                "          WHEN excluded.sev IN ('High','Critical')"
+                "           AND dismissal_lessons.sev NOT IN ('High','Critical')"
+                "          THEN excluded.sev"
+                "          WHEN excluded.sev = 'Critical'"
+                "           AND dismissal_lessons.sev != 'Critical'"
+                "          THEN excluded.sev"
+                "          ELSE dismissal_lessons.sev END,"
+                " last_ts = excluded.last_ts"
+                " RETURNING dismissals, sev",
+                (kind, pattern, sev, now)).fetchone()
+            dismissals, max_sev = cur[0], (cur[1] or "Medium")
+            threshold = learnm.threshold_for(max_sev)
+            if dismissals < threshold:
+                conn.commit()
+                return None
+            srow = conn.execute(
+                "SELECT 1 FROM suggestions WHERE kind=? AND pattern=?"
+                " LIMIT 1", (kind, pattern)).fetchone()
+            if srow:
+                conn.commit()
+                return None
+            why = learnm.why_text(kind, pattern, broad, dismissals, max_sev)
+            ins = conn.execute(
+                "INSERT INTO suggestions (kind, pattern, broad, why,"
+                " status, created_ts) VALUES (?,?,?,?,'pending',?)"
+                " ON CONFLICT(kind, pattern) DO NOTHING",
+                (kind, pattern, 1 if broad else 0, why, now))
+            conn.commit()
+            if ins.rowcount == 0:
+                return None  # lost a race with another process; it exists now
+            sug = conn.execute(
+                "SELECT id FROM suggestions WHERE kind=? AND pattern=?",
+                (kind, pattern)).fetchone()
+            return {"id": sug[0] if sug else None, "kind": kind,
+                    "pattern": pattern, "broad": bool(broad), "why": why,
+                    "status": "pending"}
+    except Exception as exc:
+        try:
+            _db().rollback()
+        except Exception:
+            pass
+        print(f"netmon learn: learn_from_dismissal failed: {exc!r}",
+              file=_sys.stderr)
+        return None
+
+
+def list_suggestions(status="pending"):
+    """Suggestions awaiting (or past) a human decision, newest first."""
+    with _lock:
+        conn = _db()
+        return [
+            {"id": i, "kind": k, "pattern": p, "broad": bool(b),
+             "why": w or "", "status": s, "created_ts": t}
+            for i, k, p, b, w, s, t in conn.execute(
+                "SELECT id, kind, pattern, broad, why, status, created_ts"
+                " FROM suggestions WHERE status=? ORDER BY created_ts DESC",
+                (status,))]
+
+
+def decide_suggestion(sid, decision):
+    """Apply or ignore a suggestion. Applying writes the allowlist row
+    (the human's one click is the only thing that ever silences alerts).
+    Returns True on success."""
+    import time
+    if decision not in ("applied", "ignored"):
+        raise ValueError(f"bad decision: {decision!r}")
+    with _lock:
+        conn = _db()
+        try:
+            row = conn.execute(
+                "SELECT kind, pattern, status FROM suggestions WHERE id=?",
+                (sid,)).fetchone()
+            if not row or row[2] != "pending":
+                conn.rollback()
+                return False
+            kind, pattern = (row[0] or "").strip(), (row[1] or "").strip()
+            if decision == "applied" and (not kind or not pattern):
+                conn.rollback()
+                return False  # mirrors the manual add route's validation
+            conn.execute(
+                "UPDATE suggestions SET status=?, decided_ts=? WHERE id=?",
+                (decision, time.time(), sid))
+            if decision == "applied":
+                conn.execute(
+                    "INSERT INTO allowlist (kind, pattern, note, created_ts)"
+                    " VALUES (?,?,?,?)",
+                    (kind, pattern,
+                     f"Suggested after repeated dismissals; applied by owner.",
+                     time.time()))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+    return True
 
 
 def set_alert_status(alert_id, status, note=None):
