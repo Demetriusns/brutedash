@@ -33,11 +33,10 @@ analyst" review that night. Everything else was already on the roadmap.
 
 ## Phase 3.5 — the true automated SOC analyst (Demetrius's call, 2026-09-30)
 
-Goal: one system doing the job of a senior analyst for small companies —
+Goal: one system doing the job of a senior analyst for small networks —
 detect, correlate, investigate, respond, and prove it. All on one box.
 
-North star: the SOC analyst a 20-person company can't afford to hire.
-A junior analyst costs ~$70k/year. This is a box plus a subscription.
+North star: the automated analyst for a network with nobody watching it.
 
 ### Design principles (his call, 2026-09-30)
 - AI narrates, code decides. Deterministic detection fires alerts; the LLM
@@ -259,33 +258,28 @@ Keep improving the software first. The Pi phase starts only on his word.
 ## Phase 5 — cloud console for remote monitoring (his call, 2026-10-01;
 expanded 2026-10-02: the central multi-monitor system)
 
-The company version. Motivation, in his words: if we outsource this,
-companies want their network monitored without being on the network.
-And his bigger picture (2026-10-02): one center that watches many
-systems at once -- every customer site is a monitor on the wall, and the
-watching agent sees all of them.
-
 Architecture flip: the dashboard stops living on the monitored box.
-Instead, each client site runs a lightweight sensor that ships summaries
-up to a central cloud server, and the dashboard lives in the cloud.
+Instead, each monitored site runs a lightweight sensor that ships summaries
+up to a central cloud server, and the dashboard lives in the cloud. One
+center watches many systems at once -- every site is a monitor on the wall.
 
-- **Sensor (client site):** capture + detection rules stay local — fast,
+- **Sensor (site):** capture + detection rules stay local — fast,
   private, works even if the uplink drops. Ships flow summaries, alerts,
   and metadata to the cloud over TLS. Raw packets never leave the site
   (privacy + bandwidth).
-- **Cloud server:** multi-tenant console — one login sees every client
-  site. Alerting, digest emails, and AI briefs run centrally.
+- **Cloud server:** multi-site console — one login sees every site.
+  Alerting, digest emails, and AI briefs run centrally.
 - **Sensors dial out, never accept inbound.** Like a Cloudflare Tunnel:
-  no port forwarding at client sites, no open doors. This is a security
+  no port forwarding at sites, no open doors. This is a security
   property, not just convenience -- a sensor that accepts inbound is a
   target, and Orion would flag it on anyone else's network.
 - **One center, many monitors:** each site is a monitor card -- health,
-  alert counts, traffic -- with drill-down per site. The site owner sees
-  their site; the operator (Demetrius) sees all of them.
+  alert counts, traffic -- with drill-down per site. Each site's owner sees
+  their site; the central operator sees all of them.
 - **The nurse gets a badge:** the watching agent holds a read-only API
   role on the console. Scheduled checks poll site health + new critical
   alerts across every monitor, investigate, and notify. No inbound access
-  to customer networks is ever needed -- the console is the single pane.
+  to monitored networks is ever needed -- the console is the single pane.
 - **Security:** per-site API keys, TLS everywhere, password-gated
   console. The Flask dev server gets replaced by a production server
   (gunicorn/uvicorn behind a reverse proxy) before anything faces the
@@ -341,10 +335,8 @@ job hunt, analysis, coding), not just this project.
   - Free-tier prompts may be used for training -- only alert metadata
     and flow summaries ever leave the site, never packet contents or
     PII, same rule as before.
-- **License rule for the product:** prefer Apache 2.0 / MIT models
-  (Qwen, GLM, DeepSeek, Mistral) for anything shipped commercially.
-  Kimi's weights are open but under a custom license -- read the
-  redistribution terms before building the product on it.
+  (Model licensing for anything distributed lives with the owner,
+  outside this repo.)
 - Only alert metadata and flow summaries ever leave the site -- never
   packet contents, never PII. Free tiers may train on prompts.
 

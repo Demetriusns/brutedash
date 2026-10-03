@@ -1,36 +1,21 @@
-# Project Orion — Product Vision
+# Project Orion — Product Checklist
 
-> Orion is an AI-powered network security monitor for people who can't hire a
-> security analyst. It watches the network, detects threats, and explains them
-> in plain English — the analyst is built in.
+> Orion is a network security monitor that watches the network, detects
+> threats, and explains them in plain English — the analyst is built in.
 
-## Who it's for
+## What it does (technical)
 
-**Phase 1 — Home users.** "See every device on your network, get told in plain
-English when something's wrong." Low price, simple pitch, easy install.
+- Local packet capture + deterministic detection rules (no cloud needed).
+- Plain-English alert explanations (meaning / is this normal / what to do).
+- Phone-friendly dashboard.
+- Quiet-first: per-device behavior baselines, probation watch, quiet hours.
+- Self-diagnostics: heartbeat monitoring, crash bundles, secret-scrubbed
+  diagnostics.
 
-**Phase 2 — Small businesses.** Shops, offices, and small-town operations that
-can't afford (or find) a network/security analyst. This is the real market:
-a business can't pay a $90k SOC analyst, but it can pay a monthly subscription
-for software that does the watching and explains what it finds.
+## Ship checklist — now (Phase 3.5)
 
-## What makes it different
-
-Splunk and friends show a wall of logs that takes a trained analyst to read.
-Orion tells the owner: *"Your card reader started talking to an unknown server
-at 2am — here's what that means and what to do."* Detection + plain-English
-triage in one box. That is the product.
-
-## Pricing sketch (to validate later)
-
-- Home: low monthly or one-time license, self-installed.
-- Small business: ~$50–200/mo per site, depending on device count.
-
-## Ship checklist — product first, business in later phases (his call 2026-10-02)
-
-### Product — now (Phase 3.5)
 - [ ] **False-positive tuning** — per-device baselines exist; need confidence
-      scoring and auto-suppression so non-technical owners trust every alert.
+      scoring and auto-suppression so every alert is trustworthy.
 - [ ] **First-run onboarding** — guided setup inside the dashboard: name the
       network, confirm devices, set quiet hours. Zero terminal required.
 - [ ] **Self-update** — safe auto-update that can't brick a running monitor.
@@ -38,13 +23,12 @@ triage in one box. That is the product.
       views the dashboard from anywhere; stepping stone to the Phase 5
       cloud console. Parked per his call 2026-10-02; mobile CSS shipped.
 
-### Business — later phases
-- [ ] **Polished installer** — native-feel package (exe/msi or equivalent)
-      for non-technical buyers.
-- [ ] **Diagnostics bundle** — one-click "send diagnostics" for support.
-- [ ] **Licensing** — key validation for paid tiers.
+## Later phases (technical)
+
+- [ ] **Polished installer** — native-feel package (exe/msi or equivalent).
+- [ ] **Diagnostics upload** — one-click send from the dashboard.
 - [ ] **Hardening pass** — the monitor runs with elevated network privileges;
-      needs a proper security review before it touches customer networks.
+      needs a proper security review before it touches other networks.
 
 ### Shipped
 - [x] Secrets via environment variables (no hardcoded keys) — done
@@ -61,5 +45,7 @@ triage in one box. That is the product.
 ## Rules
 
 - Add → Test → Release. Every change is tested locally against real endpoints
-  before it ships. No exceptions — this will run on customer networks.
+  before it ships. No exceptions.
 - Never ship secrets, tokens, local usernames, or PII. Ever.
+- Business-side material (vision, pricing, pitch, licensing, legal) lives
+  outside this repo, personally with the owner. Never commit it here.
