@@ -317,6 +317,9 @@ job hunt, analysis, coding), not just this project.
 - **Free tiers first (his call 2026-10-02).** Verified 2026-10-02:
   - **Groq** (no card): free Qwen models (qwen3.6-27b, qwen3.8-27b),
     ~1,000 req/day each, 30/min. Best free deal on the board.
+    LIVE 2026-10-02: key connected, tested via `groq-chat` --
+    working IDs are `qwen/qwen3.8-27b`, `openai/gpt-oss-120b`,
+    `openai/gpt-oss-20b`.
   - **OpenRouter `:free`** (no card): one key, whatever's free that
     week (DeepSeek, GLM, Mistral rotate through). 20/min, 50/day on a
     bare free account -- thin, but council queries are low-volume. A
