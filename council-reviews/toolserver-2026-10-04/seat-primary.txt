@@ -1,0 +1,83 @@
+**Council Review – Brutedash Phase 3.5 Batch 15 (MCP‑tool server)**  
+*Seats:* **Security (critical)** – **Robustness (primary)** – **Head: Orion**  
+
+---  
+
+### 1. Unvalidated model data reaching execution  
+**Verdict: REJECT** – All entry points (`invoke()` → tool dispatcher) first look up the tool name in the static registry and then call `ToolSchema.validate(params)`. The schema objects are built with **pydantic‑style field definitions** (type, min/max, enum, regex) and the code raises `ToolValidationError` before any SQL or subprocess is constructed. A quick static‑analysis run (`grep -R "params\[" -n netmon/tools.py`) shows *no* direct string interpolation of `params` into SQL or `subprocess.Popen`.  
+
+*Evidence:*  
+```python
+if tool_name not in _REGISTRY:
+    raise UnknownToolError(...)
+schema = _REGISTRY[tool_name].schema
+validated = schema(**params)      # raises before any use
+```
+No path bypasses this gate.  
+
+**Action:** No change needed.  
+
+---  
+
+### 2. Timeout bypass / thread‑kill limitation  
+**Verdict: ADAPT** – The daemon‑thread model guarantees that the caller receives a `ToolTimeoutError` after `timeout_s`. The worker thread continues until the wrapped function returns, which can exceed the declared timeout. This is acceptable for *pure* scans (they spawn subprocesses with their own `--timeout` flags) but **dangerous for I/O‑bound tools** (`get_devices`, `lookup_threat_intel`) that may block on network calls indefinitely.  
+
+*Evidence:*  
+```python
+worker = threading.Thread(target=_run_tool, daemon=True)
+worker.start()
+worker.join(timeout_s)
+if worker.is_alive():
+    raise ToolTimeoutError(...)
+```
+No explicit cancellation.  
+
+**Mitigation proposal:**  
+1. Wrap every tool body in a **context‑manager that enforces a hard timeout** using `signal.setitimer` (Unix only) or a secondary watchdog thread that closes the underlying socket/DB cursor.  
+2. For Windows compatibility, replace the daemon‑thread pattern with **`concurrent.futures.ThreadPoolExecutor` + `future.result(timeout)`**, which raises `TimeoutError` and discards the future (the thread may still run, but resources are released).  
+
+---  
+
+### 3. Audit‑log gaps  
+**Verdict: REJECT** – Every successful or failed `invoke()` call ends with `dbm.audit("tool_call", actor, tool, outcome)`. However, **validation‑only rejections** (schema errors) are raised *before* the audit call. The test suite exercises a malformed param and asserts `len(db.recent_tool_calls()) == 0`, confirming the gap.  
+
+*Evidence:*  
+```python
+# in invoke()
+validated = schema(**params)   # may raise ValidationError
+# audit call placed AFTER this line
+```
+
+**Required fix:** Insert an audit entry **immediately after schema validation**, recording the outcome `"validation_error"` and the error details (sanitized).  
+
+---  
+
+### 4. State mutation by `scan` tool  
+**Verdict: REJECT** – The claim that scans are “ephemeral” is true for the *primary* path (`scan_device()` returns findings). However, the **fallback path** that catches `subprocess.CalledProcessError` calls `db.add_alert()` to surface a critical failure. This writes an alert row and increments the global alert count, violating the “no DB writes” promise.  
+
+*Evidence:*  
+```python
+except subprocess.CalledProcessError as e:
+    db.add_alert("scan_failed", {"error": str(e)})
+    raise ScanError(...)
+```
+The test suite only checks the happy path; failure paths remain uncovered.  
+
+**Remediation:** Replace the alert insertion with a **structured error return** that the AI can surface to the user. If operational visibility is required, funnel the failure through the existing **audit log** (already recorded) rather than creating a persistent alert.  
+
+---  
+
+### 5. Error‑message leakage  
+**Verdict: APPLY** – All error messages returned to the model are built from the schema field name and the expected constraint (e.g., `"param 'target_ip' must be a valid RFC1918 address"`). No stack traces, file paths, or SQL fragments are exposed. The only outlier is the `ToolTimeoutError` string, which currently reads `"Tool timed out after {timeout}s (thread still running)"`. This reveals the internal thread‑kill limitation and could be used by an adversary to craft denial‑of‑service attempts.  
+
+*Evidence:*  
+```python
+raise ToolTimeoutError(f"Tool timed out after {timeout}s (thread still running)")
+```
+
+**Fix:** Trim to `"Tool execution exceeded {timeout}s"` – removes internal implementation detail.  
+
+---  
+
+### 6. Robustness of retry policy & concurrency  
+**Verdict: ADAPT** – The policy (retry once on transient messages) is **sound** for idempotent tools (`get_*`, `lookup_threat_intel`). The transient‑error detection uses a **case‑insensitive substring search** on the exception message. This is brittle: a new library may

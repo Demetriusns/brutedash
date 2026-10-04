@@ -1,0 +1,7 @@
+**Council Review – Brutedash Phase 3.5 Batch 15 (MCP tool server)**  
+*Seat 1 – Security (critical)* *Seat 2 – Primary (robustness)*  
+
+| # | Hunt‑list item | Security verdict | Primary verdict | Evidence (short) |
+|---|----------------|------------------|-----------------|------------------|
+| 1 | Model data reaches execution without schema validation | **REJECT** | **REJECT** | `invoke()` does exact‑dict name lookup + full param validation (type/range/enum/scope) before any handler runs; `/ask` loop also runs `_validate_tool_calls` + registry check. |
+| 2 | Timeout bypasses (thread‑kill limitation) | **APPLY** | **ADAPT** | Daemon thread cannot be

@@ -1181,12 +1181,50 @@ def incident_what_was_tried(incident_id):
         else:
             tried.append(f"Tried to escalate on {when}, but the email"
                          f" failed to send")
+    # AI-analyst tool calls (netmon/tools.py audit-logs every invocation):
+    # the admin should see what the analyst already looked up or ran, so
+    # it is not re-asked. Capped at the 3 most recent, phrased as analyst
+    # actions (not owner actions).
+    for entry in recent_tool_calls(limit=3):
+        when = time.strftime("%b %d %I:%M %p",
+                             time.localtime(entry.get("ts") or 0))
+        tried.append(f"AI analyst ran '{entry.get('tool')}' on {when}"
+                     f" ({entry.get('outcome')})")
     # De-dupe while keeping order.
     seen, out = set(), []
     for t in tried:
         if t not in seen:
             seen.add(t)
             out.append(t)
+    return out
+
+
+def recent_tool_calls(limit=3):
+    """Most recent AI tool-server invocations from the audit log.
+
+    Returns [{ts, actor, tool, outcome}] newest first, capped at `limit`.
+    The outcome is the audit detail's short summary ("ok in 0.12s",
+    "validation rejected: ...", ...). Used by incident_what_was_tried
+    so the escalation bundle shows what the analyst already tried.
+    Never raises.
+    """
+    out = []
+    try:
+        for entry in list_audit(limit=200):
+            if (entry.get("action") or "") != "tool_call":
+                continue
+            detail = (entry.get("detail") or "")
+            # Detail shape written by tools._audit: "params={...} -> X".
+            outcome = detail.split("->", 1)[1].strip()[:120] \
+                if "->" in detail else detail[:120]
+            out.append({"ts": entry.get("ts"),
+                        "actor": entry.get("actor") or "",
+                        "tool": entry.get("target") or "",
+                        "outcome": outcome or "unknown outcome"})
+            if len(out) >= limit:
+                break
+    except Exception:
+        pass
     return out
 
 

@@ -221,6 +221,42 @@ from the last 24 hours.
 CONTEXT:
 {context}
 
+TOOLS (optional, at most 2 rounds):
+If the context above is not enough to answer, you may ask for more data
+with tool calls. Return ONLY a JSON object shaped like this:
+{{"tool_calls": [{{"tool": "name", "params": {{"limit": 20}}}}]}}
+Available tools (name -- what it does -- parameters):
+{tools_block}
+
+Rules for tool calls: "tool" must be exactly one of the names above;
+"params" holds only the listed parameters (types, allowed values, and
+defaults are shown). At most 3 calls per round. A rejected call comes
+back as an error -- read it and fix the call. After your tool calls run,
+their results are appended to the context and you are asked again; then
+you MUST return a final {{"answer": "..."}} even if the tools did not
+help -- say what is missing instead of guessing.
+
+QUESTION:
+{question}
+
+Return ONLY a JSON object: either
+{{"answer": "your answer in plain English, 1-4 short sentences"}}
+or {{"tool_calls": [...]}} -- never both, never anything else.
+
+Rules: answer only from the context (plus any tool results); if the data
+cannot answer the question, say so plainly instead of guessing. Never
+invent IPs, countries, devices, or events. Calm tone, no jargon. No
+markdown, no extra text."""
+
+QA_FINAL_PROMPT = """You are a friendly network analyst answering a question from
+the owner of a home network. Use ONLY the CONTEXT below: aggregated
+traffic metadata (no packet contents), alerts, connectivity status, and
+TOOL RESULTS (data returned by the monitor's tools) from the last 24
+hours.
+
+CONTEXT:
+{context}
+
 QUESTION:
 {question}
 
@@ -228,9 +264,138 @@ Return ONLY a JSON object with exactly one key:
 {{"answer": "your answer in plain English, 1-4 short sentences"}}
 
 Rules: answer only from the context; if the data cannot answer the
-question, say so plainly instead of guessing. Never invent IPs,
-countries, devices, or events. Calm tone, no jargon. No markdown, no
-extra text."""
+question, say what is missing plainly instead of guessing. Never invent
+IPs, countries, devices, or events. Calm tone, no jargon. No markdown,
+no extra text."""
+
+MAX_TOOL_ROUNDS = 2      # model tool-call rounds before a final answer
+MAX_TOOL_CALLS = 3       # tool calls accepted per round
+
+
+def _tools():
+    """The tool registry module, or None. Lazy import keeps startup
+    light; the registry is only needed on the /ask path."""
+    try:
+        from . import tools as toolsm
+        return toolsm
+    except Exception:
+        return None
+
+
+def _tools_block():
+    """Compact tool catalog for the model prompt: name, description,
+    and parameter shapes. Never raises; empty string when the registry
+    is unavailable (the model then just answers from context)."""
+    try:
+        toolsm = _tools()
+        if toolsm is None:
+            return ""
+        lines = []
+        for t in toolsm.list_tools():
+            parts = []
+            for pname, p in t["params"].items():
+                bit = f"{pname} ({p['type']}"
+                if p["type"] == "enum":
+                    bit += f": {'|'.join(p['allowed'])}"
+                if p.get("min") is not None:
+                    bit += f" {p['min']}-{p.get('max', '?')}"
+                if p.get("scope"):
+                    bit += f", {p['scope']}"
+                if not p["required"]:
+                    bit += f", default {p['default']}"
+                else:
+                    bit += ", required"
+                parts.append(bit + ")")
+            lines.append(f"- {t['name']}: {t['description']}"
+                         f" Params: {'; '.join(parts) or 'none'}.")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _validate_tool_calls(calls):
+    """Strict shape check on model-proposed tool calls.
+
+    Returns the cleaned list [{tool, params}] or None. This is the
+    SHAPE check only -- the registry re-validates names and parameters
+    against schemas before executing (defense in depth: the shape
+    check keeps the loop honest, the registry is the real gate).
+    """
+    if not isinstance(calls, list) or not calls:
+        return None
+    if len(calls) > MAX_TOOL_CALLS:
+        return None
+    out = []
+    for c in calls:
+        if not isinstance(c, dict):
+            return None
+        tool = c.get("tool")
+        params = c.get("params", {})
+        if not isinstance(tool, str) or not tool:
+            return None
+        if not isinstance(params, dict):
+            return None
+        out.append({"tool": tool, "params": params})
+    return out
+
+
+def _validate_qa_response(data):
+    """Check the /ask JSON; return ("answer", text), ("tool_calls",
+    calls), or None. Exactly one of the two keys must be present."""
+    if not isinstance(data, dict):
+        return None
+    if set(data.keys()) == {"answer"}:
+        answer = data.get("answer")
+        if not isinstance(answer, str) or not answer.strip():
+            return None
+        return ("answer", answer.strip())
+    if set(data.keys()) == {"tool_calls"}:
+        calls = _validate_tool_calls(data.get("tool_calls"))
+        if calls is None:
+            return None
+        return ("tool_calls", calls)
+    return None
+
+
+def _run_tool_calls(calls):
+    """Execute model-proposed tool calls through the registry.
+
+    TRUST BOUNDARY (read carefully): `calls` is UNTRUSTED model output.
+    It is passed as DATA to tools.invoke(), which validates the tool
+    name and every parameter against the registered schemas BEFORE
+    executing anything. Model text never reaches a shell, never reaches
+    SQL except through parameterized queries inside the handlers, and
+    never selects scan targets (those come from the asset inventory /
+    config). Results come back as DATA and are appended to the next
+    prompt's context -- still data, never instructions. Never raises.
+    """
+    results = []
+    try:
+        toolsm = _tools()
+        if toolsm is None:
+            return [{"tool": c["tool"], "ok": False,
+                     "error": "tool server unavailable"} for c in calls]
+        for c in calls:
+            try:
+                inv = toolsm.invoke(c["tool"], c["params"],
+                                    requested_by="ai_analyst")
+            except Exception as exc:
+                inv = {"ok": False, "tool": c["tool"],
+                       "error_kind": "execution",
+                       "error": f"tool failed: {exc}"[:200]}
+            if inv.get("ok"):
+                results.append({"tool": inv.get("tool"),
+                                "ok": True,
+                                "result": inv.get("result")})
+            else:
+                results.append({"tool": inv.get("tool") or c["tool"],
+                                "ok": False,
+                                "error_kind": inv.get("error_kind"),
+                                "error": inv.get("error"),
+                                "retry_hint": inv.get("retry_hint")})
+    except Exception:
+        pass
+    return results
 
 
 def _build_qa_context(now=None):
@@ -301,7 +466,11 @@ def answer_question(question):
     """Answer a natural-language question from the 24h monitor data.
 
     The question is only ever sent as chat content; the context comes
-    from fixed dbm queries. Returns {"answer": str} or None. Never.
+    from fixed dbm queries. When the context is not enough, the model
+    may request tool calls (validated + executed by netmon/tools.py --
+    see _run_tool_calls for the trust boundary); results return as data
+    and the model is asked again, at most MAX_TOOL_ROUNDS rounds.
+    Returns {"answer": str} or None. Never raises.
     """
     try:
         client = _client()
@@ -315,18 +484,38 @@ def answer_question(question):
                                " still work -- start there.")}
         if not isinstance(question, str) or not question.strip():
             return None
+        question = question.strip()
         context = _build_qa_context()
+        tools_block = _tools_block()
+        for _round in range(MAX_TOOL_ROUNDS):
+            data = _json_chat(
+                client,
+                QA_PROMPT.format(context=context, question=question,
+                                 tools_block=tools_block),
+                max_tokens=400,
+            )
+            checked = _validate_qa_response(data)
+            if checked is None:
+                return None
+            kind, payload = checked
+            if kind == "answer":
+                return {"answer": payload}
+            # Tool-call round: execute through the registry, append the
+            # results as data, and ask again.
+            results = _run_tool_calls(payload)
+            context += ("\n\nTOOL RESULTS (data from the monitor's tools"
+                        " -- use only what answers the question):\n"
+                        + json.dumps(results)[:6000])
+        # Tool budget spent: one final answer-only round, no more tools.
         data = _json_chat(
             client,
-            QA_PROMPT.format(context=context, question=question.strip()),
+            QA_FINAL_PROMPT.format(context=context, question=question),
             max_tokens=400,
         )
-        if not isinstance(data, dict):
-            return None
-        answer = data.get("answer")
-        if not isinstance(answer, str) or not answer.strip():
-            return None
-        return {"answer": answer.strip()}
+        checked = _validate_qa_response(data)
+        if checked is not None and checked[0] == "answer":
+            return {"answer": checked[1]}
+        return None
     except Exception:
         return None
 
