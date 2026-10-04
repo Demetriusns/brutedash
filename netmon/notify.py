@@ -51,9 +51,46 @@ NOTIFY_FAIL_STREAK_ALERT = 5
 # per alert. Delivery now goes through a single daemon worker thread;
 # maybe_send_alert only enqueues and always returns fast.
 
-_job_queue = queue.Queue()
+_job_queue = queue.Queue(maxsize=100)
 _worker_lock = threading.Lock()
 _worker_started = False
+_dropped_jobs = 0
+_drop_lock = threading.Lock()
+
+
+def _enqueue(job):
+    """Bounded enqueue for the notify worker.
+
+    Council review (robustness): the queue was unbounded -- a slow or
+    dead SMTP server plus an alert storm meant unbounded memory growth.
+    When the queue is full the oldest job is shed to make room (a fresh
+    alert beats a stale one) and the shed count is tracked for health.
+    Never blocks, never raises.
+    """
+    global _dropped_jobs
+    try:
+        _job_queue.put_nowait(job)
+        return True
+    except queue.Full:
+        pass
+    try:
+        _job_queue.get_nowait()
+        _job_queue.task_done()
+    except queue.Empty:
+        pass
+    with _drop_lock:
+        _dropped_jobs += 1
+    try:
+        _job_queue.put_nowait(job)
+        return True
+    except queue.Full:
+        return False
+
+
+def dropped_job_count():
+    """How many notify jobs were shed because the queue was full."""
+    with _drop_lock:
+        return _dropped_jobs
 
 
 def _ensure_worker():
@@ -236,7 +273,7 @@ def maybe_send_alert(alert):
         if _maintenance_active():
             return False
         _ensure_worker()
-        _job_queue.put(("alert", dict(alert)))
+        _enqueue(("alert", dict(alert)))
         return True
     except Exception as exc:  # never raise; one stderr line at most
         try:
@@ -545,7 +582,7 @@ def send_digest_async():
     report the outcome to the user."""
     try:
         _ensure_worker()
-        _job_queue.put(("digest", None))
+        _enqueue(("digest", None))
         return True
     except Exception:
         return False

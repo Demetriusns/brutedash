@@ -458,6 +458,29 @@ class PfirewallParseTests(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_appended_rows_parsed_after_resume(self):
+        # Regression: resumed reads used to skip every row because the
+        # #Fields: header sits before the offset and columns stayed empty.
+        with tempfile.NamedTemporaryFile("w", suffix=".log",
+                                         delete=False) as fh:
+            fh.write(_PF_SAMPLE)
+            path = fh.name
+        try:
+            events, offset, _s = ingm.parse_pfirewall(path, 0)
+            self.assertEqual(len(events), 2)
+            with open(path, "a") as fh:
+                fh.write("2026-10-03 14:23:01 DROP TCP 198.51.100.7 "
+                         "192.168.1.50 60001 3389 60 S 1 0 8192 - - - "
+                         "RECEIVE\n")
+            events2, _o2, skipped2 = ingm.parse_pfirewall(path, offset)
+            self.assertEqual(len(events2), 1)
+            self.assertEqual(skipped2, 0)
+            detail = json.loads(events2[0][5])
+            self.assertEqual(detail["src_ip"], "198.51.100.7")
+            self.assertEqual(detail["dst_port"], "3389")
+        finally:
+            os.unlink(path)
+
 
 class SecurityXmlParseTests(unittest.TestCase):
     def test_events_parsed(self):

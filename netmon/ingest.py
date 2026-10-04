@@ -135,6 +135,21 @@ def parse_pfirewall(path, offset=0):
     columns = []
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            if offset > 0:
+                # Resumed read: the #Fields: header sits before `offset`,
+                # so learn the columns from the file head first, then jump
+                # to the offset. Without this, `columns` stays empty and
+                # every resumed row is silently skipped — appended rows
+                # past the header would never be parsed as events.
+                # (Line-count bound, not tell(): tell() is disabled while
+                # a file iterator is active.)
+                for i, head_line in enumerate(fh):
+                    if head_line.lower().startswith("#fields:"):
+                        columns = [c.strip().lower().replace("-", "_")
+                                   for c in head_line[8:].split()]
+                        break
+                    if i > 200:
+                        break  # header not near the top; rows will skip
             fh.seek(offset)
             for line in fh:
                 line = line.rstrip("\n")

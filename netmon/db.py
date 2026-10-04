@@ -451,7 +451,82 @@ CREATE TABLE IF NOT EXISTS score_snapshots(
 """
 
 
-def _connect(path=None):
+# --- reconnecting connection ------------------------------------------------
+# Council review (robustness): the app ran on a single shared sqlite
+# connection with no reconnect -- one dead handle (closed connection,
+# disk hiccup, "unable to open database file") wedged everything until
+# restart. _ReconnectingConnection proxies the raw connection and
+# retries the failed operation exactly once on a fresh connection when
+# the error signals a dead connection. Lock contention ("database is
+# locked") is NOT retried here -- _write_with_retry owns that path.
+# After an explicit close() (isolated_db teardown) it stays closed.
+
+class _ReconnectingConnection:
+    _DEAD_MARKERS = ("unable to open database file", "disk i/o error",
+                     "file is not a database")
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._relock = threading.Lock()
+        self._closed = False
+        self._conn = factory()
+
+    def _reconnect(self):
+        with self._relock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = self._factory()
+
+    def _is_dead_error(self, exc):
+        if isinstance(exc, sqlite3.ProgrammingError):
+            return "closed" in str(exc).lower()
+        return (isinstance(exc, sqlite3.OperationalError)
+                and any(m in str(exc).lower()
+                        for m in self._DEAD_MARKERS))
+
+    def _run(self, method, *args, **kwargs):
+        try:
+            return getattr(self._conn, method)(*args, **kwargs)
+        except Exception as exc:
+            if self._closed or not self._is_dead_error(exc):
+                raise
+            self._reconnect()
+            return getattr(self._conn, method)(*args, **kwargs)
+
+    def execute(self, *a, **k):
+        return self._run("execute", *a, **k)
+
+    def executemany(self, *a, **k):
+        return self._run("executemany", *a, **k)
+
+    def executescript(self, *a, **k):
+        return self._run("executescript", *a, **k)
+
+    def commit(self, *a, **k):
+        return self._run("commit", *a, **k)
+
+    def rollback(self, *a, **k):
+        return self._run("rollback", *a, **k)
+
+    def close(self):
+        self._closed = True
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        # cursor(), row_factory, isolation_level, ... delegate to the
+        # live connection. __getattr__ only fires when normal lookup
+        # fails, so _conn/_factory/_relock/_closed resolve directly.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self.__dict__["_conn"], name)
+
+
+def _connect_raw(path=None):
     path = path or DB_PATH
     conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     # Council review: the DB holds DNS query history, flow records, and
@@ -599,6 +674,11 @@ def _connect(path=None):
         pass
     conn.commit()
     return conn
+
+
+def _connect(path=None):
+    """Connect + full schema/migrations, wrapped in the reconnect proxy."""
+    return _ReconnectingConnection(lambda: _connect_raw(path))
 
 
 _conn = None
