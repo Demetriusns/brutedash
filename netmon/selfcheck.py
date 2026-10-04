@@ -102,6 +102,14 @@ def check_listening_ports():
         # unavailable only when we truly couldn't read.
         if not os.path.exists("/proc/net/tcp"):
             return "unavailable", "not supported on this platform", set()
+    # The canary trap is OUR OWN listener -- exclude it so the tripwire
+    # never trips the "new listening port" self-alert.
+    try:
+        from . import canary as canarym
+        trap_port = canarym.canary_port()
+        current = {(p, n) for p, n in current if p != trap_port}
+    except Exception:
+        pass
     base = dbm.selfcheck_baseline_get("listening_ports")
     if base is None:
         dbm.selfcheck_baseline_set("listening_ports",

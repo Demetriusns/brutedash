@@ -54,6 +54,26 @@ DEFAULTS = {
         # Hours between email digest sends; 0 disables.
         "digest_hours": 24,
     },
+    "quiet": {
+        # Alert-fatigue circuit breaker (see netmon/db.py add_alert): one
+        # rule firing this many times within the window below gets
+        # auto-muted for the mute window. The mute is never silent -- a
+        # visible "muted" alert is recorded and the dashboard shows it.
+        "circuit_fires": 10,
+        "circuit_window_min": 10,
+        "circuit_mute_min": 60,
+    },
+    "canary": {
+        # Fake open port + fake credentials file: a tripwire nothing
+        # legitimate should ever touch (see netmon/canary.py). A touch
+        # is a High alert. The listener never reads or writes -- it
+        # accepts and closes immediately.
+        "enabled": True,
+        # Unusual high port for the fake listener.
+        "port": 23231,
+        # Bind address; empty = auto-detect this box's LAN address.
+        "bind": "",
+    },
     "response": {
         # Where "Escalate to admin" sends the incident bundle.
         # EMPTY BY DEFAULT -- never commit a real address here. The person

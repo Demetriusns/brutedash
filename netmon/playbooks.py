@@ -47,6 +47,9 @@ KIND_TO_SLUG = {
     "phishing_domain": "malicious-contact",
     "malicious_ip": "malicious-contact",
     "amass_new_asset": "amass-new-asset",
+    "rule_muted": "rule-muted",
+    "canary_touch": "canary-touch",
+    "doh_usage": "encrypted-dns",
 }
 
 
@@ -849,6 +852,103 @@ GUIDES = {
                      " -- that's the conversation to have with your admin:"
                      " isolate it, replace it, or accept the risk on"
                      " purpose."),
+    },
+    "rule-muted": {
+        "found": [
+            "One of the detection rules got very chatty -- it fired many"
+            " times in a few minutes. Instead of paging you for every one,"
+            " the monitor turned that rule's volume down for a while.",
+            "The rule is still watching. Every extra firing is counted,"
+            " and the mute lifts itself when the cooldown ends. Nothing"
+            " is being ignored -- it's just not shouting about it.",
+        ],
+        "do": [
+            ("See what kept firing",
+             "The Detection rules panel (Settings) lists the muted rule,"
+             " how many times it fired, and how many extra firings were"
+             " held back. Match the time to what was happening -- a"
+             " backup, an update, a busy evening."),
+            ("If it's normal, teach the monitor",
+             "Dismiss one of the alerts. When you've dismissed the same"
+             " pattern a few times, the monitor proposes a \"never alert"
+             " me about this\" entry -- apply it and the rule stays quiet"
+             " about that pattern for good."),
+            ("If it's not normal, dig in",
+             "Open the case the alerts belong to and read the timeline."
+             " A rule firing nonstop can mean a device stuck in a loop"
+             " -- or something genuinely wrong worth your attention."),
+            ("Lift the mute early if you want",
+             "The mute ends on its own. If you'd rather hear everything"
+             " again right now, the Detection rules panel has an unmute"
+             " button."),
+        ],
+        "escalate": ("A rule that fires hundreds of times an hour with no"
+                     " explanation you can find is worth an admin's eyes --"
+                     " bring the case timeline."),
+    },
+    "canary-touch": {
+        "found": [
+            "Something on your network touched a trap nothing legitimate"
+            " should ever contact: a fake network door the monitor leaves"
+            " slightly open on purpose.",
+            "Real devices -- phones, TVs, laptops, printers -- never knock"
+            " on this door. Scanners do. Treat this as someone (or"
+            " something) actively looking for a way in.",
+        ],
+        "do": [
+            ("Note which device touched it",
+             "The alert names the address that knocked. Check the Devices"
+             " page: is it a device you recognize? A compromised device"
+             " scans its neighbors -- the toucher may be the victim, not"
+             " the attacker."),
+            ("Check what else that device did",
+             "Look at its recent alerts and traffic. One touch plus"
+             " beaconing or odd ports is a much worse story than one"
+             " touch alone."),
+            ("Consider isolating it",
+             "The Devices page has an Isolate button. It cuts the device"
+             " off from the network in one click and is reversible -- use"
+             " it if anything else about the device looks off."),
+            ("Don't touch the trap yourself",
+             "Port scans and security tools will trip it too. If you were"
+             " running a scan when it fired, that's your answer."),
+        ],
+        "escalate": ("An unrecognized device touching the trap -- or a"
+                     " known device doing it repeatedly -- is exactly the"
+                     " hard 5%. Escalate the case with the timeline"
+                     " attached."),
+    },
+    "encrypted-dns": {
+        "found": [
+            "One of your devices is resolving website names over encrypted"
+            " HTTPS (DNS-over-HTTPS) instead of plain DNS -- talking to a"
+            " well-known public resolver on port 443.",
+            "That's a legitimate privacy feature (browsers and phones turn"
+            " it on by themselves). The catch: the monitor can't see"
+            " inside encrypted DNS, so DNS-based detection is reduced for"
+            " that device.",
+        ],
+        "do": [
+            ("Check whether you turned it on",
+             "Firefox, Chrome, and recent phones enable encrypted DNS by"
+             " default or offer it in settings. If it's your browser or"
+             " phone doing it, this is expected."),
+            ("Know what you lose",
+             "While a device uses encrypted DNS, the monitor can't check"
+             " its lookups against the phishing/malware domain list. The"
+             " device isn't unprotected -- just less visible on this one"
+             " channel."),
+            ("Turn it off if you want full visibility",
+             "In the browser or phone's network/DNS settings, switch"
+             " encrypted DNS off (or point it at your router). The"
+             " device then uses plain DNS again and the monitor sees"
+             " every lookup."),
+            ("Leave it if privacy matters more",
+             "Encrypted DNS is not a threat by itself. If you'd rather"
+             " keep it, dismiss the alert -- the monitor learns."),
+        ],
+        "escalate": ("Encrypted DNS alone is never worth escalating. Pair"
+                     " it with beaconing or a threat-intel hit first."),
     },
 }
 

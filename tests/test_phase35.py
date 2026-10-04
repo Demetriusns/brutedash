@@ -23,26 +23,7 @@ from netmon import db as dbm
 from netmon import mitre as mitrem
 
 
-def _fresh_db():
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp.close()
-    old_path, old_conn = dbm.DB_PATH, dbm._conn
-    dbm.DB_PATH = tmp.name
-    dbm._conn = None
-    return tmp.name, old_path, old_conn
-
-
-def _restore_db(path, old_path, old_conn):
-    try:
-        if dbm._conn is not None:
-            dbm._conn.close()
-    finally:
-        dbm.DB_PATH, dbm._conn = old_path, old_conn
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
+from helpers import fresh_db as _fresh_db, restore_db as _restore_db
 
 def _kinds_emitted():
     """Alert kinds emitted anywhere in the codebase (add_alert calls)."""

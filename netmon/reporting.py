@@ -604,6 +604,8 @@ def send_briefing(now=None):
         cfg = notifm._smtp_config()
         if not cfg["host"] or not cfg["to"]:
             return False, "email isn't configured"
+        if dbm.maintenance_active():
+            return False, "maintenance mode is on -- the briefing waits"
         brief = build_briefing(now=now)
         subject = notifm._clean(brief["subject"])
         body = notifm._clean(brief["body"])
@@ -619,8 +621,9 @@ def maybe_daily_briefing(now=None):
 
     Returns a status string: "disabled", "not_configured",
     "not_yet" (before the hour), "deferred_quiet" (quiet hours --
-    retried on the next monitor tick, not dropped), "already_sent",
-    "sent", or "failed". Never raises."""
+    retried on the next monitor tick, not dropped), "maintenance"
+    (maintenance mode -- retried on the next tick, not dropped),
+    "already_sent", "sent", or "failed". Never raises."""
     now = now if now is not None else time.time()
     try:
         if not _briefing_enabled():
@@ -636,6 +639,8 @@ def maybe_daily_briefing(now=None):
         last = dbm.get_meta("last_briefing_day")
         if last == today:
             return "already_sent"
+        if dbm.maintenance_active():
+            return "maintenance"  # retried next tick, not dropped
         if datetime.fromtimestamp(now).hour < _briefing_hour():
             return "not_yet"
         try:

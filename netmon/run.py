@@ -110,6 +110,13 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
         from . import retention as retm
         retm.maybe_prune()
 
+    def _canary():
+        from . import canary as canarym
+        # The tripwire stays up even under disk pressure: it's cheap,
+        # and a blind trap is a dead trap.
+        canarym.ensure_running()
+        canarym.check_canary_file()
+
     last_summary = 0
     last_digest = time.time()  # first digest waits a full interval
     last_ingest = 0
@@ -160,6 +167,10 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
         pipelinem.safe_step("staleness",
                             pipelinem.check_and_alert_staleness,
                             capture_expected=capture_expected)
+
+        # Canary tripwire: keep the fake port listening, watch the bait
+        # file. Runs even under disk pressure (see _canary).
+        pipelinem.safe_step("canary", _canary)
 
         if pressured:
             continue  # detection + feeds ran; the rest waits for room

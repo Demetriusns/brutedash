@@ -131,6 +131,27 @@ _TECHNIQUES = {
         " exploiting in the wild (CISA's known-exploited list). Closest"
         " fit: the box runs code with a known weaponized bug.",
     ),
+    "rule_muted": (
+        "T1562.001", "Impair Defenses: Disable or Modify Tools",
+        "Defense Evasion",
+        "Operational notice, not attacker behavior: one rule fired so"
+        " often it was quieted down for a while. Closest fit: flooding a"
+        " detector to blind it is itself a known attacker trick, which is"
+        " why the mute is always visible, never silent.",
+    ),
+    "canary_touch": (
+        "T1595.002", "Active Scanning: Vulnerability Scanning",
+        "Reconnaissance",
+        "Something on the LAN touched a fake target nothing legitimate"
+        " should ever contact -- the way a scanner finds its way in.",
+    ),
+    "doh_usage": (
+        "T1071.004", "Application Layer Protocol: DNS",
+        "Command and Control",
+        "A device is resolving names over encrypted HTTPS (DoH) instead"
+        " of plain DNS. Legitimate privacy feature -- but it also blinds"
+        " DNS-based detection, which is why it's worth knowing about.",
+    ),
 }
 
 

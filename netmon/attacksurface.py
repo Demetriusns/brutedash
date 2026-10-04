@@ -236,6 +236,24 @@ PLAYBOOK_SLUGS = {
                   " public internet. Yours and intentional, or a surprise?"
                   " How to check."),
     },
+    "rule-muted": {
+        "title": "A chatty rule was quieted down",
+        "blurb": ("One detection rule fired many times in a few minutes,"
+                  " so the monitor muted it for a while instead of paging"
+                  " you each time. Detection keeps running."),
+    },
+    "canary-touch": {
+        "title": "Something touched the trap",
+        "blurb": ("A fake target nothing legitimate should contact was"
+                  " touched. Scanners knock on it; real devices never do."
+                  " Treat it as someone looking for a way in."),
+    },
+    "encrypted-dns": {
+        "title": "A device is using encrypted DNS",
+        "blurb": ("A device resolves names over encrypted HTTPS instead of"
+                  " plain DNS. A legitimate privacy feature -- but it"
+                  " reduces what DNS-based detection can see."),
+    },
 }
 
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,64}$")

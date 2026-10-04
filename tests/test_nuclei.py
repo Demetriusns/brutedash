@@ -34,25 +34,15 @@ except ImportError:  # Flask not installed: skip dashboard-only tests
     dashm = None
 
 
-def _fresh_db():
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp.close()
-    old_path, old_conn = dbm.DB_PATH, dbm._conn
-    dbm.DB_PATH = tmp.name
-    dbm._conn = None
-    return tmp.name, old_path, old_conn
+from helpers import fresh_db as _fresh_db, restore_db as _restore_db
 
 
 class _DbTest(unittest.TestCase):
     def setUp(self):
-        self._db_tmp, self._old_path, self._old_conn = _fresh_db()
+        self._db_state = _fresh_db()
 
     def tearDown(self):
-        dbm.DB_PATH, dbm._conn = self._old_path, self._old_conn
-        try:
-            os.unlink(self._db_tmp)
-        except OSError:
-            pass
+        _restore_db(*self._db_state)
 
 
 # --- realistic fixture: nuclei -jsonl output shape (crafted, not live) --------
@@ -359,10 +349,12 @@ class StorageDiffTests(_DbTest):
                 len(dbm.list_scan_findings(status="open")), 2)
         finally:
             dbm.DB_PATH, dbm._conn = old_path, old_conn
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
+            for _p in (tmp.name, tmp.name + "-wal", tmp.name + "-shm",
+                       tmp.name + "-journal"):
+                try:
+                    os.unlink(_p)
+                except OSError:
+                    pass
 
 
     def test_first_run_is_baseline_no_alerts(self):
@@ -529,7 +521,12 @@ class FullScanFlowTests(_DbTest):
         lines = "\n".join(self._line(f"t{i}", "medium",
                                      ip=f"192.168.1.{10 + i}")
                           for i in range(15))
-        with mock.patch.object(
+        # The circuit breaker is tested on its own (test_leftovers.py);
+        # lift its threshold here so this test isolates the scan's own
+        # 10+summary cap.
+        with mock.patch.object(dbm, "_circuit_config",
+                               return_value=(100, 10, 60)), \
+             mock.patch.object(
                 nucleim, "nuclei_targets",
                 return_value=[f"192.168.1.{10 + i}" for i in range(15)]), \
              mock.patch.object(nucleim, "run_scan",

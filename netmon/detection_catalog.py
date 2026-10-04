@@ -763,6 +763,107 @@ RULES = [
         "tests": ["tests/test_swaudit.py::CorrelateTests"
                   ".test_run_swaudit_alerts_once"],
     },
+    {
+        "id": "rule_muted",
+        "title": "Chatty rule quieted down",
+        "module": "netmon/db.py",
+        "rule": "add_alert circuit-breaker gate (runs on every alert)",
+        "description": ("The alert-fatigue circuit breaker: when one rule"
+                        " fires many times in a few minutes, the monitor"
+                        " mutes it for a while instead of paging for every"
+                        " firing. The mute is never silent -- this alert is"
+                        " the visible record, and the dashboard shows the"
+                        " mute with its counts."),
+        "trigger": ("10 firings of one alert kind within 10 minutes"
+                    " (configurable under quiet in config.yaml). The 10th"
+                    " alert is recorded, the mute notice fires, and further"
+                    " firings are counted but dropped for 60 minutes."),
+        "severities": ["Medium"],
+        "mitre_id": "T1562.001",
+        "mitre_name": "Impair Defenses: Disable or Modify Tools",
+        "mitre_tactic": "Defense Evasion",
+        "fp_profile": ("This is operational chrome, not a threat -- it"
+                       " fires exactly when it should. The 'false positive'"
+                       " question is whether the underlying rule was"
+                       " crying wolf; the mute just kept the noise down."),
+        "recognize_fp": ("Check the Detection rules panel: it names the"
+                         " muted rule, how many times it fired, and how"
+                         " many extra firings were held back. Match the"
+                         " time to something real -- a backup, an update."),
+        "tuning": ("Thresholds live under quiet in config.yaml"
+                   " (circuit_fires / circuit_window_min /"
+                   " circuit_mute_min). The owner can lift a mute early"
+                   " from the Detection rules panel. Self-alerts, the mute"
+                   " notice itself, and the canary always pass through."),
+        "tests": ["tests/test_leftovers.py::CircuitBreakerTests"
+                  ".test_trip_mutes_and_records_visible_notice"],
+    },
+    {
+        "id": "canary_touch",
+        "title": "Something touched the trap",
+        "module": "netmon/canary.py",
+        "rule": "CanaryListener accept loop + bait-file mtime watch (monitor loop)",
+        "description": ("A lightweight tripwire: a fake open port on the"
+                        " LAN interface plus a fake credentials file. No"
+                        " legitimate device should ever touch either --"
+                        " the listener accepts and closes immediately,"
+                        " never reading or writing, so it can't be used"
+                        " for anything. A touch is a High alert by"
+                        " definition."),
+        "trigger": ("A TCP connection to the trap port (default 23231), or"
+                    " a content change to the bait credentials file. One"
+                    " alert per touching address per day; one per day for"
+                    " the file."),
+        "severities": ["High"],
+        "mitre_id": "T1595.002",
+        "mitre_name": "Active Scanning: Vulnerability Scanning",
+        "mitre_tactic": "Reconnaissance",
+        "fp_profile": ("Nearly none by design -- nothing legitimate knocks"
+                       " here. The known benign causes: a port scan YOU"
+                       " ran, or a security tool sweeping the LAN. The"
+                       " bait file only changes if something rewrote it."),
+        "recognize_fp": ("Were you running a scan when it fired? That's"
+                         " your answer. Otherwise check the Devices page"
+                         " for the touching address -- a compromised"
+                         " device scans its neighbors."),
+        "tuning": ("24h cooldown per touching address. Port and bind"
+                   " address under canary in config.yaml. The self-check's"
+                   " listening-port baseline excludes the trap port."),
+        "tests": ["tests/test_leftovers.py::CanaryTests"
+                  ".test_touch_fires_high_alert"],
+    },
+    {
+        "id": "doh_usage",
+        "title": "Device using encrypted DNS",
+        "module": "netmon/detect.py",
+        "rule": "check_doh_usage (runs every minute)",
+        "description": ("Notes when a LAN device talks port 443 to a"
+                        " well-known public DNS resolver -- the shape of"
+                        " DNS-over-HTTPS. DoH is a legitimate privacy"
+                        " feature, but it blinds DNS-based detection, so"
+                        " the dashboard marks the device with a lock and"
+                        " says visibility is reduced."),
+        "trigger": ("Outbound port-443 flows from a LAN device to a known"
+                    " public resolver IP (Cloudflare, Google, Quad9,"
+                    " OpenDNS, AdGuard anycasts) within the last hour. One"
+                    " Low note per device per day."),
+        "severities": ["Low"],
+        "mitre_id": "T1071.004",
+        "mitre_name": "Application Layer Protocol: DNS",
+        "mitre_tactic": "Command and Control",
+        "fp_profile": ("This is informational, not an accusation -- most"
+                       " hits are browsers or phones with encrypted DNS on"
+                       " by default. The heuristic can also catch plain"
+                       " HTTPS to a resolver IP, which is harmless."),
+        "recognize_fp": ("Check the device's browser/OS DNS settings. If"
+                         " encrypted DNS is on there, this is expected."
+                         " Dismiss it and the monitor learns."),
+        "tuning": ("24h cooldown per device. The resolver list is the"
+                   " DOH_RESOLVER_IPS set in netmon/detect.py --"
+                   " deliberately conservative (major anycasts only)."),
+        "tests": ["tests/test_leftovers.py::DohTests"
+                  ".test_doh_flow_fires_low_note"],
+    },
 ]
 
 

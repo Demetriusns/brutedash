@@ -127,17 +127,39 @@ North star: the automated analyst for a network with nobody watching it.
   busiest 6-7am · learned over 5d") via /api/devices profile summaries.
 - Device naming (new 2026-09-30) — MAC → friendly-name table ("PS5",
   "Mom's iPhone") so alerts read like English instead of IP addresses.
-  Trivial to build, huge readability win.
+  Trivial to build, huge readability win. DONE 2026-10-04 (batch 17):
+  batch 6 built the table + map relabeling; this batch added rename from
+  the device list and friendly names in alert titles/details, case
+  labels, and emails (`detect._device_label`, "PS5 (192.168.1.5)").
 - Quiet hours / maintenance mode (new 2026-09-30) — "backups run 2–4am,
   don't page me about the traffic spike." Scheduled windows per alert type.
+  DONE 2026-10-04 (batch 17): maintenance-mode toggle (`maintenance`
+  table, `set_maintenance`/`get_maintenance`, expired-until auto-clear)
+  suppresses per-alert email at queue time AND the worker side, skips the
+  overnight digest, and marks the briefing "maintenance" (retries next
+  tick) — DETECTION never stops, human Escalate still works. Owner-only
+  dashboard toggle + amber banner while active. Scheduled per-type quiet
+  hours remain as designed (briefing honors quiet hours).
 - Digest emails (new 2026-09-30) — one "3 things happened overnight"
   email, not 3 emails. Per-alert email stays for critical only.
+  DONE 2026-10-04 (batch 17 verified, built 2026-10-04 batch 12):
+  the daily overnight briefing + digest is the digest; per-alert email is
+  High/Critical only (verified in `notify.py` + `reporting.py`).
 - Alert fatigue circuit breaker (new 2026-09-30) — the same alert firing
   N times in an hour becomes one "this keeps happening" escalation, not
-  N notifications.
+  N notifications. DONE 2026-10-04 (batch 17): `_circuit_gate` in
+  `db.add_alert` — more than N fires in M minutes (config
+  `quiet.circuit_fires` 10 / `window_min` 10 / `mute_min` 60) mutes the
+  rule with ONE visible Medium `rule_muted` alert ("muted for X because it
+  fired Y times"); suppressions counted, never silent; exempt kinds
+  (`rule_muted`, `self_drift`, `canary_touch`); dashboard mutes in
+  `/api/rule_health` + owner-only Unmute.
 - Per-rule precision tracking (new 2026-09-30) — show "this rule was right
   8 of its last 10 alerts" on the dashboard. Rules that cry wolf get tuned
-  or retired.
+  or retired. DONE 2026-10-04 (batch 17): `/api/rule_health` precision
+  view (rule → alerts, dismissals, dismissed-as-false-positive rate) built
+  on the batch-4 dismissal learning; `fp_note` per rule feeds the
+  detection catalog's FP profiles (rendered in the catalog doc + UI).
 - New-device probation (new 2026-09-30) — first-seen devices get watched
   closely for 24h, then trusted. A bouncer watching the new guy. DONE
   2026-10-01 (batch 2): 24h probation window derived from first_seen,
@@ -182,13 +204,24 @@ North star: the automated analyst for a network with nobody watching it.
 - Canary / honeypot (new 2026-09-30) — plant a fake vulnerable-looking
   target (bogus open port or share); anything touching it is hostile by
   definition. Highest-signal detection there is, cheap to build.
+  DONE 2026-10-04 (batch 17): `netmon/canary.py` — fake open TCP port on
+  the LAN address (never 0.0.0.0; wildcard binds refused; bind failure =
+  quiet disable, never a crash) plus a bait credentials file; touch =
+  High `canary_touch` alert (once per source/day); excluded from the
+  selfcheck port baseline; sensor-health + monitor-loop watched.
 - TLS fingerprinting (new 2026-09-30) — can't read HTTPS content, but
   JA3-style fingerprints spot malware command-and-control hiding inside
-  encrypted traffic.
+  encrypted traffic. DEFERRED 2026-10-04 (batch 17): needs ClientHello
+  extraction + rarity baselines — its own batch, not this one.
 - New-country first contact (new 2026-09-30) — alert the first time the
   network talks to a country it's never talked to, not on every foreign IP.
+  DEFERRED 2026-10-04 (batch 17): no offline geo source fits the one-box
+  offline design (AbuseIPDB country only exists with a user-supplied key).
 - DoH awareness (new 2026-09-30) — flag DNS-over-HTTPS tunnels that bypass
-  local DNS; the connection itself is the signal.
+  local DNS; the connection itself is the signal. DONE 2026-10-04
+  (batch 17): `detect.check_doh_usage` — flows to known DoH resolver
+  anycasts on 443 = Low note per device/day ("some DNS visibility is
+  reduced") + 🔒 "encrypted DNS" badge on the devices table.
 
 ### Know the network (visibility)
 - Asset inventory — auto-discover every device, OS, open ports. Can't spot
@@ -422,7 +455,12 @@ North star: the automated analyst for a network with nobody watching it.
 ### Dashboard polish (his call 2026-09-30)
 - Visual refresh, traffic charts, mobile-friendly layout, smoother
   navigation, plain-English loading/empty states. Polish the look, not the
-  reading level.
+  reading level. DONE 2026-10-04 (batch 17): Fontshare CDN (Satoshi +
+  Clash Display, display=swap, system fallbacks, offline-safe),
+  hand-adapted Uiverse-style button/card/badge/loader patterns in the
+  existing vanilla CSS, subtle fadeUp/hover/banner animations with
+  prefers-reduced-motion + :focus-visible rings — no framework, no build
+  step, Pi-safe.
 
 ### AI backend (his ideas 2026-09-30, refreshed 2026-10-02)
 
@@ -629,3 +667,7 @@ already hinted at in Phase 4 — Phase 5 is where it becomes the product.
 - [ ] CSRF tokens across dashboard routes + JS (own batch). (L1)
 - [ ] LIKE-wildcard alert suppression — needs his product call. (L2)
 - [ ] Prompt-injection sanitizer for LLM inputs (currently bounded by JSON-schema validation). (L4)
+- [x] Test hygiene — suite no longer leaks SQLite WAL sidecars into /tmp.
+  DONE 2026-10-04 (batch 17): `tests/helpers.py` (scratch-DB context
+  manager removing db + -wal + -shm + -journal in tearDown); 17 test files
+  migrated; verified negligible /tmp growth across three full-suite runs.

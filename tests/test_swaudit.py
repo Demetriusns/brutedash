@@ -27,25 +27,13 @@ from netmon import threatintel as tim
 from netmon import mitre as mitrem
 
 
-def _fresh_db():
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp.close()
-    old_path, old_conn = dbm.DB_PATH, dbm._conn
-    dbm.DB_PATH = tmp.name
-    dbm._conn = None
-    return tmp.name, old_path, old_conn
-
-
+from helpers import fresh_db as _fresh_db, restore_db as _restore_db
 class _DbTest(unittest.TestCase):
     def setUp(self):
-        self._db_tmp, self._old_path, self._old_conn = _fresh_db()
+        self._db_state = _fresh_db()
 
     def tearDown(self):
-        dbm.DB_PATH, dbm._conn = self._old_path, self._old_conn
-        try:
-            os.unlink(self._db_tmp)
-        except OSError:
-            pass
+        _restore_db(*self._db_state)
 
 
 # --- KEV feed parsing --------------------------------------------------------
@@ -125,10 +113,11 @@ class KevParseTests(unittest.TestCase):
                              "2024-01-31")
         finally:
             dbm.DB_PATH, dbm._conn = old_path, old_conn
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            for _p in (tmp, tmp + "-wal", tmp + "-shm", tmp + "-journal"):
+                try:
+                    os.unlink(_p)
+                except OSError:
+                    pass
 
 
 # --- matching ----------------------------------------------------------------
@@ -260,7 +249,11 @@ class CorrelateTests(_DbTest):
         dbm.ti_replace_feed("kev-cves", "cve",
                             tim._parse_kev_json(json.dumps(
                                 {"vulnerabilities": vulns})))
-        with mock.patch.object(swam, "collect_inventory",
+        # The circuit breaker is tested on its own (test_leftovers.py);
+        # lift its threshold here so this test isolates the swaudit cap.
+        with mock.patch.object(dbm, "_circuit_config",
+                               return_value=(100, 10, 60)), \
+             mock.patch.object(swam, "collect_inventory",
                                return_value=inv):
             r = swam.run_swaudit()
             self.assertTrue(r["ok"])

@@ -13,6 +13,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from helpers import fresh_db, restore_db
 from netmon import db as dbm
 from netmon import learn as learnm
 
@@ -87,23 +88,10 @@ class TestExtractPattern(unittest.TestCase):
 
 class TestDismissalLearning(unittest.TestCase):
     def setUp(self):
-        self._real_path = dbm.DB_PATH
-        self._real_conn = dbm._conn
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        self._tmp = tmp.name
-        dbm.DB_PATH = self._tmp
-        dbm._conn = None
+        self._db_state = fresh_db()
 
     def tearDown(self):
-        try:
-            if dbm._conn is not None:
-                dbm._conn.close()
-        except Exception:
-            pass
-        dbm._conn = self._real_conn
-        dbm.DB_PATH = self._real_path
-        os.unlink(self._tmp)
+        restore_db(*self._db_state)
 
     def _dismiss(self, kind, severity, detail, title="t"):
         aid = dbm.add_alert(kind, severity, title, detail)

@@ -39,28 +39,7 @@ except ImportError:
     _HAVE_SCAPY = False
 
 
-def _fresh_db():
-    """Point dbm at a temp prod DB and reset its cached connection."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp.close()
-    old_path, old_conn = dbm.DB_PATH, dbm._conn
-    dbm.DB_PATH = tmp.name
-    dbm._conn = None
-    return tmp.name, old_path, old_conn
-
-
-def _restore_db(path, old_path, old_conn):
-    try:
-        if dbm._conn is not None:
-            dbm._conn.close()
-    except Exception:
-        pass
-    dbm.DB_PATH, dbm._conn = old_path, old_conn
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
+from helpers import fresh_db as _fresh_db, restore_db as _restore_db
 
 class TestEnvCompat(unittest.TestCase):
     def _run(self, env):
@@ -155,10 +134,12 @@ class TestIsolatedDb(unittest.TestCase):
             self.assertEqual([r[0] for r in rows], ["test_kind"])
         finally:
             _restore_db(prod, old_path, old_conn)
-            try:
-                os.unlink(scratch.name)
-            except OSError:
-                pass
+            for _p in (scratch.name, scratch.name + "-wal",
+                       scratch.name + "-shm", scratch.name + "-journal"):
+                try:
+                    os.unlink(_p)
+                except OSError:
+                    pass
 
     def test_notifications_paused_suppresses_hook(self):
         calls = []

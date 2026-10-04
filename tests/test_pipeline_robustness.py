@@ -59,30 +59,7 @@ except ImportError:  # Flask not installed: skip dashboard-only tests
 _TRACE_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
-def _fresh_db():
-    """Point dbm at a temp DB and reset its cached connection."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp.close()
-    old_path, old_conn = dbm.DB_PATH, dbm._conn
-    dbm.DB_PATH = tmp.name
-    dbm._conn = None
-    return tmp.name, old_path, old_conn
-
-
-def _restore_db(path, old_path, old_conn):
-    """Restore dbm and delete the scratch DB *including* WAL sidecars."""
-    try:
-        if dbm._conn is not None:
-            dbm._conn.close()
-    except Exception:
-        pass
-    dbm.DB_PATH, dbm._conn = old_path, old_conn
-    for p in (path, path + "-wal", path + "-shm"):
-        try:
-            os.unlink(p)
-        except OSError:
-            pass
-
+from helpers import fresh_db as _fresh_db, restore_db as _restore_db
 
 class _ScratchDbTest(unittest.TestCase):
     def setUp(self):

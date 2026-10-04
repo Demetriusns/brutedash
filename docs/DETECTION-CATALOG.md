@@ -2,7 +2,7 @@
 
 > GENERATED FROM `netmon/detection_catalog.py` -- do not edit by hand. Re-render with `python -m netmon.detection_catalog --render`.
 
-Every rule that can raise an alert in brutedash (23 rules), what it watches for, what it maps to in MITRE ATT&CK, what benign things set it off, and the test that proves it fires.
+Every rule that can raise an alert in brutedash (26 rules), what it watches for, what it maps to in MITRE ATT&CK, what benign things set it off, and the test that proves it fires.
 
 Design principles, from the roadmap: AI narrates, code decides -- deterministic rules fire alerts; the model only explains them. Quiet is a feature -- every dismissal must make tomorrow quieter.
 
@@ -511,6 +511,72 @@ Update the package to the latest version, then dismiss -- it will not come back 
 Once per (package, CVE); repeats stay quiet; vanished matches are cleaned silently. Local reads only -- the inventory never leaves the box. Daily from the monitor loop.
 
 **Proven by:** `tests/test_swaudit.py::CorrelateTests.test_run_swaudit_alerts_once`
+
+### `rule_muted` -- Chatty rule quieted down
+
+- **What it detects:** The alert-fatigue circuit breaker: when one rule fires many times in a few minutes, the monitor mutes it for a while instead of paging for every firing. The mute is never silent -- this alert is the visible record, and the dashboard shows the mute with its counts.
+- **Fires when:** 10 firings of one alert kind within 10 minutes (configurable under quiet in config.yaml). The 10th alert is recorded, the mute notice fires, and further firings are counted but dropped for 60 minutes.
+- **Severity:** Medium
+- **MITRE:** T1562.001 Impair Defenses: Disable or Modify Tools (Defense Evasion)
+- **Where it lives:** `netmon/db.py` -- add_alert circuit-breaker gate (runs on every alert)
+
+**False positives (be honest):**
+
+This is operational chrome, not a threat -- it fires exactly when it should. The 'false positive' question is whether the underlying rule was crying wolf; the mute just kept the noise down.
+
+**How to tell a false positive from a real one:**
+
+Check the Detection rules panel: it names the muted rule, how many times it fired, and how many extra firings were held back. Match the time to something real -- a backup, an update.
+
+**Tuning:**
+
+Thresholds live under quiet in config.yaml (circuit_fires / circuit_window_min / circuit_mute_min). The owner can lift a mute early from the Detection rules panel. Self-alerts, the mute notice itself, and the canary always pass through.
+
+**Proven by:** `tests/test_leftovers.py::CircuitBreakerTests.test_trip_mutes_and_records_visible_notice`
+
+### `canary_touch` -- Something touched the trap
+
+- **What it detects:** A lightweight tripwire: a fake open port on the LAN interface plus a fake credentials file. No legitimate device should ever touch either -- the listener accepts and closes immediately, never reading or writing, so it can't be used for anything. A touch is a High alert by definition.
+- **Fires when:** A TCP connection to the trap port (default 23231), or a content change to the bait credentials file. One alert per touching address per day; one per day for the file.
+- **Severity:** High
+- **MITRE:** T1595.002 Active Scanning: Vulnerability Scanning (Reconnaissance)
+- **Where it lives:** `netmon/canary.py` -- CanaryListener accept loop + bait-file mtime watch (monitor loop)
+
+**False positives (be honest):**
+
+Nearly none by design -- nothing legitimate knocks here. The known benign causes: a port scan YOU ran, or a security tool sweeping the LAN. The bait file only changes if something rewrote it.
+
+**How to tell a false positive from a real one:**
+
+Were you running a scan when it fired? That's your answer. Otherwise check the Devices page for the touching address -- a compromised device scans its neighbors.
+
+**Tuning:**
+
+24h cooldown per touching address. Port and bind address under canary in config.yaml. The self-check's listening-port baseline excludes the trap port.
+
+**Proven by:** `tests/test_leftovers.py::CanaryTests.test_touch_fires_high_alert`
+
+### `doh_usage` -- Device using encrypted DNS
+
+- **What it detects:** Notes when a LAN device talks port 443 to a well-known public DNS resolver -- the shape of DNS-over-HTTPS. DoH is a legitimate privacy feature, but it blinds DNS-based detection, so the dashboard marks the device with a lock and says visibility is reduced.
+- **Fires when:** Outbound port-443 flows from a LAN device to a known public resolver IP (Cloudflare, Google, Quad9, OpenDNS, AdGuard anycasts) within the last hour. One Low note per device per day.
+- **Severity:** Low
+- **MITRE:** T1071.004 Application Layer Protocol: DNS (Command and Control)
+- **Where it lives:** `netmon/detect.py` -- check_doh_usage (runs every minute)
+
+**False positives (be honest):**
+
+This is informational, not an accusation -- most hits are browsers or phones with encrypted DNS on by default. The heuristic can also catch plain HTTPS to a resolver IP, which is harmless.
+
+**How to tell a false positive from a real one:**
+
+Check the device's browser/OS DNS settings. If encrypted DNS is on there, this is expected. Dismiss it and the monitor learns.
+
+**Tuning:**
+
+24h cooldown per device. The resolver list is the DOH_RESOLVER_IPS set in netmon/detect.py -- deliberately conservative (major anycasts only).
+
+**Proven by:** `tests/test_leftovers.py::DohTests.test_doh_flow_fires_low_note`
 
 ## How to add a new rule
 

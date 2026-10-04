@@ -115,6 +115,30 @@ CREATE TABLE IF NOT EXISTS device_names(
     updated_ts REAL
 );
 
+-- Maintenance mode: one row, present only while active. While active,
+-- detection keeps running but notifications (alert emails, digests,
+-- the morning briefing) stay silent. until_ts NULL = until switched
+-- off by hand; an expired until_ts auto-clears on read.
+CREATE TABLE IF NOT EXISTS maintenance(
+    id INTEGER PRIMARY KEY CHECK (id=1),
+    on_ts REAL,                  -- when it was switched on
+    until_ts REAL,               -- NULL = no auto end
+    reason TEXT                  -- plain-English: "replacing the router"
+);
+
+-- Alert-fatigue circuit breaker: when one rule fires too often it is
+-- auto-muted here. dropped firings are COUNTED (suppressed), never
+-- silent: the mute notice alert + the dashboard panel show them.
+CREATE TABLE IF NOT EXISTS rule_mutes(
+    kind TEXT PRIMARY KEY,       -- alert kind being throttled
+    muted_from REAL,              -- mute window start (unix epoch)
+    muted_until REAL,             -- mute window end
+    fired_count INTEGER,          -- alerts that tripped the breaker
+    window_min INTEGER,           -- minutes those alerts fired inside
+    suppressed INTEGER NOT NULL DEFAULT 0,  -- firings dropped since
+    note TEXT
+);
+
 CREATE TABLE IF NOT EXISTS device_types(
     mac TEXT PRIMARY KEY,        -- lowercased hardware address
     dtype TEXT NOT NULL,         -- user-pinned device type (see topology.DEVICE_TYPES)
@@ -752,37 +776,60 @@ def add_alert(kind, severity, title, detail, meaning="", is_normal="",
         tag = _mitre_mod.tag_for(kind) or {}
     except Exception:
         tag = {}
-    with _lock:
-        conn = _db()
+    # Alert-fatigue circuit breaker: a rule firing too often is
+    # auto-muted. Suppressed firings are counted on the mute row (never
+    # silent); the trip itself records one visible "muted" alert.
+    now = time.time()
+    gate = _circuit_gate(kind, now)
+    if gate == "suppressed":
+        return None
+    try:
+        with _lock:
+            conn = _db()
 
-        def _do_insert():
-            cur = conn.execute(
-                "INSERT INTO alerts (ts, kind, severity, title, detail,"
-                " meaning, is_normal, what_to_do, mitre_id, mitre_name,"
-                " mitre_tactic, trace_id)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (ts, kind, severity, title, detail, meaning, is_normal,
-                 what_to_do, tag.get("id"), tag.get("name"),
-                 tag.get("tactic"), trace_id),
-            )
-            conn.commit()
-            return cur.lastrowid
+            def _do_insert():
+                cur = conn.execute(
+                    "INSERT INTO alerts (ts, kind, severity, title, detail,"
+                    " meaning, is_normal, what_to_do, mitre_id, mitre_name,"
+                    " mitre_tactic, trace_id)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (ts, kind, severity, title, detail, meaning, is_normal,
+                     what_to_do, tag.get("id"), tag.get("name"),
+                     tag.get("tactic"), trace_id),
+                )
+                conn.commit()
+                return cur.lastrowid
 
-        alert_id = _write_with_retry(_do_insert)
+            alert_id = _write_with_retry(_do_insert)
+    except Exception:
+        if gate == "tripped":
+            # The trip didn't really happen: the alert was never stored,
+            # so don't leave a mute row behind silencing future alerts
+            # with no visible record of why.
+            try:
+                clear_rule_mute(kind)
+            except Exception:
+                pass
+        raise
     # Incident attach runs after the insert's lock is released (_lock is a
     # plain Lock, not re-entrant) and is best-effort: grouping must never
     # break alerting. Failures are logged so a broken pipeline is visible.
-    try:
-        attach_to_incident(alert_id, kind, severity, title, detail, ts,
-                           trace_id=trace_id)
-    except Exception as exc:
-        import sys
+    # The mute notice itself skips cases: it's operational chrome, and a
+    # "suspicious activity involving your network" case would mislead.
+    if kind != "rule_muted":
         try:
-            print(f"netmon db: attach_to_incident failed for alert"
-                  f" {alert_id} (trace {trace_id}): {exc!r}",
-                  file=sys.stderr)
-        except Exception:
-            pass
+            attach_to_incident(alert_id, kind, severity, title, detail, ts,
+                               trace_id=trace_id)
+        except Exception as exc:
+            import sys
+            try:
+                print(f"netmon db: attach_to_incident failed for alert"
+                      f" {alert_id} (trace {trace_id}): {exc!r}",
+                      file=sys.stderr)
+            except Exception:
+                pass
+    if gate == "tripped":
+        _fire_mute_notice(kind, now)
     _notify_hook({
         "id": alert_id, "ts": ts, "kind": kind, "severity": severity,
         "title": title, "detail": detail, "meaning": meaning,
@@ -873,6 +920,18 @@ def attach_to_incident(alert_id, kind, severity, title, detail, ts,
     ts = ts if ts is not None else time.time()
     trace_id = trace_id or uuid.uuid4().hex
     key = _extract_case_key(title, detail)
+    # Friendly name for the case label ("Case: ... involving PS5
+    # (192.168.1.5)"). Looked up BEFORE the lock below (_lock is not
+    # re-entrant, and the map helpers take it).
+    case_label = key or "your network"
+    if key:
+        try:
+            mac = (ip_to_mac_map() or {}).get(key)
+            name = (device_name_map() or {}).get(mac, "") if mac else ""
+            if name:
+                case_label = f"{name} ({key})"
+        except Exception:
+            pass
     with _lock:
         conn = _db()
 
@@ -893,12 +952,11 @@ def attach_to_incident(alert_id, kind, severity, title, detail, ts,
                             "UPDATE incidents SET severity=? WHERE id=?",
                             (severity, incident_id))
             if incident_id is None:
-                label = key or "your network"
                 cur = conn.execute(
                     "INSERT INTO incidents (created_ts, updated_ts, title,"
                     " severity, status, device_key, summary)"
                     " VALUES (?,?,?,?,?,?,?)",
-                    (ts, ts, f"Case: suspicious activity involving {label}",
+                    (ts, ts, f"Case: suspicious activity involving {case_label}",
                      severity, "open", key, f"Opened by: {title}"),
                 )
                 incident_id = cur.lastrowid
@@ -1607,6 +1665,221 @@ def set_quiet_hours(windows):
     if not isinstance(windows, list):
         raise ValueError("quiet hours must be a list")
     set_meta("quiet_hours", json.dumps(windows))
+
+
+# --- maintenance mode ------------------------------------------------------
+# "Don't alert me Saturday 2-4am -- I'm replacing the router." Detection
+# keeps running (nothing is ever blind); only notifications pause:
+# per-alert emails, the digest, and the morning briefing stay silent
+# while the flag is active. Human-initiated actions (Escalate,
+# quarantine, digest "send now") still work -- the owner asked for
+# those explicitly.
+
+def set_maintenance(on, until_ts=None, reason=""):
+    """Switch maintenance mode on/off. until_ts: unix epoch or None
+    (stays on until switched off). Returns the new state dict."""
+    import time
+    with _lock:
+        conn = _db()
+        if on:
+            conn.execute(
+                "INSERT INTO maintenance (id, on_ts, until_ts, reason)"
+                " VALUES (1,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET on_ts=excluded.on_ts,"
+                " until_ts=excluded.until_ts, reason=excluded.reason",
+                (time.time(), until_ts,
+                 (reason or "").strip()[:200] or None))
+        else:
+            conn.execute("DELETE FROM maintenance WHERE id=1")
+        conn.commit()
+    try:
+        audit("maintenance", "owner", "maintenance",
+              f"switched {'on' if on else 'off'}"
+              + (f" until {time.strftime('%b %d %I:%M %p', time.localtime(until_ts))}"
+                 if on and until_ts else "")
+              + (f" ({(reason or '').strip()[:200]})" if on and reason else ""))
+    except Exception:
+        pass
+    return get_maintenance()
+
+
+def get_maintenance():
+    """Maintenance state: {"active", "on_ts", "until_ts", "reason"}.
+
+    An expired until_ts auto-clears (one row, so this is cheap). Never
+    raises.
+    """
+    import time
+    try:
+        with _lock:
+            conn = _db()
+            row = conn.execute(
+                "SELECT on_ts, until_ts, reason FROM maintenance"
+                " WHERE id=1").fetchone()
+            if row and row[1] is not None and row[1] <= time.time():
+                conn.execute("DELETE FROM maintenance WHERE id=1")
+                conn.commit()
+                row = None
+    except Exception:
+        return {"active": False, "on_ts": None, "until_ts": None,
+                "reason": ""}
+    if not row:
+        return {"active": False, "on_ts": None, "until_ts": None,
+                "reason": ""}
+    return {"active": True, "on_ts": row[0], "until_ts": row[1],
+            "reason": row[2] or ""}
+
+
+def maintenance_active():
+    """True when maintenance mode is currently silencing notifications."""
+    try:
+        return bool(get_maintenance()["active"])
+    except Exception:
+        return False
+
+
+# --- alert-fatigue circuit breaker -------------------------------------------
+# One rule firing too often gets auto-muted: further firings are dropped
+# at the gate (counted on the mute row, never silent) and a single
+# visible "muted" alert explains what happened. Detection never stops --
+# the rule still evaluates; only the alert spam is throttled. The mute
+# notice itself, self-alerts, and the canary always pass through.
+
+_CIRCUIT_EXEMPT = frozenset({"rule_muted", "self_drift", "canary_touch"})
+
+
+def _circuit_config():
+    """(fires, window_min, mute_min) from config.yaml `quiet`, with
+    sane defaults when config is missing or broken."""
+    try:
+        from . import config as cfgm
+        cfg = cfgm.load_cached()
+        fires = int(cfgm.get(cfg, "quiet.circuit_fires", 10))
+        window_min = int(cfgm.get(cfg, "quiet.circuit_window_min", 10))
+        mute_min = int(cfgm.get(cfg, "quiet.circuit_mute_min", 60))
+        return max(1, fires), max(1, window_min), max(1, mute_min)
+    except Exception:
+        return 10, 10, 60
+
+
+def _circuit_gate(kind, now):
+    """The gate every add_alert passes through.
+
+    Returns "suppressed" (an active mute ate this firing -- counted),
+    "tripped" (the breaker just tripped -- a mute row was created), or
+    None (normal). Never raises.
+    """
+    if kind in _CIRCUIT_EXEMPT:
+        return None
+    fires, window_min, mute_min = _circuit_config()
+    try:
+        with _lock:
+            conn = _db()
+            row = conn.execute(
+                "SELECT muted_until FROM rule_mutes WHERE kind=?",
+                (kind,)).fetchone()
+            if row and row[0] and row[0] > now:
+                conn.execute(
+                    "UPDATE rule_mutes SET suppressed=suppressed+1"
+                    " WHERE kind=?", (kind,))
+                conn.commit()
+                return "suppressed"
+            if row:
+                # Expired mute: clear it so the rule can prove itself
+                # quiet again.
+                conn.execute("DELETE FROM rule_mutes WHERE kind=?",
+                             (kind,))
+                conn.commit()
+            count = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE kind=? AND ts > ?",
+                (kind, now - window_min * 60)).fetchone()[0] or 0
+            if count < fires:
+                return None
+            conn.execute(
+                "INSERT OR REPLACE INTO rule_mutes (kind, muted_from,"
+                " muted_until, fired_count, window_min, suppressed, note)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (kind, now, now + mute_min * 60, count, window_min, 0,
+                 f"fired {count} times in {window_min} minutes"))
+            conn.commit()
+            return "tripped"
+    except Exception:
+        return None
+    return None
+
+
+def list_rule_mutes(active_only=True):
+    """Mute rows for the dashboard, newest first. Never raises."""
+    import time
+    try:
+        with _lock:
+            conn = _db()
+            rows = conn.execute(
+                "SELECT kind, muted_from, muted_until, fired_count,"
+                " window_min, suppressed, note FROM rule_mutes"
+                " ORDER BY muted_from DESC").fetchall()
+    except Exception:
+        return []
+    now = time.time()
+    out = []
+    for kind, mfrom, muntil, fired, wmin, supp, note in rows:
+        active = bool(muntil and muntil > now)
+        if active_only and not active:
+            continue
+        out.append({"kind": kind, "muted_from": mfrom,
+                    "muted_until": muntil, "fired_count": fired or 0,
+                    "window_min": wmin or 0, "suppressed": supp or 0,
+                    "note": note or "", "active": active})
+    return out
+
+
+def clear_rule_mute(kind):
+    """Owner override: lift a mute early. Returns True when one existed."""
+    with _lock:
+        conn = _db()
+        cur = conn.execute("DELETE FROM rule_mutes WHERE kind=?",
+                           ((kind or "").strip(),))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def _fire_mute_notice(kind, now):
+    """The one visible entry when the circuit breaker trips: a Medium
+    alert reading "muted for X because it fired Y times". Never a
+    silent drop. Best-effort; never raises.
+
+    The notice itself is gate-exempt (no recursion) and skips incident
+    attach (handled by the caller). It is Medium, so it never pages --
+    the dashboard and the Detection rules panel carry it.
+    """
+    try:
+        mute = next((m for m in list_rule_mutes(active_only=True)
+                     if m["kind"] == kind), None)
+        if not mute:
+            return
+        fired, wmin = mute["fired_count"], mute["window_min"]
+        span = mute["muted_until"] - (mute["muted_from"] or now)
+        mute_min = max(1, round(span / 60))
+        add_alert(
+            "rule_muted", "Medium",
+            f"'{kind}' kept firing -- quieting it down for a while",
+            (f"The '{kind}' rule fired {fired} times in the last {wmin}"
+             f" minutes, so it is muted for {mute_min} minutes. Detection"
+             f" keeps running; further firings are counted but won't"
+             f" page you."),
+            meaning=("One of the detection rules got very chatty -- like a"
+                     " car alarm going off every few minutes. The monitor"
+                     " turned its volume down for a while instead of"
+                     " bothering you each time."),
+            is_normal=("Normal when something genuinely repeats -- a busy"
+                       " backup, a chatty device. Worth a look if you don't"
+                       " recognize the pattern."),
+            what_to_do=("Check the Detection rules panel to see what kept"
+                        " firing. If it's normal, dismiss one of the alerts"
+                        " and the monitor will learn to stay quiet about it."),
+            ts=now)
+    except Exception:
+        pass
 
 # --- allowlist ---------------------------------------------------------
 # (kind, pattern) pairs the user approved: matching alerts never fire.

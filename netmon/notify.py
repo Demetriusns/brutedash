@@ -230,6 +230,11 @@ def maybe_send_alert(alert):
             return False
         if (alert.get("severity") or "").strip() not in _SENDABLE:
             return False
+        # Checked at queue time too (not just on the worker): an alert
+        # that fires during maintenance must not email if the worker
+        # only gets to it after maintenance is switched off.
+        if _maintenance_active():
+            return False
         _ensure_worker()
         _job_queue.put(("alert", dict(alert)))
         return True
@@ -253,6 +258,9 @@ def _maybe_send_alert(alert):
     kind = (alert.get("kind") or "general").strip() or "general"
     if in_quiet_hours(kind):
         return False  # silenced by the user's quiet hours; alert kept
+    if _maintenance_active():
+        return False  # maintenance mode: detection keeps running,
+                      # notifications stay silent until it's switched off
     if not _cooldown_allows(kind):
         return False
     trip = _circuit_state(kind)
@@ -394,6 +402,15 @@ def in_quiet_hours(kind, now=None):
 # When one alert kind fires CIRCUIT_THRESHOLD+ times in CIRCUIT_WINDOW,
 # email one "still happening" escalation and then go quiet for the hour
 # instead of sending (or worse, wanting to send) a stream of mails.
+
+def _maintenance_active():
+    """True when maintenance mode is silencing notifications. Detection
+    keeps running -- this only gates outgoing mail. Never raises."""
+    try:
+        from . import db as dbm
+        return bool(dbm.maintenance_active())
+    except Exception:
+        return False
 
 def _circuit_state(kind):
     """None = normal; "escalate" = tripped, send one summary mail;
@@ -542,6 +559,8 @@ def _send_digest():
         from . import db as dbm
     except Exception:
         return False
+    if dbm.maintenance_active():
+        return False  # maintenance mode: the digest waits; nothing lost
     last = _meta_get("last_digest_ts")
     try:
         since = float(last) if last else time.time() - 24 * 3600

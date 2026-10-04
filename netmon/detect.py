@@ -42,7 +42,15 @@ _LOCAL_IPS_CACHE = None
 
 
 def _device_label(ip):
-    """Plain-English label for an alert: 'this computer (ip)' or 'device ip'."""
+    """Plain-English label for an alert.
+
+    Uses the owner's friendly name when the device has one
+    ("PS5 (192.168.1.5)"), "this computer (ip)" for the sensor box
+    itself, otherwise "device 192.168.1.5". The raw MAC/IP always stays
+    in the alert *detail* (cooldown matching depends on it); the label
+    is only the human-readable surface used in titles, emails, and
+    timelines.
+    """
     global _LOCAL_IPS_CACHE
     if _LOCAL_IPS_CACHE is None:
         try:
@@ -52,7 +60,82 @@ def _device_label(ip):
             _LOCAL_IPS_CACHE = set()
     if ip and ip in _LOCAL_IPS_CACHE:
         return f"this computer ({ip})"
+    if ip:
+        try:
+            mac = (dbm.ip_to_mac_map() or {}).get(ip)
+            name = (dbm.device_name_map() or {}).get(mac, "") if mac else ""
+            if name:
+                return f"{name} ({ip})"
+        except Exception:
+            pass
     return f"device {ip}" if ip else "a device on your network"
+
+
+# --- encrypted DNS (DoH) awareness -------------------------------------------
+# DNS-over-HTTPS blinds DNS-based detection: lookups to these resolvers
+# travel inside port-443 TLS instead of plain port-53 UDP. The IPs below
+# are the well-known public resolver anycasts (Cloudflare, Google,
+# Quad9, OpenDNS, AdGuard) -- a LAN device holding port-443
+# conversations with one of them is, for practical purposes, using
+# encrypted DNS. This is a heuristic, and it says so: some of these
+# addresses also serve plain HTTPS. The point is visibility, not
+# accusation -- the dashboard tells the owner "this device uses
+# encrypted DNS, so some DNS checks can't see it."
+DOH_RESOLVER_IPS = frozenset({
+    "1.1.1.1", "1.0.0.1",          # Cloudflare
+    "8.8.8.8", "8.8.4.4",          # Google
+    "9.9.9.9", "149.112.112.112",  # Quad9
+    "208.67.222.222", "208.67.220.220",  # OpenDNS / Cisco Umbrella
+    "94.140.14.14", "94.140.15.15",      # AdGuard
+})
+DOH_WINDOW = 3600        # look back one hour of flows
+DOH_COOLDOWN = 86400     # one note per device per day
+
+
+def check_doh_usage(now=None):
+    """Note devices using encrypted DNS (DoH) -- Low, once per device
+    per day. Informational: DoH is legitimate, but it reduces what
+    DNS-based detection can see for that device."""
+    now = now or time.time()
+    placeholders = ",".join("?" for _ in DOH_RESOLVER_IPS)
+    rows = dbm.query(
+        "SELECT src_ip, dst_ip, SUM(bytes) FROM flows"
+        f" WHERE ts > ? AND direction='outbound' AND dst_port=443"
+        f" AND dst_ip IN ({placeholders})"
+        " GROUP BY src_ip, dst_ip",
+        (now - DOH_WINDOW, *sorted(DOH_RESOLVER_IPS)))
+    fired = []
+    for src_ip, dst_ip, nbytes in rows:
+        if not _is_lan_ip(src_ip):
+            continue  # only our own devices get the note
+        if dbm.recent_alert_kind("doh_usage", src_ip, DOH_COOLDOWN):
+            continue
+        dev = _device_label(src_ip)
+        dev_s = _device_sentence(src_ip)
+        mb = (nbytes or 0) / 1e6
+        dbm.add_alert(
+            "doh_usage", "Low",
+            f"{dev} is using encrypted DNS",
+            (f"{dev_s} talked to {dst_ip} (a well-known public DNS"
+             f" resolver) over port 443 in the last hour"
+             f" ({mb:.1f} MB) -- that pattern is DNS-over-HTTPS, not"
+             f" regular web browsing."),
+            meaning=(f"{dev_s} looks up website names over an encrypted"
+                     " channel instead of plain DNS. Browsers and phones"
+                     " turn this on by themselves -- it's a legitimate"
+                     " privacy feature."),
+            is_normal=("Normal if the device's browser or OS has encrypted"
+                       " DNS turned on (many do by default now). It only"
+                       " matters because the monitor can't see inside"
+                       " encrypted lookups."),
+            what_to_do=("Nothing urgent. Just know that while this device"
+                        " uses encrypted DNS, some DNS visibility is"
+                        " reduced -- the phishing/malware domain checks"
+                        " can't see its lookups. The Devices page marks it"
+                        " with a lock so you remember."),
+            ts=now)
+        fired.append(("doh_usage", src_ip))
+    return fired
 
 
 def _device_sentence(ip):
@@ -915,6 +998,7 @@ _RULES = (
     check_arp_spoof,
     check_behavior_deviation,
     check_threat_intel,
+    check_doh_usage,
 )
 
 

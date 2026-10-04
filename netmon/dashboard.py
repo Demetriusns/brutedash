@@ -228,9 +228,93 @@ footer.site{margin-top:2.5em;padding-top:1em;border-top:1px solid #30363d}
   .alert{padding:.6em .8em}
   section.block{margin-bottom:1.5em}
 }
+/* ---- visual polish (batch 17): Fontshare + hand-adapted component styles ----
+   Fonts load from the Fontshare CDN with display=swap; every stack ends in
+   system fonts so the page looks right offline too. Animations are
+   transform/opacity only (no layout thrash, Pi-friendly) and switch off
+   under prefers-reduced-motion. */
+:root{
+  --font-head:'Clash Display','Satoshi',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --font-body:'Satoshi',system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
+  --font-mono:ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
+  --accent:#58a6ff; --accent-dim:#1c2b4a; --bg-card:#161b22; --border:#30363d;
+}
+body{font-family:var(--font-body);line-height:1.55}
+h1,h2,h3,nav.top .brand{font-family:var(--font-head);letter-spacing:-.01em}
+h1{font-weight:600} h2{font-weight:600}
+pre,code{font-family:var(--font-mono)}
+button,.btn-sm{font-family:var(--font-body);font-weight:500;letter-spacing:.01em;
+  background:linear-gradient(180deg,#2ea043,#238636);
+  box-shadow:0 1px 2px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.12);
+  transition:transform .12s ease,box-shadow .12s ease,filter .12s ease}
+button:hover,.btn-sm:hover{filter:brightness(1.12);transform:translateY(-1px);
+  box-shadow:0 3px 8px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.12)}
+button:active,.btn-sm:active{transform:translateY(0);filter:brightness(.95)}
+button:focus-visible,.btn-sm:focus-visible,a:focus-visible,input:focus-visible,
+select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn-sm.ghost{background:#21262d;border:1px solid var(--border);box-shadow:none}
+.btn-sm.ghost:hover{background:#2a313b;filter:none}
+input,textarea,select{font-family:var(--font-body);transition:border-color .15s ease,box-shadow .15s ease}
+input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,166,255,.18)}
+.card{background:linear-gradient(180deg,#181e27,#141a22);border:1px solid var(--border);
+  border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.35);
+  transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease}
+.card:hover{transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.45);border-color:#3d4756}
+.card.kpi{border-top:2px solid var(--accent-dim)}
+.card.kpi-ok{border-top-color:#2d6a3f} .card.kpi-warn{border-top-color:#8a6d1f}
+.card.kpi-bad{border-top-color:#f85149}
+.hero{background:linear-gradient(180deg,#171d27,#12161d);border-radius:14px;
+  box-shadow:0 2px 10px rgba(0,0,0,.35)}
+.badge{font-weight:600;letter-spacing:.02em;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
+.badge::before{content:"";display:inline-block;width:.5em;height:.5em;border-radius:50%;
+  background:currentColor;margin-right:.45em;vertical-align:baseline;opacity:.85}
+.badge.mitre::before{display:none}
+table{border-radius:8px;overflow:hidden}
+tbody tr{transition:background-color .12s ease}
+tbody tr:hover{background:#1a212c}
+th{font-family:var(--font-head);font-weight:600;letter-spacing:.03em;font-size:.78em;
+  text-transform:uppercase;color:#9aa7b8}
+.alert{border-radius:0 8px 8px 0;box-shadow:0 1px 4px rgba(0,0,0,.3);
+  transition:transform .12s ease,box-shadow .12s ease}
+.alert:hover{transform:translateX(2px);box-shadow:0 2px 8px rgba(0,0,0,.4)}
+details.settings{transition:border-color .15s ease,box-shadow .15s ease}
+details.settings:hover{border-color:#3d4756}
+details.settings[open]{box-shadow:0 2px 10px rgba(0,0,0,.3)}
+nav.top a.nl{transition:background-color .12s ease,color .12s ease}
+section.block{animation:fadeUp .45s ease both}
+section.block:nth-of-type(2){animation-delay:.05s}
+section.block:nth-of-type(3){animation-delay:.1s}
+section.block:nth-of-type(4){animation-delay:.15s}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.banner-red,.banner-blue,.banner-amber{animation:bannerIn .25s ease both}
+@keyframes bannerIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.pill{box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.bar{overflow:hidden}
+.bar>div{transition:width .5s ease}
+/* skeleton shimmer for loading placeholders (cheap: one small layer) */
+.shimmer{position:relative;overflow:hidden;color:transparent!important;background:#1a212c;border-radius:6px;min-height:1.2em}
+.shimmer::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(100deg,transparent 20%,rgba(88,166,255,.12) 50%,transparent 80%);
+  animation:shimmer 1.4s infinite}
+@keyframes shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+/* spinner for buttons doing work */
+.spin{display:inline-block;width:1em;height:1em;border:2px solid #30363d;border-top-color:var(--accent);
+  border-radius:50%;animation:spin .7s linear infinite;vertical-align:-.15em}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  html{scroll-behavior:auto}
+}
 """
 
+# Fontshare CDN fonts (Satoshi for body, Clash Display for headings).
+# display=swap + system-font fallbacks in the CSS stacks: the page looks
+# right offline too, it just falls back to system fonts.
+FONTS_HTML = """<link rel="preconnect" href="https://api.fontshare.com" crossorigin>
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&f[]=clash-display@500,600,700&display=swap" rel="stylesheet">"""
+
 LOGIN_HTML = """<html><head><title>netmon -- sign in</title>
+""" + FONTS_HTML + """
 <style>""" + STYLE + """</style></head><body>
 <h1>netmon sign in</h1>
 <p class="note">This dashboard is password-protected. Enter the dashboard
@@ -332,6 +416,8 @@ def logout():
 
 INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://api.fontshare.com" crossorigin>
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&f[]=clash-display@500,600,700&display=swap" rel="stylesheet">
 <style>""" + STYLE + """</style></head><body class="%%BODY_CLASS%%">
 <nav class="top">
 <a class="brand" href="/">netmon</a>
@@ -351,6 +437,7 @@ INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 </nav>
 <div id="stalebanner" class="banner-red" style="display:none"></div>
 <div id="loopbanner" class="banner-red" style="display:none"></div>
+<div id="maintbanner" class="banner-amber" style="display:none"></div>
 <div id="wnbanner" class="banner-blue" style="display:none">&#128225; Whole-network view: this computer is relaying the LAN, so every device's traffic is monitored.</div>
 
 <div class="hero" id="overview">
@@ -513,6 +600,16 @@ history.</p>
 <button class="btn-sm owneronly" onclick="addQuietWindow()">Add</button></p>
 </div></details>
 
+<details class="settings"><summary>Maintenance mode</summary><div class="inner">
+<p class="note">Doing planned work (replacing the router, running backups)? Switch this on and email alerts, the digest, and the morning briefing stay silent. Detection keeps running the whole time -- nothing goes unwatched.</p>
+<div id="maintenance"><p class="note">Loading...</p></div>
+<p class="note owneronly">Reason: <input id="maint_reason" placeholder="e.g. replacing the router" size="30">
+for <input id="maint_hours" type="number" min="1" max="72" value="4" style="width:4em"> hours
+<button class="btn-sm" onclick="setMaintenance(true)">Pause notifications</button>
+<button class="btn-sm ghost" onclick="setMaintenance(false)">Resume now</button>
+<span class="note" id="maintmsg"></span></p>
+</div></details>
+
 <details class="settings"><summary>Detection rules</summary><div class="inner">
 <p class="note">How useful each detection has been, based on what you've acknowledged or dismissed in the last 30 days.</p>
 <div id="rulehealth"><p class="note">Loading...</p></div>
@@ -562,6 +659,9 @@ history.</p>
 <details class="settings"><summary>This box (sensor health)</summary><div class="inner">
 <p class="note">Lightweight self-checks on the computer running brutedash: new listening ports, new services or autorun entries vs. baseline, and Defender real-time protection status. First run learns the baseline silently.</p>
 <div id="selfcheck"><p class="note">Loading...</p></div>
+<h4 style="margin-top:1em">Tripwire</h4>
+<p class="note">A fake open port and a fake passwords file. Nothing legitimate should ever touch either -- a touch means something is snooping around.</p>
+<div id="canarystatus"><p class="note">Loading...</p></div>
 <h4 style="margin-top:1em">Software on this box</h4>
 <p class="note">What is installed here, checked against the list of security flaws attackers are actively using right now. Local check only -- nothing leaves this box.</p>
 <div id="swaudit"><p class="note">Loading...</p></div>
@@ -647,6 +747,21 @@ async function refreshInner(){
       + "Restart brutedash so it can watch your network again.";
   } else {
     lb.style.display = "none";
+  }
+  // Maintenance mode (batch 17): notifications paused, detection running.
+  const mb = document.getElementById("maintbanner");
+  if (d.maintenance && d.maintenance.active) {
+    mb.style.display = "block";
+    let mtxt = "Notifications are paused";
+    if (d.maintenance.reason) mtxt += " (" + d.maintenance.reason + ")";
+    if (d.maintenance.until_ts) {
+      const dt = new Date(d.maintenance.until_ts * 1000);
+      mtxt += " until " + dt.toLocaleString([], {month:"short", day:"numeric",
+        hour:"numeric", minute:"2-digit"});
+    }
+    mb.textContent = "\u23F8 " + mtxt + " -- the monitor is still watching, it just isn't emailing you.";
+  } else {
+    mb.style.display = "none";
   }
   // Nav: live/stale pill + urgent-alert badge.
   const pill = document.getElementById("status-pill");
@@ -861,11 +976,14 @@ async function loadDevices(){
       const status = v.on_probation
         ? `<span class="badge warn">🟡 Probation · trusted in ${v.probation_left_h}h</span>`
         : `<span class="badge ok">✅ Trusted</span>`;
+      const dohbadge = v.doh
+        ? ` <span class="badge" title="This device uses encrypted DNS -- some DNS checks can't see its lookups">🔒 encrypted DNS</span>`
+        : "";
       const traf = `<span class="note">↑${v.up_mb} ↓${v.down_mb} MB</span>`;
       const prof = v.profile
         ? `<span class="note">~${v.profile.avg_mb_per_hr} MB/hr · busiest ${esc(v.profile.busy)} · learned over ${v.profile.days}d</span>`
         : `<span class="note">Still learning (needs 3 days)</span>`;
-      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="showDeviceDetails(this.dataset.mac)">Details</button>${canWrite() ? ` <button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button> ${v.quarantined ? `<button class="btn-sm" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="releaseDevice(this.dataset.mac, this.dataset.label)">Release</button>` : `<button class="btn-sm ghost" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="quarantineDevice(this.dataset.mac, this.dataset.label)">Isolate</button>`}` : ""}</td></tr>`;
+      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span>${dohbadge}</td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="showDeviceDetails(this.dataset.mac)">Details</button>${canWrite() ? ` <button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button> ${v.quarantined ? `<button class="btn-sm" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="releaseDevice(this.dataset.mac, this.dataset.label)">Release</button>` : `<button class="btn-sm ghost" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="quarantineDevice(this.dataset.mac, this.dataset.label)">Isolate</button>`}` : ""}</td></tr>`;
     }).join("") + `</table>`
     : '<p class="note">No devices seen yet.</p>');
   } catch(e) {
@@ -1033,6 +1151,7 @@ async function intelLookup(){
 const DAY_NAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 let QH_CACHE = [];
 async function loadQuietHours(){
+  try {
   const r = await fetch("/api/settings/quiet_hours");
   const d = await r.json();
   QH_CACHE = d.windows || [];
@@ -1040,12 +1159,55 @@ async function loadQuietHours(){
     `<table><tr><th>Days</th><th>From</th><th>To</th><th>Applies to</th><th></th></tr>` +
     QH_CACHE.map((x,i)=>`<tr><td>${x.days.map(dd=>DAY_NAMES[dd]).join(", ")}</td><td>${esc(x.start)}</td><td>${esc(x.end)}</td><td>${esc((x.kinds||["all"]).join(", "))}</td><td>${canWrite() ? `<button class="btn-sm ghost" onclick="delQuietWindow(${i})">Remove</button>` : ""}</td></tr>`).join("") + `</table>`
     : '<p class="note">No quiet hours set -- emails send any time.</p>';
+  } catch(e) {
+    document.getElementById("quiethours").innerHTML =
+      '<p class="note">Could not load quiet hours: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
 }
 async function saveQuietWindows(wins){
   await fetch("/api/settings/quiet_hours", {method:"POST",
     headers:{"Content-Type":"application/json"},
     body: JSON.stringify({windows: wins})});
   loadQuietHours();
+}
+async function loadMaintenance(){
+  try {
+  const r = await fetch("/api/settings/maintenance");
+  const d = await r.json();
+  const m = d.maintenance || {active:false};
+  let until = "";
+  if (m.until_ts) {
+    const dt = new Date(m.until_ts * 1000);
+    until = " until " + dt.toLocaleString([], {month:"short", day:"numeric",
+      hour:"numeric", minute:"2-digit"});
+  }
+  document.getElementById("maintenance").innerHTML = m.active ?
+    `<p><span class="badge warn">&#9208; Paused</span> <b>Notifications are paused${esc(until)}</b>` +
+    (m.reason ? ` -- ${esc(m.reason)}` : "") +
+    `</p><p class="note">Detection is still running. Alerts keep recording on the dashboard; only emails, the digest, and the morning briefing stay silent.</p>`
+    : '<p class="note">Notifications are on. Switch maintenance mode on when you are doing planned work and do not want to be paged.</p>';
+  } catch(e) {
+    document.getElementById("maintenance").innerHTML =
+      '<p class="note">Could not load maintenance mode: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+async function setMaintenance(on){
+  const msg = document.getElementById("maintmsg");
+  const body = {on: on};
+  if (on) {
+    body.reason = document.getElementById("maint_reason").value || "";
+    body.hours = document.getElementById("maint_hours").value || "";
+  }
+  const r = await fetch("/api/settings/maintenance", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  const d = await r.json();
+  if (!d.ok) { msg.textContent = "Couldn't save: " + (d.error || "unknown error"); return; }
+  msg.textContent = on ? "Notifications paused." : "Notifications resumed.";
+  document.getElementById("maint_reason").value = "";
+  loadMaintenance();
+  refresh();
 }
 async function addQuietWindow(){
   if(!canWrite()) return;  // viewer role: read-only
@@ -1060,24 +1222,61 @@ async function delQuietWindow(i){
   saveQuietWindows(QH_CACHE.filter((_,j)=>j!==i));
 }
 async function loadRuleHealth(){
+  try {
   const r = await fetch("/api/rule_health");
   const d = await r.json();
   let html = d.suggestions.map(s=>
     `<p class="note" style="border-left:4px solid #d29922;padding:.4em .8em;background:#161b22">${esc(s.text)}</p>`
   ).join("");
+  const mutes = d.mutes || [];
+  if (mutes.length) {
+    html += `<p><span class="badge warn">&#128263; ${mutes.length} muted</span></p>` +
+      mutes.map(m=>{
+        const until = new Date(m.muted_until * 1000).toLocaleString([], {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"});
+        return `<p class="note" style="border-left:4px solid #8a6d1f;padding:.4em .8em;background:#161b22">` +
+          `<b>${esc(m.kind)}</b> is muted until ${esc(until)} -- it fired ${m.fired_count} times in ${m.window_min} minutes` +
+          (m.suppressed ? `, and ${m.suppressed} more since were held back` : "") +
+          `. Detection keeps running.` +
+          (canWrite() ? ` <button class="btn-sm ghost" onclick="unmuteRule('${esc(m.kind)}')">Unmute now</button>` : "") +
+          `</p>`;
+      }).join("");
+  }
   html += d.rules.length ?
     `<table><tr><th>Rule</th><th>Alerts (30d)</th><th>Acknowledged</th><th>Dismissed</th><th>Precision</th></tr>` +
-    d.rules.map(x=>`<tr><td>${esc(x.kind)}</td><td>${x.total}</td><td>${x.acknowledged}</td><td>${x.dismissed}</td><td>${x.precision===null?"--":(x.precision*100).toFixed(0)+"%"}</td></tr>`).join("") + `</table>`
+    d.rules.map(x=>{
+      const prec = x.precision===null ? "--" : (x.precision*100).toFixed(0)+"%";
+      const noisy = x.dismissed > 0 && x.fp_note ?
+        `<br><span class="note">Why this might be noise: ${esc(x.fp_note)}</span>` : "";
+      return `<tr><td>${esc(x.kind)}${noisy}</td><td>${x.total}</td><td>${x.acknowledged}</td><td>${x.dismissed}</td><td>${prec}</td></tr>`;
+    }).join("") + `</table>`
     : '<p class="note">No alert history yet -- rule health appears once alerts have been acknowledged or dismissed.</p>';
   document.getElementById("rulehealth").innerHTML = html;
+  } catch(e) {
+    document.getElementById("rulehealth").innerHTML =
+      '<p class="note">Could not load rule health: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+async function unmuteRule(kind){
+  if (!confirm("Hear every '" + kind + "' alert again right away?")) return;
+  await fetch("/api/rule_health/unmute", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({kind: kind})});
+  loadRuleHealth();
 }
 async function loadAllowlist(){
+  try {
   const r = await fetch("/api/allowlist");
   const d = await r.json();
   document.getElementById("allowlist").innerHTML = d.entries.length ?
     `<table><tr><th>Rule</th><th>Pattern</th><th>Note</th><th></th></tr>` +
     d.entries.map(e=>`<tr><td>${esc(e.kind)}</td><td>${esc(e.pattern)}</td><td>${esc(e.note)}</td><td>${canWrite() ? `<button class="btn-sm ghost" onclick="delAllow(${e.id})">Remove</button>` : ""}</td></tr>`).join("") + `</table>`
     : '<p class="note">Allowlist is empty.</p>';
+  } catch(e) {
+    document.getElementById("allowlist").innerHTML =
+      '<p class="note">Could not load the allowlist: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
 }
 async function addAllow(){
   if(!canWrite()) return;  // viewer role: read-only
@@ -1096,6 +1295,7 @@ async function delAllow(id){
   loadAllowlist();
 }
 async function loadSuggestions(){
+  try {
   const r = await fetch("/api/learn/suggestions");
   const d = await r.json();
   document.getElementById("learnsug").innerHTML = d.suggestions.length ?
@@ -1109,6 +1309,11 @@ async function loadSuggestions(){
           `<button class="btn-sm ghost" onclick="decideSug(${s.id},'ignore')">Ignore</button></div>`
         : `</div>`)).join("")
     : '<p class="note">No suggestions yet. Dismiss a few alerts you do not care about and the monitor will start proposing these.</p>';
+  } catch(e) {
+    document.getElementById("learnsug").innerHTML =
+      '<p class="note">Could not load suggestions: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
 }
 async function decideSug(id, what){
   if(!canWrite()) return;  // viewer role: read-only
@@ -1664,6 +1869,7 @@ async function loadSelfcheck(){
       `<table><tr><th>Check</th><th>Status</th><th>Detail</th></tr>` +
       rows.map(c=>`<tr><td>${esc(c.name)}</td><td><span class="badge ${c.status === "ok" ? "ok" : (c.status === "drift" ? "warn" : "")}">${esc(c.status)}</span></td><td>${esc(c.detail)}</td></tr>`).join("") + `</table>` : "");
     renderSwaudit(d.swaudit || {});
+    renderCanary(d.canary || {});
     loadPipelineHealth();
   } catch(e) {
     document.getElementById("selfcheck").innerHTML =
@@ -1694,6 +1900,22 @@ async function loadPipelineHealth(){
     el.innerHTML = '<p class="banner-red">Could not load pipeline health: '
       + esc(String((e && e.message) || e)) + '</p>';
   }
+}
+function renderCanary(c){
+  const el = document.getElementById("canarystatus");
+  if (!el) return;
+  if (!c.enabled) {
+    el.innerHTML = '<p class="note">Tripwire is off (enable it under <code>canary</code> in config.yaml).</p>';
+    return;
+  }
+  const badge = c.running ? '<span class="badge ok">listening</span>'
+                          : '<span class="badge warn">not listening</span>';
+  const touches = (c.recent_touches || []).map(t=>{
+    const when = new Date(t.ts * 1000).toLocaleString([], {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"});
+    return `<span class="note">${esc(t.ip)}:${t.port} &mdash; ${esc(when)}</span>`;
+  }).join("<br>");
+  el.innerHTML = `<p>${badge} <b>Tripwire</b> <span class="note">fake open port ${c.port}${c.bind ? " on " + esc(c.bind) : ""} + a fake passwords file. Nothing real should ever touch either.</span></p>` +
+    (touches ? `<p>Recent touches:<br>${touches}</p>` : '<p class="note">No touches recorded. Good -- that means no scanner has knocked.</p>');
 }
 function renderSwaudit(sw){
   const el = document.getElementById("swaudit");
@@ -1862,7 +2084,7 @@ async function relabelTopo(sel){
   loadTopology();
 }
 refresh(); setInterval(refresh, 5000);
-loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions(); loadCases(); loadTopology();
+loadDevices(); loadQuietHours(); loadMaintenance(); loadRuleHealth(); loadAllowlist(); loadSuggestions(); loadCases(); loadTopology();
 loadAssets(); loadTopTalkers(); setInterval(loadTopTalkers, 30000);
 loadAttackSurface(); loadAmass(); loadRetention();
 loadIntelStatus();
@@ -2232,6 +2454,19 @@ def api_devices():
         "SELECT dst_ip, SUM(bytes) FROM flows WHERE ts > ?"
         " AND direction='inbound' GROUP BY dst_ip", (now - 900,)) if ip}
     profiles = dbm.device_profile_summaries()
+    # Encrypted-DNS badge: devices with a recent doh_usage note get a
+    # lock on their row ("some DNS visibility is reduced"). The device
+    # IP is the first IPv4 address in the alert detail.
+    try:
+        doh_ips = set()
+        for (detail,) in dbm.query(
+                "SELECT detail FROM alerts WHERE kind='doh_usage'"
+                " AND ts > ?", (now - 86400,)):
+            m = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", detail or "")
+            if m:
+                doh_ips.add(m.group(0))
+    except Exception:
+        doh_ips = set()
     out = []
     for d in devs:
         first = d.get("first_seen") or 0
@@ -2245,6 +2480,7 @@ def api_devices():
             "mac": mac, "name": d.get("name", ""),
             "last_ip": lip,
             "quarantined": mac in quarantined,
+            "doh": lip in doh_ips,
             "up_mb": round(up.get(lip, 0) / 1e6, 2),
             "down_mb": round(down.get(lip, 0) / 1e6, 2),
             "last_seen": _fmt_ts(d["last_seen"]) if d.get("last_seen") else "",
@@ -2581,6 +2817,7 @@ def api_selfcheck():
     """
     from . import selfcheck as selfm
     from . import swaudit as swam
+    from . import canary as canarym
     summary = selfm.status_summary()
     results = []
     try:
@@ -2592,8 +2829,12 @@ def api_selfcheck():
                 "detail": r.get("detail", "")})
     except Exception:
         pass
+    try:
+        canary = canarym.status()
+    except Exception:
+        canary = {"enabled": False, "running": False}
     return jsonify({"summary": summary, "checks": results,
-                    "swaudit": swam.swaudit_status()})
+                    "swaudit": swam.swaudit_status(), "canary": canary})
 
 
 @app.route("/api/topology")
@@ -2991,6 +3232,38 @@ def api_quiet_hours_set():
     return jsonify({"ok": True, "windows": windows})
 
 
+# --- maintenance mode ----------------------------------------------------------
+# Planned work ("don't alert me Saturday 2-4am"): notifications pause,
+# detection never does. Owner-only; state lives in the DB.
+
+@app.route("/api/settings/maintenance")
+def api_maintenance_get():
+    return jsonify({"maintenance": dbm.get_maintenance()})
+
+
+@app.route("/api/settings/maintenance", methods=["POST"])
+@_owner_required
+def api_maintenance_set():
+    data = request.get_json(silent=True) or {}
+    on = bool(data.get("on"))
+    reason = (data.get("reason") or "").strip()[:200]
+    until = None
+    if on:
+        hours = data.get("hours")
+        if hours not in (None, ""):
+            try:
+                hours = float(hours)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False,
+                                "error": "hours must be a number"}), 400
+            if not 0 < hours <= 72:
+                return jsonify({"ok": False,
+                                "error": "hours must be between 1 and 72"}), 400
+            until = time.time() + hours * 3600
+    state = dbm.set_maintenance(on, until, reason)
+    return jsonify({"ok": True, "maintenance": state})
+
+
 # --- rule health + allowlist -------------------------------------------------
 # How often each detection rule earns its keep, judged by your own
 # Ack/Dismiss history -- plus the allowlist that silences patterns
@@ -3013,6 +3286,15 @@ def api_rule_health():
             d["acknowledged"] += n
         elif status == "dismissed":
             d["dismissed"] += n
+    # The catalog's false-positive profiles, keyed by kind: the precision
+    # numbers land next to the human-readable "why this might be noise".
+    fp_notes = {}
+    try:
+        from . import detection_catalog as catm
+        for r in catm.RULES:
+            fp_notes[r["id"]] = r.get("fp_profile") or ""
+    except Exception:
+        pass
     rules = []
     suggestions = []
     for kind in sorted(by_kind):
@@ -3020,6 +3302,7 @@ def api_rule_health():
         judged = d["acknowledged"] + d["dismissed"]
         d["precision"] = (round(d["acknowledged"] / judged, 2)
                           if judged else None)
+        d["fp_note"] = fp_notes.get(kind, "")
         rules.append(d)
         if d["dismissed"] >= 5 and d["precision"] is not None \
                 and d["precision"] < 0.4:
@@ -3029,7 +3312,18 @@ def api_rule_health():
                          f" in the last 30 days. Add a pattern to the"
                          f" allowlist below so it stops bothering you?"),
             })
-    return jsonify({"rules": rules, "suggestions": suggestions})
+    return jsonify({"rules": rules, "suggestions": suggestions,
+                    "mutes": dbm.list_rule_mutes()})
+
+
+@app.route("/api/rule_health/unmute", methods=["POST"])
+@_owner_required
+def api_rule_unmute():
+    data = request.get_json(silent=True) or {}
+    kind = (data.get("kind") or "").strip()
+    if not kind:
+        return jsonify({"ok": False, "error": "kind is required"}), 400
+    return jsonify({"ok": True, "cleared": dbm.clear_rule_mute(kind)})
 
 
 @app.route("/api/allowlist")
@@ -3405,6 +3699,16 @@ def _loop_down_state():
         return {"down": False, "detail": ""}
 
 
+def _safe_maintenance():
+    """Maintenance-mode state for /api/stats (drives the banner).
+    Never raises."""
+    try:
+        return dbm.get_maintenance()
+    except Exception:
+        return {"active": False, "on_ts": None, "until_ts": None,
+                "reason": ""}
+
+
 def _port_guide_html():
     from . import explainer as expl
     rows = "".join(
@@ -3535,6 +3839,7 @@ def api_stats():
         "loop_down": _loop_down_state(),
         "auth_required": _auth_enabled(),
         "device_names": device_names,
+        "maintenance": _safe_maintenance(),
     })
 
 
