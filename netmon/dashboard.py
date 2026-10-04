@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import tempfile
+import math
 import threading
 import time
 
@@ -407,6 +408,100 @@ def _record_login_failure(ip):
 def _clear_login_failures(ip):
     with _LOGIN_LOCK:
         _LOGIN_ATTEMPTS.pop(ip, None)
+
+
+# --- AI-question rate limiting (hardening checklist, stdlib only) ------------
+# Every /api/ask and /api/triage call with the LLM on is a paid API call.
+# Per-IP sliding windows (ai.ask_per_min per 60s, ai.ask_per_hour per
+# 3600s, both in config.yaml) guard the AI budget from runaway scripts
+# or shared-password machines. The cheap fallback paths (no API key
+# configured) are never limited -- only the spendy calls count.
+# Breaches return 429 JSON with a Retry-After header.
+
+_AI_ASK_USAGE = {}
+_AI_ASK_LOCK = threading.Lock()
+
+
+def _ai_ask_limits():
+    """(per_min, per_hour) caps from config.yaml; floor 1, never raises."""
+    cfg = cfgm.load_cached()
+
+    def _int(key, default):
+        try:
+            return max(1, int(cfgm.get(cfg, key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return _int("ai.ask_per_min", 10), _int("ai.ask_per_hour", 100)
+
+
+def _ai_ask_allowed(ip, now=None, limits=None):
+    """Check AND record in one lock hold -- no check-then-record race.
+
+    Returns (allowed, retry_after_s). On allowed the call is recorded
+    immediately; on denied nothing is recorded. Window logic is pure
+    (injectable `now` and `limits`) so the unit tests never have to
+    sleep. Stale IP keys (last call over an hour old) are pruned here,
+    so the dict cannot grow without bound from one-shot visitors.
+    """
+    now = time.time() if now is None else now
+    per_min, per_hour = limits if limits is not None else _ai_ask_limits()
+    with _AI_ASK_LOCK:
+        for key in [k for k, v in _AI_ASK_USAGE.items()
+                    if not v or max(v) < now - 3600]:
+            del _AI_ASK_USAGE[key]
+        stamps = [t for t in _AI_ASK_USAGE.get(ip, [])
+                  if now - t < 3600]
+        retry = 0
+        recent_min = [t for t in stamps if now - t < 60]
+        if len(recent_min) >= per_min:
+            retry = max(retry, math.ceil(60 - (now - min(recent_min))))
+        if len(stamps) >= per_hour:
+            retry = max(retry, math.ceil(3600 - (now - min(stamps))))
+        if retry > 0:
+            _AI_ASK_USAGE[ip] = stamps
+            return False, retry
+        stamps.append(now)
+        _AI_ASK_USAGE[ip] = stamps
+        return True, 0
+
+
+def _ai_rate_limited(fn):
+    """Rate-limit the paid LLM calls on an AI route.
+
+    Breaches return 429 JSON ({ok, error: "slow_down", message,
+    retry_after}) plus a Retry-After header. When the LLM is off the
+    fallback paths are free, so the limiter stays out of the way.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        mod = _ai_assist()
+        llm_on = (mod is not None and
+                  (not hasattr(mod, "llm_available") or
+                   mod.llm_available()))
+        if llm_on:
+            # remote_addr is the true TCP peer on this direct-bind server.
+            # X-Forwarded-For is deliberately NOT honored: trusting it on a
+            # box with no configured reverse proxy would let anyone spoof
+            # the limiter key (see Phase 5: prod server + TLS).
+            ip = request.remote_addr or "unknown"
+            allowed, retry_after = _ai_ask_allowed(ip)
+            if not allowed:
+                resp = jsonify({
+                    "ok": False,
+                    "error": "slow_down",
+                    "message": ("Too many AI questions too fast -- the AI"
+                                " budget needs a breather. Try again"
+                                " shortly."),
+                    "retry_after": retry_after,
+                })
+                resp.status_code = 429
+                resp.headers["Retry-After"] = str(retry_after)
+                return resp
+            # _ai_ask_allowed already recorded this call in the same lock.
+            return fn(*args, **kwargs)
+        return fn(*args, **kwargs)
+    return wrapper
 
 
 @app.route("/logout")
@@ -934,7 +1029,12 @@ async function aiVerdict(aid){
   if (el) el.textContent = "thinking...";
   const r = await fetch("/api/triage/" + aid, {method:"POST"});
   const d = await r.json();
-  const txt = d.unavailable ? d.message : (d.verdict + " \u2014 " + d.reasoning);
+  let txt;
+  if (r.status === 429) {
+    txt = "Slow down -- too many AI verdicts too fast. Try again in a minute.";
+  } else {
+    txt = d.unavailable ? d.message : (d.verdict + " \u2014 " + d.reasoning);
+  }
   VERDICTS[aid] = txt;  // cache so the 5s refresh doesn't wipe it
   const el2 = document.getElementById("verdict-" + aid);
   if (el2) el2.textContent = txt;
@@ -3611,12 +3711,20 @@ network and get an AI answer based on what the monitor has seen.</p>
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
 async function ask(){
   const q = document.getElementById("q").value;
-  document.getElementById("ans").innerHTML = '<p class="note">Thinking...</p>';
+  const ans = document.getElementById("ans");
+  ans.innerHTML = '<p class="note">Thinking...</p>';
   const r = await fetch("/api/ask", {method:"POST",
     headers:{"Content-Type":"application/json"},
     body: JSON.stringify({question: q})});
+  if (r.status === 429) {
+    let retry = 60;
+    try { const e = await r.json(); if (e.retry_after) retry = e.retry_after; } catch (ignored) {}
+    const mins = Math.max(1, Math.ceil(retry / 60));
+    ans.innerHTML = '<p class="warn">Too many questions too fast -- the AI budget needs a breather. Try again in about ' + mins + ' minute' + (mins > 1 ? "s" : "") + '.</p>';
+    return;
+  }
   const d = await r.json();
-  document.getElementById("ans").innerHTML = d.unavailable
+  ans.innerHTML = d.unavailable
     ? '<p class="note">' + esc(d.message) + '</p>'
     : '<pre>' + esc(typeof d.answer === "string" ? d.answer : JSON.stringify(d.answer, null, 2)) + '</pre>';
 }
@@ -3636,6 +3744,7 @@ def ask_page():
 
 @app.route("/api/ask", methods=["POST"])
 @_owner_required
+@_ai_rate_limited
 def api_ask():
     if request.is_json:
         q = (request.get_json(silent=True) or {}).get("question", "")
@@ -3658,6 +3767,7 @@ def api_ask():
 
 @app.route("/api/triage/<int:aid>", methods=["POST"])
 @_owner_required
+@_ai_rate_limited
 def api_triage(aid):
     rows = dbm.query(
         "SELECT severity, title, detail, meaning, is_normal, what_to_do, ts"
