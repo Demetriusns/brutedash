@@ -82,6 +82,7 @@ a{color:#58a6ff} button{background:#238636;color:#fff;border:0;padding:.5em 1.2e
 .badge{display:inline-block;padding:.15em .6em;border-radius:999px;font-size:.8em;white-space:nowrap}
 .badge.ok{background:#1a3a24;color:#7ee787;border:1px solid #2d6a3f}
 .badge.warn{background:#3d2e12;color:#f0b429;border:1px solid #8a6d1f}
+.badge.bad{background:#3d1113;color:#f85149;border:1px solid #8a1f1f}
 .badge.mitre{background:#1c2b4a;color:#9ecbff;border:1px solid #2f4a7a;cursor:help}
 .sugcard{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.8em 1em;margin:.6em 0}
 p.warn{background:#3d2e12;border:1px solid #8a6d1f;color:#f0b429;padding:.5em .8em;border-radius:4px}
@@ -238,6 +239,7 @@ INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <span id="status-pill" class="pill ok">&#9679; LIVE</span>
 <a class="nl" href="#overview">Overview</a>
 <a class="nl" href="#alerts">Alerts <span id="nav-alert-badge"></span></a>
+<a class="nl" href="#surface">Attack surface</a>
 <a class="nl" href="#intel">Threat intel</a>
 <a class="nl" href="#traffic">Traffic</a>
 <a class="nl" href="#devices">Devices</a>
@@ -269,6 +271,20 @@ Urgency: <select id="alertsevfilter" onchange="refresh()">
 <option value="High">High</option><option value="Medium">Medium</option>
 <option value="Low">Low</option></select></p>
 <div id="alertslist"><p class="note">Loading...</p></div>
+</section>
+
+<section class="block" id="surface">
+<h2>&#127760; Attack surface <span class="note">where you are exposed, in one place</span>
+<button class="btn-sm ghost" onclick="loadAttackSurface();loadAmass()">refresh</button></h2>
+<p class="note">Two halves of the same question. <b>What your network exposes</b> is the inside view:
+your devices, their open doors, what the internet can reach, and anything sketchy they have
+talked to. <b>What the internet sees</b> is the outside view (via Amass, optional): your domain
+as the rest of the world sees it. This is a review, not an alarm -- it never pages you, it just
+lays out what it sees.</p>
+<h3>What your network exposes</h3>
+<div id="surface"><p class="note">Loading...</p></div>
+<h3>What the internet sees</h3>
+<div id="amass"><p class="note">Loading...</p></div>
 </section>
 
 <section class="block" id="cases">
@@ -1013,6 +1029,155 @@ async function loadAssets(){
   }
 }
 let TT_DATA = [], TT_SORT = "total_mb", TT_DIR = -1;
+// --- attack surface -------------------------------------------------------
+// "Where am I exposed?" -- the inside view (devices, open doors,
+// internet reachability, threat-intel context, lateral paths) plus the
+// outside view (Amass: what the internet sees of your domain).
+// On-demand review only: loaded once at boot, not on the 5s refresh.
+function sevBadge(sev){
+  const cls = sev === "High" ? "bad" : (sev === "Medium" ? "warn" : "ok");
+  return '<span class="badge ' + cls + '">' + esc(sev) + "</span>";
+}
+async function loadAttackSurface(){
+  const el = document.getElementById("surface");
+  try {
+    const r = await fetch("/api/attack_surface");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "report failed");
+    el.innerHTML = renderAttackSurface(d);
+  } catch(e) {
+    el.innerHTML = '<p class="banner-red">Could not load attack surface: '
+      + esc(String((e && e.message) || e)) + "</p>";
+  }
+}
+function renderAttackSurface(d){
+  let h = "<p><b>" + esc(d.summary_line || "") + "</b></p>";
+  const exps = d.exposures || [];
+  if (exps.length) {
+    h += "<h4>Worth a look</h4>" + exps.map(e =>
+      '<div class="alert ' + esc(e.severity) + '">'
+      + sevBadge(e.severity) + " <b>" + esc(e.title) + "</b>"
+      + ' <span class="note">' + esc(e.device || "")
+      + (e.device_ip ? " (" + esc(e.device_ip) + ")" : "") + "</span>"
+      + "<br>" + esc(e.what_it_means)
+      + '<br><span class="note">' + esc(e.why_it_matters) + "</span>"
+      + '<br><a href="/playbook/' + esc(e.playbook) + '">fix-it guide &rarr;</a>'
+      + "</div>").join("");
+  } else {
+    h += '<p class="note">No exposures found. A quiet network is a healthy network.</p>';
+  }
+  const paths = d.lateral_paths || [];
+  if (paths.length) {
+    h += "<h4>Paths an intruder could walk</h4>"
+      + '<p class="note">Observed traffic only -- one hop, no guessing.</p>'
+      + paths.map(p =>
+      '<div class="alert ' + esc(p.severity) + '">'
+      + sevBadge(p.severity) + " <b>" + esc(p.title) + "</b>"
+      + "<br>" + esc(p.what_it_means)
+      + '<br><span class="note">' + esc(p.why_it_matters) + "</span>"
+      + '<br><a href="/playbook/' + esc(p.playbook) + '">fix-it guide &rarr;</a>'
+      + "</div>").join("");
+  }
+  const devs = (d.devices || []).slice().sort((a, b) =>
+    ((b.exposures || []).length - (a.exposures || []).length));
+  if (devs.length) {
+    h += "<h4>Your devices</h4><div>" + devs.map(a => {
+      const doors = (a.open_ports || []).map(p =>
+        '<span class="badge ' + (p.risk === "Medium" ? "warn" : "ok") + '">'
+        + esc(String(p.port)) + "</span>").join(" ")
+        || '<span class="note">none found</span>';
+      const rb = a.reachable
+        ? '<span class="badge warn">Seen from outside</span>'
+        : '<span class="badge ok">No sign of outside access</span>';
+      const nhits = (a.ti_hits || []).length;
+      const tih = nhits
+        ? '<br><span class="badge warn">' + nhits + " known-bad contact"
+          + (nhits === 1 ? "" : "s") + "</span>" : "";
+      return '<div class="card"><div><b>'
+        + esc(a.name || a.hostname || a.ip || "device")
+        + '</b> <span class="note">' + esc(a.type_label || "") + "</span></div>"
+        + "<div>" + rb + tih + "</div>"
+        + '<div class="note">' + esc(a.reachability_note || "") + "</div>"
+        + "<div>Doors: " + doors + "</div>"
+        + '<div class="note"><a href="#map">map</a> &middot; '
+        + '<a href="#assets">assets</a> &middot; '
+        + '<a href="#intel">threat intel</a></div>'
+        + "</div>";
+    }).join("") + "</div>";
+  }
+  return h;
+}
+async function loadAmass(){
+  const el = document.getElementById("amass");
+  try {
+    const r = await fetch("/api/amass");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    el.innerHTML = renderAmass(d);
+  } catch(e) {
+    el.innerHTML = '<p class="banner-red">Could not load external scan: '
+      + esc(String((e && e.message) || e)) + "</p>";
+  }
+}
+function renderAmass(d){
+  if (!d.installed) {
+    return '<p class="note">' + esc(d.install_note || "Amass is not installed.")
+      + "</p>";
+  }
+  if (!d.enabled) {
+    return "<p class='note'>Amass is installed, but the external scan is switched off. "
+      + "Turn it on under <code>amass.enabled</code> in config.yaml, and list your own "
+      + "domain(s) under <code>amass.domains</code>.</p>";
+  }
+  if (!(d.domains || []).length) {
+    return "<p class='note'>No domains configured. Add your own domain(s) under "
+      + "<code>amass.domains</code> in config.yaml -- only configured domains are ever scanned.</p>";
+  }
+  let h = '<p><button class="btn-sm" onclick="startAmass()">Run scan now</button> '
+    + '<span class="note" id="amassmsg"></span></p>'
+    + "<p class='note'>Passive sources only -- this never touches your servers directly. "
+    + "Weekly scans run automatically.</p>";
+  for (const dom of d.domains) {
+    const run = (d.runs || []).find(x => x.domain === dom);
+    const assets = (d.assets || {})[dom] || [];
+    const subs = assets.filter(a => a.kind === "subdomain");
+    h += "<h4>" + esc(dom) + "</h4>";
+    h += run
+      ? "<p class='note'>Last scan: "
+        + esc(new Date(run.when * 1000).toLocaleString())
+        + " &mdash; " + run.subdomains + " subdomains, " + run.ips + " addresses.</p>"
+      : "<p class='note'>No scan yet.</p>";
+    if (subs.length) {
+      h += "<table><tr><th>Subdomain</th><th>Addresses</th><th>First seen</th></tr>"
+        + subs.slice(0, 50).map(s => {
+          let det = {};
+          try { det = JSON.parse(s.detail || "{}"); } catch(e2) { det = {}; }
+          return "<tr><td>" + esc(s.value) + "</td><td class='note'>"
+            + esc((det.ips || []).join(", ")) + "</td><td class='note'>"
+            + (s.first_seen ? esc(new Date(s.first_seen * 1000).toLocaleDateString()) : "?")
+            + "</td></tr>";
+        }).join("") + "</table>";
+      if (subs.length > 50) {
+        h += "<p class='note'>...and " + (subs.length - 50) + " more.</p>";
+      }
+    } else if (run) {
+      h += "<p class='note'>No subdomains found in the last scan.</p>";
+    }
+  }
+  return h;
+}
+async function startAmass(){
+  const m = document.getElementById("amassmsg");
+  m.textContent = "starting...";
+  try {
+    const r = await fetch("/api/amass/run", {method:"POST"});
+    const d = await r.json();
+    m.textContent = d.started
+      ? "scan running for: " + (d.domains || []).join(", ")
+      : (d.error || d.note || "not started");
+  } catch(e) { m.textContent = "could not start: " + String((e && e.message) || e); }
+}
 async function loadTopTalkers(){
   try {
     const r = await fetch("/api/top_talkers");
@@ -1260,6 +1425,7 @@ async function relabelTopo(sel){
 refresh(); setInterval(refresh, 5000);
 loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions(); loadCases(); loadTopology();
 loadAssets(); loadTopTalkers(); setInterval(loadTopTalkers, 30000);
+loadAttackSurface(); loadAmass();
 loadIntelStatus();
 loadScanStatus(); loadHostEvents(); loadSelfcheck();
 </script></body></html>
@@ -1576,6 +1742,100 @@ def api_assets():
             else "",
         })
     return jsonify({"assets": out})
+
+
+@app.route("/api/attack_surface")
+def api_attack_surface():
+    """The attack surface review: devices, open doors, internet
+    reachability, threat-intel context, lateral paths. Read-only --
+    this view never fires alerts."""
+    from . import attacksurface as asm
+    try:
+        return jsonify(asm.build_report())
+    except Exception as exc:
+        import sys as _sys
+        print(f"attack_surface report failed: {exc}", file=_sys.stderr)
+        return jsonify({"ok": False, "error": "report failed"}), 500
+
+
+@app.route("/api/amass")
+def api_amass():
+    """External attack-surface status (OWASP Amass): binary, config,
+    last runs, discovered assets per domain. Graceful when the binary
+    is missing or nothing is configured."""
+    from . import amass as amassm
+    try:
+        return jsonify(amassm.amass_status())
+    except Exception:
+        return jsonify({"installed": False,
+                        "install_note": "external scan unavailable",
+                        "enabled": False, "domains": [], "runs": [],
+                        "assets": {}})
+
+
+@app.route("/api/amass/run", methods=["POST"])
+def api_amass_run():
+    """On-demand external scan. SECURITY BOUNDARY: targets come from
+    config.yaml only -- the request body is ignored entirely, so the UI
+    can never point the scanner at an arbitrary domain."""
+    from . import amass as amassm
+    try:
+        if not amassm.amass_enabled():
+            return jsonify({"started": False,
+                            "note": "amass.enabled is off in config.yaml"})
+        if not amassm.find_binary():
+            return jsonify({"started": False,
+                            "error": "amass binary not installed"})
+        domains = amassm.start_amass_async()
+        if not domains:
+            return jsonify({"started": False,
+                            "note": "no domains configured under"
+                                    " amass.domains"})
+        return jsonify({"started": True, "domains": domains})
+    except Exception as exc:
+        return jsonify({"started": False, "error": str(exc)[:200]})
+
+
+@app.route("/playbook/<slug>")
+def playbook(slug):
+    """Fix-it guides, one per exposure type.
+
+    PLACEHOLDER until the playbooks batch lands: any well-formed slug
+    renders a friendly "coming soon" page so exposure links never 404.
+    Malformed slugs 404. Slug grammar lives in netmon/attacksurface.py
+    (valid_playbook_slug); the real guides will implement these routes.
+    """
+    import html as _html
+    from . import attacksurface as asm
+    if not asm.valid_playbook_slug(slug):
+        return "Not found", 404
+    info = asm.PLAYBOOK_SLUGS.get(slug, {})
+    title = info.get("title") or "Fix-it guide"
+    blurb = info.get("blurb") or ""
+    body = (
+        "<html><head><title>" + _html.escape(title)
+        + " -- netmon playbook</title>"
+        + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        + "<style>" + STYLE + "</style></head><body>"
+        + '<nav class="top"><a class="brand" href="/">netmon</a>'
+        + '<a class="nl" href="/#surface">Attack surface</a></nav>'
+        + "<h1>" + _html.escape(title) + "</h1>"
+        + ("<p>" + _html.escape(blurb) + "</p>" if blurb else "")
+        + "<p>Here is the deal: the step-by-step guide for this one is"
+        + " still being written -- it lands with the next update.</p>"
+        + "<p>What you can do right now:</p>"
+        + "<ul><li>Read the exposure above it on the"
+        + ' <a href="/#surface">Attack surface</a> page -- it says what we'
+        + " found and why it matters.</li>"
+        + "<li>If something is reachable from the internet and should not"
+        + " be, your router's port-forwarding and UPnP settings are the"
+        " first place to look.</li>"
+        + "<li>When in doubt, unplug the device until you have had a"
+        " proper look -- you cannot be hacked through a cable that is"
+        + " not plugged in.</li></ul>"
+        + '<p><a href="/#surface">&larr; Back to Attack surface</a></p>'
+        + "</body></html>")
+    return body
 
 
 @app.route("/api/top_talkers")

@@ -112,6 +112,12 @@ _TECHNIQUES = {
         "Command and Control",
         "Traffic with an address the blocklists flag as malicious.",
     ),
+    "amass_new_asset": (
+        "T1590.002", "Gather Victim Network Information: DNS",
+        "Reconnaissance",
+        "A new public-facing subdomain or address is what an attacker's"
+        " recon would find first.",
+    ),
 }
 
 

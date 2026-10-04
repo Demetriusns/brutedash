@@ -76,6 +76,13 @@ def _monitor_loop(stop_event, digest_hours=24):
             tim.maybe_refresh_feeds()
         except Exception:
             pass
+        # External attack-surface mapping (amass.py decides if it's due,
+        # enabled, and configured; silent no-op otherwise).
+        try:
+            from . import amass as amassm
+            amassm.maybe_weekly_amass()
+        except Exception:
+            pass
         if digest_hours > 0 and now - last_digest >= digest_hours * 3600:
             last_digest = now
             try:

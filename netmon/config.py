@@ -73,6 +73,22 @@ DEFAULTS = {
         # Empty = log ingestion disabled (graceful no-op).
         "watch_dir": "",
     },
+    "amass": {
+        # External attack-surface mapping via OWASP Amass (optional tool
+        # you install; see netmon/amass.py). Opt-in: scans run only when
+        # enabled AND domains are listed.
+        "enabled": False,
+        # YOUR OWN domains only, e.g. ["example.com"]. These are the ONLY
+        # scan targets, ever -- the dashboard cannot add targets.
+        "domains": [],
+        # Passive sources only (no direct contact with target
+        # infrastructure). true is the safe default.
+        "passive": True,
+        # Weekly scheduled run of the external scan.
+        "weekly": True,
+        # Per-run cap, minutes.
+        "timeout_min": 20,
+    },
 }
 
 ENV_PREFIX = "BRUTEDASH_"
@@ -128,6 +144,13 @@ scan:
 
 ingest:
   watch_dir: ""  # folder of exported Windows logs to watch (see INGEST.md); empty = disabled
+
+amass:
+  enabled: false  # external attack-surface mapping via OWASP Amass (optional; install the amass binary first)
+  domains: []     # YOUR OWN domains only, e.g. ["example.com"] -- these are the ONLY scan targets, ever
+  passive: true   # passive sources only; no direct contact with target infrastructure
+  weekly: true    # weekly scheduled run
+  timeout_min: 20 # per-run cap, minutes
 """
 
 

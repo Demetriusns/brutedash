@@ -284,6 +284,30 @@ CREATE TABLE IF NOT EXISTS ti_entries(
     PRIMARY KEY(key, kind, feed)
 );
 CREATE INDEX IF NOT EXISTS idx_ti_entries_kind_key ON ti_entries(kind, key);
+
+-- External attack-surface mapping (netmon/amass.py, OWASP Amass):
+-- amass_runs keeps the run history; amass_assets is the CURRENT state
+-- (one row per domain/kind/value, upserted each run so diffing is a
+-- set comparison against the previous state).
+CREATE TABLE IF NOT EXISTS amass_runs(
+    id INTEGER PRIMARY KEY,
+    ts REAL,
+    domain TEXT,               -- the configured root domain scanned
+    duration_s REAL,
+    subdomains INTEGER,
+    ips INTEGER,
+    note TEXT
+);
+CREATE TABLE IF NOT EXISTS amass_assets(
+    domain TEXT NOT NULL,      -- the configured root domain
+    kind TEXT NOT NULL,        -- 'subdomain' | 'ip' | 'asn'
+    value TEXT NOT NULL,       -- the subdomain name, IP, or ASN
+    detail TEXT,               -- small JSON blob: sources, tag, seen IPs
+    first_seen REAL,           -- when we first discovered it
+    last_seen REAL,            -- when the last run confirmed it
+    PRIMARY KEY(domain, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_amass_assets_domain ON amass_assets(domain);
 """
 
 
@@ -1604,6 +1628,90 @@ def list_scan_findings(status="open", limit=200):
                 " what_it_means, status FROM scan_findings"
                 " WHERE status=? ORDER BY ip, port LIMIT ?",
                 (status, limit))]
+
+
+# --- external attack-surface mapping (OWASP Amass) -------------------------
+# Run history + current asset state per configured domain (see
+# netmon/amass.py). Diffing compares the new run against the stored
+# state; the first run for a domain is the silent baseline.
+
+
+def record_amass_run(ts, domain, duration_s, subdomains, ips, note=""):
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "INSERT INTO amass_runs (ts, domain, duration_s, subdomains,"
+            " ips, note) VALUES (?,?,?,?,?,?)",
+            (ts, (domain or "")[:253], duration_s, subdomains, ips,
+             (note or "")[:200]))
+        conn.commit()
+        return cur.lastrowid
+
+
+def record_amass_assets(domain, rows, ts):
+    """Upsert the current asset state for a domain.
+
+    rows: list of (kind, value, detail). Returns the current
+    {(kind, value)} set for diffing.
+    """
+    domain = (domain or "")[:253]
+    clean = []
+    for kind, value, detail in rows or []:
+        kind = (kind or "")[:16]
+        value = (value or "")[:253]
+        if not kind or not value:
+            continue
+        clean.append((kind, value, (detail or "")[:500]))
+    with _lock:
+        conn = _db()
+        for kind, value, detail in clean:
+            conn.execute(
+                "INSERT INTO amass_assets (domain, kind, value, detail,"
+                " first_seen, last_seen) VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(domain, kind, value) DO UPDATE SET"
+                " detail=excluded.detail, last_seen=excluded.last_seen",
+                (domain, kind, value, detail, ts, ts))
+        conn.commit()
+    return {(k, v) for k, v, _ in clean}
+
+
+def amass_asset_set(domain):
+    """Current {(kind, value)} asset set for a domain (for diffing)."""
+    with _lock:
+        conn = _db()
+        return {(k, v) for k, v in conn.execute(
+            "SELECT kind, value FROM amass_assets WHERE domain=?",
+            ((domain or "")[:253],))}
+
+
+def latest_amass_run(domain):
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT ts, duration_s, subdomains, ips, note FROM amass_runs"
+            " WHERE domain=? ORDER BY ts DESC LIMIT 1",
+            ((domain or "")[:253],)).fetchone()
+    if not row:
+        return None
+    return {"ts": row[0], "duration_s": row[1], "subdomains": row[2],
+            "ips": row[3], "note": row[4] or ""}
+
+
+def list_amass_assets(domain, limit=500):
+    """Current assets for a domain: [{kind, value, detail, first_seen}]."""
+    try:
+        limit = max(1, min(2000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 500
+    with _lock:
+        conn = _db()
+        return [
+            {"kind": k, "value": v, "detail": d or "",
+             "first_seen": fs or 0}
+            for k, v, d, fs in conn.execute(
+                "SELECT kind, value, detail, first_seen FROM amass_assets"
+                " WHERE domain=? ORDER BY kind, value LIMIT ?",
+                ((domain or "")[:253], limit))]
 
 
 # --- host events (Windows Event Log + firewall log ingestion) -------------

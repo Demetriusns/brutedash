@@ -151,6 +151,33 @@ North star: the automated analyst for a network with nobody watching it.
   at top, per-device nodes, traffic-weighted edges, click for details,
   one-click type correction persisted per-MAC) — the first thing a
   small-business owner looks at. DONE 2026-10-03 (batch 6).
+- Attack surface review (his call 2026-10-03) — "where am I exposed?",
+  the view a small-business owner reads first. DONE 2026-10-03 (batch 8):
+  `netmon/attacksurface.py` ties the asset inventory + self vuln scan +
+  threat intel into one per-device exposure picture. Internet
+  reachability is evidence-only (inbound flows from public IPs to service
+  ports = "Seen from outside"; otherwise the honest "No sign of outside
+  access"); deterministic severity ranking (documented in code);
+  lateral-movement paths from observed LAN flows (low-trust → high-value,
+  one hop, gateway excluded); every exposure links to a
+  `/playbook/<slug>` fix-it guide (slugs: `internet-exposed-door`,
+  `internet-exposed-printer`, `open-admin-interface`, `risky-service`,
+  `malicious-contact`, `iot-lateral-path` — placeholder page until the
+  playbooks batch lands). On-demand review only: never fires alerts.
+  Dashboard "Attack surface" section: "What your network exposes" +
+  "What the internet sees", summary line, ranked exposures, device cards,
+  map/assets/intel cross-links.
+- External attack-surface mapping via OWASP Amass (his scope addition,
+  2026-10-03) — the OUTSIDE half: Amass (Apache-2.0 Go CLI) maps what the
+  internet sees of the customer's OWN domain(s): subdomains, IPs, ASNs,
+  certs via passive sources. DONE 2026-10-03 (batch 8):
+  `netmon/amass.py` — optional external tool (never bundled; graceful
+  when missing); targets ONLY from config.yaml `amass.domains` (the UI
+  can never supply a target); no shell=True (argv lists, strict hostname
+  gate); passive by default; weekly scheduled run + on-demand button;
+  defensive JSONL parsing; first run is the silent baseline, later runs
+  diff and alert Medium on new public-facing assets (capped). Results
+  feed the Attack Surface view's "What the internet sees" section.
 - Self vulnerability scan (new 2026-09-30) — weekly lightweight scan of his
   OWN network: "here are the open doors on your LAN." The analyst auditing,
   not just watching. DONE 2026-10-03 (batch 6): LAN-only TCP connect scan
