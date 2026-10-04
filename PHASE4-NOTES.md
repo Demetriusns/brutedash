@@ -15,8 +15,11 @@ analyst" review that night. Everything else was already on the roadmap.
   no new dependencies) covers secret-scrubbing of diagnostics bundles,
   relay detection, and config parsing. The daily build cron runs the full
   suite, plus py_compile, a dashboard smoke boot against a scratch DB,
-  and a secret-scan of the staged diff. ALL GREEN or no commit; unfixable
-  failures get reported to Demetrius instead of pushed.
+  and a secret-scan of the staged diff. The smoke boot must ALSO
+  `node --check` the *served* page script (lesson 2026-10-03: a `\'`
+  inside a Python template string silently broke all dashboard JS and
+  endpoint-only smoke tests missed it). ALL GREEN or no commit;
+  unfixable failures get reported to Demetrius instead of pushed.
 - **Weekly council review** (Sundays): three independent reviewers --
   security, plain-language UX, robustness -- return structured verdicts
   (Critical/High/Medium/Low, file:line, concrete fix). The agent, as head

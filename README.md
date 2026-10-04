@@ -5,6 +5,10 @@ detects suspicious behavior, and explains it in plain English — written so
 a non-technical reader can understand every alert, and engineered so a
 technical reviewer can verify every claim.
 
+**90-second demo** (narrated tour of the dashboard — cases, MITRE tags, timelines):
+
+<video src="https://github.com/Demetriusns/brutedash/raw/main/demo.mp4" controls width="100%"></video>
+
 **Stack:** Python · Flask · SQLite (WAL) · scapy · vanilla JS (canvas) ·
 OpenAI API (optional, every AI feature has a rule-based fallback)
 
