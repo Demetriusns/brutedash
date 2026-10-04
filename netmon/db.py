@@ -412,6 +412,14 @@ CREATE TABLE IF NOT EXISTS cve_matches(
     due_date TEXT,              -- CISA's fix-by date, may be ""
     UNIQUE(package, cve_id)
 );
+
+-- Phase 3.5 "prove it": daily security score snapshots for the trend.
+CREATE TABLE IF NOT EXISTS score_snapshots(
+    day TEXT PRIMARY KEY,       -- YYYY-MM-DD, local time
+    ts REAL,                    -- when the snapshot was recorded
+    score INTEGER,              -- 0..100, NULL = not enough data that day
+    factors TEXT                -- JSON list of the top contributing factors
+);
 """
 
 

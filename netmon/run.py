@@ -98,6 +98,24 @@ def _monitor_loop(stop_event, digest_hours=24):
             swam.maybe_daily_swaudit()
         except Exception:
             pass
+        # Prove it (reporting.py): the daily morning briefing (one email,
+        # honoring quiet hours) and the daily security-score snapshot for
+        # the trend. Best-effort; never breaks the loop.
+        try:
+            from . import reporting as repm
+            repm.maybe_daily_score()
+            repm.maybe_daily_briefing()
+        except Exception:
+            pass
+        # Forensic rewind (rewind.py): refresh the enabled flag from
+        # config and enforce the storage caps so the buffer can never
+        # grow past rewind_minutes / rewind_max_mb.
+        try:
+            from . import rewind as rwm
+            rwm.refresh()
+            rwm.enforce_caps()
+        except Exception:
+            pass
         if digest_hours > 0 and now - last_digest >= digest_hours * 3600:
             last_digest = now
             try:

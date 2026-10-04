@@ -18,7 +18,7 @@ import threading
 import time
 
 from flask import Flask, request, jsonify, render_template_string, redirect, \
-    session
+    session, Response
 
 from . import db as dbm
 from . import config as cfgm
@@ -246,6 +246,7 @@ INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <a class="nl" href="#assets">Assets</a>
 <a class="nl" href="#map">Map</a>
 <a class="nl" href="#scan">Open doors</a>
+<a class="nl" href="#reports">Reports</a>
 <a class="nl" href="#settings">Settings</a>
 </nav>
 <div id="stalebanner" class="banner-red" style="display:none"></div>
@@ -358,6 +359,39 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 <p class="note">Nuclei runs thousands of known vulnerability checks against your own devices -- deeper than the door-knock above, still your network only. Weekly when enabled; this button runs one on demand. <span id="nucleiinstall"></span></p>
 <div id="nucleistatus"><p class="note">Loading...</p></div>
 <div id="nucleifindings"></div>
+</section>
+
+<section class="block" id="reports">
+<h2>&#128202; Reports <span class="note">your score, briefings, exports</span></h2>
+
+<h3>Security score</h3>
+<p class="note">One grade for your network, 0 to 100. The monitor computes it
+from alerts, open cases, exposed doors, and door-check findings -- a fixed
+formula, no AI involved.</p>
+<div id="scorecard"><p class="note">Loading...</p></div>
+
+<h3>Morning briefing</h3>
+<p class="note">One email a day with the last 24 hours: alerts, cases, your
+score, and exposed doors. Preview it here first, or send one now.</p>
+<p><button class="btn-sm" onclick="previewBriefing()">Preview briefing</button>
+<button class="btn-sm" onclick="sendBriefing()">Send briefing now</button>
+<span class="note" id="briefingmsg"></span></p>
+<div id="briefingpreview"></div>
+
+<h3>Downloads</h3>
+<p class="note">Compliance reports for your records (or your insurer):
+incidents with MITRE tags, what you did about them, alert volume, and score
+history.</p>
+<p>Compliance report:
+<a href="/reports/compliance.html?period=weekly">HTML (week)</a> |
+<a href="/reports/compliance.html?period=monthly">HTML (month)</a> |
+<a href="/reports/compliance.csv?period=weekly">CSV (week)</a> |
+<a href="/reports/compliance.csv?period=monthly">CSV (month)</a></p>
+<p>Weekly summary as PDF: <a href="/reports/weekly.pdf">Download PDF</a><br>
+<span class="note">Incident briefs download as PDFs from each case timeline.</span></p>
+
+<h3>Forensic rewind</h3>
+<div id="rewindstatus"><p class="note">Loading...</p></div>
 </section>
 
 <section class="block" id="settings">
@@ -1004,6 +1038,8 @@ async function toggleCase(iid, btn){
         + (a.playbook ? `<br><a href="/playbook/${esc(a.playbook)}">fix-it guide &rarr;</a>` : "")
         + `</p>`
       ).join("") || '<p class="note">No alerts in this case.</p>';
+      el.innerHTML += `<p><a href="/api/rewind/export?incident_id=${iid}">download packets from this case&#39;s window (.pcap)</a> <span class="note">raw packets from the forensic buffer -- opens in Wireshark</span><br>`
+        + `<a href="/reports/incident/${iid}.pdf">download incident brief (.pdf)</a></p>`;
       el.dataset.loaded = "1";
     } catch(e) {
       el.innerHTML = '<p class="note">Could not load timeline.</p>';
@@ -1031,6 +1067,84 @@ This packages the whole case -- timeline, what was found, what you already tried
   const d = await r.json();
   alert(d.ok ? d.message : "Could not escalate: " + (d.error || "unknown error"));
   loadCases();
+}
+// --- reports: score card, morning briefing, forensic rewind -----------------
+// The score is computed by a fixed formula (alerts, open cases, exposed
+// doors, door-check findings) -- never the AI. The briefing is one email
+// a day; the preview below shows it without sending anything.
+async function loadScore(){
+  const el = document.getElementById("scorecard");
+  try {
+    const r = await fetch("/api/score");
+    const d = await r.json();
+    if (d.neutral || d.score === null || d.score === undefined) {
+      el.innerHTML = '<p class="note"><b>Not enough data yet</b> -- ' + esc(d.why || "") + "</p>";
+      return;
+    }
+    const color = d.score >= 80 ? "up" : (d.score >= 50 ? "medium" : "down");
+    let html = `<div class="card"><div class="v ${color}">${d.score}</div>`
+      + `<div class="l">out of 100</div></div><p>${esc(d.why || "")}</p>`;
+    if ((d.factors || []).length) {
+      html += "<ul>" + d.factors.map(f =>
+        `<li>${esc(f.label)} <span class="note">(-${f.points})</span>`
+        + (f.link ? ` <a href="${esc(f.link)}">take a look</a>` : "") + "</li>"
+      ).join("") + "</ul>";
+    }
+    const hist = (d.history || []).filter(h => h.score !== null && h.score !== undefined);
+    if (hist.length > 1) {
+      html += '<p class="note">Last ' + hist.length + ' days:</p>' + hist.map(h =>
+        `<div><span class="note">${esc(h.day)}</span> <span class="bar" style="display:inline-block;width:120px"><div style="width:${Math.max(0, Math.min(100, h.score))}%"></div></span> ${h.score}</div>`
+      ).join("");
+    }
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<p class="note">Could not load the score.</p>';
+  }
+}
+async function previewBriefing(){
+  const el = document.getElementById("briefingpreview");
+  const msg = document.getElementById("briefingmsg");
+  el.innerHTML = '<p class="note">Building the preview...</p>';
+  try {
+    const r = await fetch("/api/briefing/preview");
+    const d = await r.json();
+    el.innerHTML = "<h4>" + esc(d.subject || "") + "</h4>"
+      + "<pre>" + esc(d.body || "") + "</pre>"
+      + '<p class="note">This is a preview -- nothing was sent.</p>';
+    if (msg) msg.textContent = "";
+  } catch(e) {
+    el.innerHTML = '<p class="note">Could not build the preview.</p>';
+  }
+}
+async function sendBriefing(){
+  const msg = document.getElementById("briefingmsg");
+  if (msg) msg.textContent = "sending...";
+  try {
+    const r = await fetch("/api/briefing/send", {method:"POST"});
+    const d = await r.json();
+    if (msg) msg.textContent = d.ok ? "Briefing sent." : ("Could not send: " + (d.error || "unknown error"));
+  } catch(e) {
+    if (msg) msg.textContent = "Could not send.";
+  }
+}
+async function loadRewindStatus(){
+  const el = document.getElementById("rewindstatus");
+  try {
+    const r = await fetch("/api/rewind/status");
+    const d = await r.json();
+    if (!d.enabled) {
+      el.innerHTML = '<p class="note">Forensic rewind is <b>off</b>. Turn it on in config.yaml under <span class="note">reporting &rarr; rewind_enabled</span> to keep a rolling buffer of raw packets for post-incident review.</p>'
+        + '<p class="note">' + esc(d.privacy_note || "") + "</p>";
+      return;
+    }
+    const mb = (d.bytes_kept / 1048576).toFixed(1);
+    el.innerHTML = '<p class="note">' + esc(d.retention || "") + "</p>"
+      + `<p class="note">Holding right now: ${esc(String(d.segments))} segments, ${mb} MB.</p>`
+      + '<p class="note">' + esc(d.privacy_note || "") + "</p>"
+      + '<p><a href="/api/rewind/export?hours=1">download the last hour (.pcap)</a></p>';
+  } catch(e) {
+    el.innerHTML = '<p class="note">Could not load rewind status.</p>';
+  }
 }
 async function quarantineDevice(mac, label){
   const msg = `Isolate ${label} (${mac})?
@@ -1535,6 +1649,7 @@ loadAssets(); loadTopTalkers(); setInterval(loadTopTalkers, 30000);
 loadAttackSurface(); loadAmass();
 loadIntelStatus();
 loadScanStatus(); loadHostEvents(); loadSelfcheck();
+loadScore(); loadRewindStatus();
 </script></body></html>
 """
 
@@ -2692,6 +2807,167 @@ def api_digest_send():
     from . import notify as notifm
     sent = notifm.send_digest()
     return jsonify({"ok": True, "sent": bool(sent)})
+
+
+# --- Reports: score card, morning briefing, compliance, rewind ---------------
+# Phase 3.5 "prove it". The score is a fixed deterministic formula
+# (reporting.compute_score) -- never the LLM. Filenames are built only
+# from validated ints/whitelisted periods, so exports can't traverse
+# paths.
+
+
+@app.route("/api/score")
+def api_score():
+    from . import reporting as repm
+    data = repm.compute_score()
+    return jsonify({
+        "score": data["score"],
+        "neutral": data["neutral"],
+        "why": repm.explain_score(data),
+        "factors": data["factors"],
+        "history": repm.score_history(days=14),
+    })
+
+
+@app.route("/api/briefing/preview")
+def api_briefing_preview():
+    """Dry run: show the briefing email WITHOUT sending it."""
+    from . import reporting as repm
+    brief = repm.build_briefing()
+    return jsonify({"subject": brief["subject"], "body": brief["body"]})
+
+
+@app.route("/api/briefing/send", methods=["POST"])
+def api_briefing_send():
+    """Send the morning briefing now (synchronous, reports the outcome)."""
+    from . import reporting as repm
+    ok, reason = repm.send_briefing()
+    if ok:
+        return jsonify({"ok": True})
+    return jsonify({"ok": False,
+                    "error": reason or "could not send the briefing"})
+
+
+def _report_period():
+    period = (request.args.get("period") or "weekly").strip().lower()
+    if period not in ("weekly", "monthly"):
+        return None
+    return period
+
+
+def _download_response(payload, filename, mimetype):
+    # The filename is built by us from validated values only -- never
+    # from raw user input -- so this can't traverse directories.
+    safe = "".join(c for c in filename
+                   if c.isalnum() or c in ("-", "_", "."))
+    return Response(
+        payload, mimetype=mimetype,
+        headers={"Content-Disposition":
+                 f'attachment; filename="{safe or "report"}"'})
+
+
+@app.route("/reports/compliance.html")
+def reports_compliance_html():
+    from . import reporting as repm
+    period = _report_period()
+    if period is None:
+        return jsonify({"ok": False, "error": "bad period"}), 400
+    data = repm.compliance_report_data(period=period)
+    stamp = time.strftime("%Y-%m-%d")
+    return _download_response(
+        repm.compliance_html(data).encode("utf-8"),
+        f"brutedash-compliance-{period}-{stamp}.html", "text/html")
+
+
+@app.route("/reports/compliance.csv")
+def reports_compliance_csv():
+    from . import reporting as repm
+    period = _report_period()
+    if period is None:
+        return jsonify({"ok": False, "error": "bad period"}), 400
+    data = repm.compliance_report_data(period=period)
+    stamp = time.strftime("%Y-%m-%d")
+    return _download_response(
+        repm.compliance_csv(data).encode("utf-8"),
+        f"brutedash-compliance-{period}-{stamp}.csv", "text/csv")
+
+
+@app.route("/reports/weekly.pdf")
+def reports_weekly_pdf():
+    from . import reporting as repm
+    blob = repm.weekly_pdf_bytes()
+    if not blob:
+        return jsonify({"ok": False,
+                        "error": "could not build the PDF"}), 500
+    stamp = time.strftime("%Y-%m-%d")
+    return _download_response(
+        blob, f"brutedash-weekly-{stamp}.pdf", "application/pdf")
+
+
+@app.route("/reports/incident/<int:iid>.pdf")
+def reports_incident_pdf(iid):
+    from . import reporting as repm
+    blob = repm.incident_pdf_bytes(iid)
+    if not blob:
+        return jsonify({"ok": False,
+                        "error": "case not found"}), 404
+    return _download_response(
+        blob, f"incident-{iid}-brief.pdf", "application/pdf")
+
+
+@app.route("/api/rewind/status")
+def api_rewind_status():
+    from . import rewind as rwm
+    return jsonify(rwm.status())
+
+
+@app.route("/api/rewind/export")
+def api_rewind_export():
+    """Download a .pcap slice of the forensic buffer.
+
+    One of: ?incident_id=N (the case's window), ?hours=H (the last H
+    hours, 0 < H <= 24), or ?start=<epoch>&end=<epoch> (at most 24h).
+    The filename is built from validated numbers only -- no path
+    traversal possible."""
+    from . import rewind as rwm
+    now = time.time()
+    fname = None
+    window = None
+    iid_raw = request.args.get("incident_id")
+    hours_raw = request.args.get("hours")
+    start_raw = request.args.get("start")
+    end_raw = request.args.get("end")
+    try:
+        if iid_raw is not None:
+            iid = int(iid_raw)
+            if iid <= 0:
+                raise ValueError
+            window = rwm.incident_window(iid)
+            if window is None:
+                return jsonify({"ok": False, "error":
+                                "no packets for this case's window"}), 404
+            fname = f"incident-{iid}-window.pcap"
+        elif hours_raw is not None:
+            hours = float(hours_raw)
+            if not (0 < hours <= 24):
+                raise ValueError
+            window = (now - hours * 3600, now)
+            fname = "rewind-last-hours.pcap"
+        elif start_raw is not None and end_raw is not None:
+            start_ts, end_ts = float(start_raw), float(end_raw)
+            if not (0 < end_ts - start_ts <= 86400):
+                raise ValueError
+            window = (start_ts, end_ts)
+            fname = "rewind-window.pcap"
+        else:
+            return jsonify({"ok": False, "error":
+                            "pick a case or a time window"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad time window"}), 400
+    blob, count = rwm.export_window(*window)
+    resp = _download_response(blob, fname, "application/vnd.tcpdump.pcap")
+    resp.headers["X-Packets"] = str(count)
+    return resp
 
 
 # --- AI: ask-your-network + AI triage verdict -------------------------------

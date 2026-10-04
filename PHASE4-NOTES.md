@@ -329,15 +329,34 @@ North star: the automated analyst for a network with nobody watching it.
 
 ### Prove it (reporting)
 - Daily morning briefing email — overnight summary, the SOC ritual.
+  DONE 2026-10-04 (batch 12): one email/day (never per alert) with the
+  last 24h — alerts by severity, cases, score + change, quiet wins, top
+  exposures, dashboard link. Honors quiet hours (deferred, not dropped).
+  Preview endpoint shows it without sending.
 - Security score card (new 2026-09-30) — one 0–100 grade for the network
   with "here's why" and "do this to improve." Non-technical owners
-  understand a grade; insurers love it.
+  understand a grade; insurers love it. DONE 2026-10-04 (batch 12):
+  deterministic formula in code (alerts/cases/exposures/vuln findings/
+  sensor health, all capped, floor 0, neutral default on empty data),
+  daily snapshots for the trend, dashboard Score section with the
+  paragraph + links to underlying items.
 - Compliance-ready reports — auto-answer the cyber-insurance questionnaire.
+  DONE 2026-10-04 (batch 12): weekly/monthly HTML (print-friendly) + CSV
+  with incidents by category + MITRE tags, response actions (quarantines,
+  escalations, dismissals with reasons), alert volume trends, score
+  history. Downloadable from the dashboard Reports section.
 - Forensic rewind — rolling raw-packet buffer for post-incident review.
+  DONE 2026-10-04 (batch 12): bounded ring buffer (last 60 min or 256 MB,
+  whichever first — configurable), caps enforced on rotation + 60s sweep,
+  low-disk guard, live-capture only; per-case "download packets from this
+  case's window" exports a .pcap; retention + privacy note in the UI.
 - Exportable PDF reports (his call 2026-09-30) — weekly report and incident
   briefs as one-click PDFs; file it, email it, hand it to an insurer.
-  Server-side generation (WeasyPrint/reportlab), brutedash header, readable
-  tables.
+  DONE 2026-10-04 (batch 12): stdlib-only minimal PDF 1.4 writer
+  (netmon/pdfgen.py — Helvetica, text/tables, no images/charts by design;
+  validated: header, xref, page count, extractable text). The "server-side
+  generation (WeasyPrint/reportlab)" line above is superseded: no new
+  dependencies allowed, so the pure-Python writer ships instead.
 
 ### Run it like a product (new 2026-09-30)
 - Data retention policy — rolling windows with automatic summarization

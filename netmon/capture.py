@@ -488,8 +488,28 @@ def run_live(interface=None, stop_event=None):
     flusher = threading.Thread(target=_flush_loop, args=(agg, stop_event),
                                daemon=True)
     flusher.start()
+    # Forensic rewind (netmon/rewind.py): when enabled, keep a bounded
+    # rolling buffer of raw packets from OUR OWN live capture. Pcap
+    # analysis mode (run_pcap) never records -- that is someone else's
+    # capture, not this network. maybe_record() is a cheap no-op when
+    # the buffer is off; run.py refreshes the flag on a schedule so a
+    # config change takes effect without a restart.
     try:
-        sniff(iface=interface, prn=agg.handle, store=False,
+        from . import rewind as rwm
+        rwm.refresh()
+    except Exception:
+        rwm = None
+
+    def _prn(pkt):
+        if rwm is not None:
+            try:
+                rwm.maybe_record(pkt)
+            except Exception:
+                pass
+        return agg.handle(pkt)
+
+    try:
+        sniff(iface=interface, prn=_prn, store=False,
               stop_filter=lambda _p: stop_event.is_set())
     finally:
         stop_event.set()

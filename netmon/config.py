@@ -121,6 +121,28 @@ DEFAULTS = {
         # Daily run of the inventory + correlation check.
         "daily": True,
     },
+    "reporting": {
+        # Daily morning briefing email: the last 24h in plain English
+        # (alerts, cases, score, quiet wins, exposed doors). ONE email
+        # per day, never per alert (see netmon/reporting.py).
+        "briefing_enabled": True,
+        # The briefing goes out at/after this hour (local time). If the
+        # hour falls inside quiet hours, the send waits until they end.
+        "briefing_hour": 7,
+        # Daily security score snapshot, for the trend on the dashboard.
+        "score_enabled": True,
+        # Forensic rewind: rolling RAW-packet buffer of your own network
+        # for post-incident review (see netmon/rewind.py). Opt-in: raw
+        # packets are only kept when you turn this on.
+        "rewind_enabled": False,
+        # Keep at most this many minutes of packets...
+        "rewind_minutes": 60,
+        # ...or this much disk, whichever fills first. Oldest packets
+        # are deleted automatically; the buffer can never grow past this.
+        "rewind_max_mb": 256,
+        # Empty = <config>/rewind.
+        "rewind_dir": "",
+    },
 }
 
 ENV_PREFIX = "BRUTEDASH_"
@@ -196,6 +218,15 @@ nuclei:
 swaudit:
   enabled: true  # software inventory of THIS box vs CISA's known-exploited list (local reads only)
   daily: true    # daily inventory + correlation check
+
+reporting:
+  briefing_enabled: true  # daily morning briefing email: the last 24h in plain English (one email per day, never per alert)
+  briefing_hour: 7        # the briefing goes out at/after this hour (local time); waits out quiet hours
+  score_enabled: true     # daily security score snapshot, for the trend on the dashboard
+  rewind_enabled: false   # forensic rewind: rolling RAW-packet buffer of your own network (opt-in)
+  rewind_minutes: 60      # keep at most this many minutes of packets...
+  rewind_max_mb: 256      # ...or this much disk, whichever fills first (oldest deleted automatically)
+  rewind_dir: ""          # empty = <config>/rewind
 """
 
 
