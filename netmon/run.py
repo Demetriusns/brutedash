@@ -106,11 +106,22 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
         # Async: the monitor thread must never stall on SMTP (B1).
         notifm.send_digest_async()
 
+    def _retention():
+        from . import retention as retm
+        retm.maybe_prune()
+
     last_summary = 0
     last_digest = time.time()  # first digest waits a full interval
     last_ingest = 0
+    # Batch 16: the loop stamps its own tick watermark every pass. The
+    # dashboard's loop-down watchdog (pipeline.check_loop_down) reads it:
+    # pid file present + tick stale = the loop died without a clean
+    # shutdown. The tick is stamped even when the disk is full -- a dead
+    # loop must be distinguishable from a paused one.
+    pipelinem.note_loop_tick()
     while not stop_event.wait(DETECT_INTERVAL):
         now = time.time()
+        pipelinem.note_loop_tick(now)
 
         # Front door: restart a dead capture thread (bounded; the
         # stale-capture watermark raises the self-alert past that).
@@ -183,6 +194,9 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
         # config and enforce the storage caps so the buffer can never
         # grow past rewind_minutes / rewind_max_mb.
         pipelinem.safe_step("rewind", _rewind)
+        # Data retention (batch 16): daily prune of expired rows in
+        # bounded batches. Best-effort; never breaks the loop.
+        pipelinem.safe_step("retention", _retention)
         if digest_hours > 0 and now - last_digest >= digest_hours * 3600:
             last_digest = now
             pipelinem.safe_step("digest", _digest)
@@ -190,13 +204,14 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
 
 def _bind_allowed(host):
     """True if binding `host` is safe. Loopback is always fine; anything
-    else requires NETMON_PASSWORD (H1: fail closed, don't warn-and-bind).
+    else requires a dashboard password (H1: fail closed, don't warn-and-bind).
 
     Split out for unit testing.
     """
     if (host or "").strip() in ("127.0.0.1", "localhost", "::1"):
         return True
-    return bool(os.environ.get("NETMON_PASSWORD"))
+    owner_pw, viewer_pw = cfgm.auth_passwords()
+    return bool(owner_pw or viewer_pw)
 
 
 def main():
@@ -338,6 +353,10 @@ def main():
     monitor = threading.Thread(target=_monitor_loop,
                                args=(stop_event, digest_hours, loop_state),
                                daemon=True)
+    # Batch 16: record that the monitor loop started. The dashboard's
+    # loop-down watchdog keys off this file: present + tick stale = the
+    # loop died without a clean shutdown. Removed in the finally block.
+    pipelinem.write_loop_pid()
     monitor.start()
 
     # Re-enforce any isolations a human left active across a restart.
@@ -371,6 +390,12 @@ def main():
         if (capture_wanted and thr is not None
                 and not thr.is_alive()):
             return False, "capture thread died"
+        # Batch 16: the monitor loop's own tick. If it stopped, the box
+        # is alive but the watching is not -- signal /fail so the
+        # external heartbeat service knows before its grace period ends.
+        # Unknown (no tick yet, e.g. just started) is not a failure.
+        if pipelinem.loop_tick_fresh() is False:
+            return False, "monitor loop stopped ticking"
         return healthm.local_health()
 
     heartbeat = healthm.Heartbeat(hb_url, hb_minutes, _health)
@@ -384,6 +409,7 @@ def main():
         pass
     finally:
         heartbeat.stop()
+        pipelinem.clear_loop_pid()  # clean shutdown: not a loop-down event
         stop_event.set()
         watchdog.stop()
 

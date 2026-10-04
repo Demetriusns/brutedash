@@ -57,6 +57,12 @@ is the single most useful thing — don't summarize it, paste it.
 
 ---
 
+## Heartbeat setup (so a dead box pages you)
+
+The monitor pings an external heartbeat service every few minutes; if the whole box dies, nothing local can report it, so the *service* is the one that alerts you. Create a check at healthchecks.io, paste its ping URL into config.yaml under `monitor.heartbeat_url` (or the `BRUTEDASH_MONITOR_HEARTBEAT_URL` env var), and set the check's Period to match `monitor.heartbeat_minutes` with Grace at ~2x. When pings stop -- or arrive at the `/fail` path because the box is alive but sick -- healthchecks emails you.
+
+---
+
 ## Where logs live
 
 - Terminal output of the launch window (first place to look).

@@ -100,7 +100,7 @@ STAGES = {
 }
 
 _SELF_SEV = {"capture": "High", "rules": "Medium", "feeds": "Low",
-             "notify": "Medium"}
+             "notify": "Medium", "loop": "High"}
 
 
 def mark(stage):
@@ -210,10 +210,160 @@ def health_snapshot(now=None, capture_expected=True):
     return rows
 
 
-# --- self-alerts: the two cases worth waking someone over ----------------------
-# A stale stage or a full disk means the monitor itself is degraded --
-# quiet-is-a-feature yields here, once per episode. Everything else just
-# logs.
+# --- loop watchdog: "the monitor itself went quiet" -------------------------------
+# Batch 16. The stale-stage checks above catch a sick pipeline, but they
+# all run INSIDE the monitor loop -- if the loop thread itself dies, none
+# of them run. This is the independent layer: the loop stamps a tick
+# watermark every pass and leaves a pid file at startup (removed on clean
+# shutdown). The dashboard -- which usually outlives a dead loop thread --
+# checks both on every page view (cached, 60s): pid file present + tick
+# stale = the monitor stopped, one High self-alert per episode.
+#
+# Design notes:
+#   * A missing tick watermark is "unknown", never stale: a fresh install
+#     or a loop that never ticked must not page on day one.
+#   * A clean shutdown removes the pid file, so a deliberately-stopped
+#     monitor never pages. A crash leaves the pid file behind -- that is
+#     exactly the case this catches.
+#   * If the whole process died, nothing local can page -- that is what
+#     the external heartbeat (health.py) is for. This layer covers the
+#     loop-thread-died-but-dashboard-alive case.
+
+LOOP_STALE_S = 10 * 60  # the loop ticks every 60s; 10x is unambiguously dead
+_LOOP_PID_NAME = "loop.pid"
+_LOOP_TICK_KEY = "wm_loop_ts"
+_LOOP_DOWN_FLAG = "loop_down_alerted_ts"
+
+
+def _loop_pid_path():
+    from . import config as cfgm
+    return cfgm.config_dir() / _LOOP_PID_NAME
+
+
+def write_loop_pid():
+    """Record that the monitor loop started. Never raises."""
+    try:
+        import os as _os
+        p = _loop_pid_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(_os.getpid()))
+    except Exception as exc:
+        _log(f"write_loop_pid failed: {exc!r}")
+
+
+def clear_loop_pid():
+    """Remove the pid file on clean shutdown. Never raises."""
+    try:
+        _loop_pid_path().unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def note_loop_tick(now=None):
+    """Stamp the loop's tick watermark. Called every monitor pass.
+    Never raises."""
+    now = now if now is not None else time.time()
+    try:
+        dbm.set_meta(_LOOP_TICK_KEY, str(now))
+    except Exception:
+        pass
+
+
+def loop_tick_fresh(max_age_s=LOOP_STALE_S, now=None):
+    """True/False/None: is the monitor loop's tick watermark fresh?
+
+    None = unknown (no watermark yet -- never treated as stale).
+    Never raises.
+    """
+    now = now if now is not None else time.time()
+    try:
+        raw = dbm.get_meta(_LOOP_TICK_KEY)
+        last = float(raw) if raw else 0.0
+    except (TypeError, ValueError):
+        return None
+    except Exception:
+        return None
+    if last <= 0:
+        return None
+    age = now - last
+    if age < 0:
+        age = 0.0  # clock jumped backwards; never report a negative age
+    return age <= max_age_s
+
+
+def check_loop_down(now=None):
+    """(down: bool, detail: str|None).
+
+    down is True when a monitor loop was started (pid file present) but
+    its tick watermark is stale -- the loop died without a clean
+    shutdown. Never raises.
+    """
+    now = now if now is not None else time.time()
+    try:
+        if not _loop_pid_path().exists():
+            return False, None  # no loop was started here; nothing to miss
+        if disk_pressure():
+            # The tick write itself can fail on a full disk -- the
+            # disk-full self-alert already owns that episode, and a
+            # second "the monitor stopped" would be noise blaming the
+            # wrong cause.
+            return False, None
+        fresh = loop_tick_fresh(now=now)
+        if fresh is None:
+            return False, None  # unknown, never stale
+        if fresh:
+            return False, None
+        _last, age = now, None
+        try:
+            raw = dbm.get_meta(_LOOP_TICK_KEY)
+            _last = float(raw) if raw else now
+            age = max(0.0, now - _last)
+        except Exception:
+            pass
+        return True, (f"the monitor loop last checked in"
+                      f" {_age_words(age)}.")
+    except Exception as exc:
+        _log(f"check_loop_down failed: {exc!r}")
+        return False, None
+
+
+def check_and_alert_loop_down(now=None):
+    """Fire one High self_drift self-alert per loop-down episode; clear
+    the flag when the loop is ticking again. Returns True when the loop
+    is currently down. Never raises."""
+    now = now if now is not None else time.time()
+    try:
+        down, detail = check_loop_down(now=now)
+        if down:
+            try:
+                already = dbm.get_meta(_LOOP_DOWN_FLAG)
+            except Exception:
+                already = None
+            if not already:
+                tid = _fire_self_alert(
+                    "loop", detail or "the monitor loop stopped checking in.")
+                if tid:
+                    try:
+                        dbm.set_meta(_LOOP_DOWN_FLAG, str(now))
+                    except Exception:
+                        pass
+        else:
+            try:
+                if dbm.get_meta(_LOOP_DOWN_FLAG):
+                    dbm.set_meta(_LOOP_DOWN_FLAG, "")
+                    _log("monitor loop ticking again; loop-down flag cleared")
+            except Exception:
+                pass
+        return down
+    except Exception as exc:
+        _log(f"check_and_alert_loop_down failed: {exc!r}")
+        return False
+
+
+# --- self-alerts: the cases worth waking someone over --------------------------
+# A stale stage, a full disk, or a dead monitor loop means the monitor
+# itself is degraded -- quiet-is-a-feature yields here, once per episode.
+# Everything else just logs.
 
 _SELF_COPY = {
     "capture": (
@@ -270,6 +420,18 @@ _SELF_COPY = {
         "Not normal -- something is filling the disk.",
         "Free up disk space on this computer, then restart brutedash to"
         " resume full recording.",
+    ),
+    "loop": (
+        "The monitor itself stopped checking",
+        "The part of brutedash that runs the detection checks every"
+        " minute hasn't reported in a while.",
+        "brutedash watches your network in two parts: one records the"
+        " traffic, the other checks it for threats every minute. The"
+        " checking part went quiet, so new threats are not being flagged"
+        " right now.",
+        "Not normal -- the checks should report every minute.",
+        "Restart brutedash. If this keeps happening, check the logs for"
+        " what stopped the monitor loop.",
     ),
 }
 

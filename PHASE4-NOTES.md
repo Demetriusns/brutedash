@@ -373,7 +373,17 @@ North star: the automated analyst for a network with nobody watching it.
 ### Run it like a product (new 2026-09-30)
 - Data retention policy — rolling windows with automatic summarization
   (e.g. 90 days of flows, 1 year of incidents). SQLite grows forever
-  otherwise.
+  otherwise. DONE 2026-10-04 (batch 16): `netmon/retention.py` — per-type
+  windows in config.yaml (`retention.flows_days` 30, `observations_days`
+  30, `alerts_days` 365, `summaries_days` 90, `outages_days` 365,
+  `score_snapshots_days` 365); daily prune from the
+  monitor loop in bounded batches (default 5000 rows/DELETE, never locks
+  for minutes); alerts on OPEN/ESCALATED cases are never pruned (closed-
+  case alerts are, mapping rows cleaned, case rows kept); ongoing outages
+  never pruned; every pass logs what was deleted; dashboard Settings →
+  Data retention shows the policy + last prune + on-demand "Prune now"
+  (owner only). Scan findings / feeds / inventory / allowlist are
+  deliberately not pruned (small, or current-state, or config).
 - Sensor-down alerting — a SOC that silently dies is worse than none.
   Watchdog exists (Phase 3); add "haven't heard from the sensor" pages.
   GROUNDED 2026-10-04 (batch 14, repo-learning item 4 DONE): per-stage
@@ -381,8 +391,33 @@ North star: the automated analyst for a network with nobody watching it.
   the sensor-health "Pipeline health" view; a stage silent too long
   raises one self-alert (capture High, rules/notify/disk Medium, feeds
   Low). Full multi-sensor "pages" stay Phase 4/5 work.
+  EXTENDED 2026-10-04 (batch 16): two layers. (a) Local loop-down
+  watchdog — the monitor loop stamps a tick watermark every pass and
+  leaves a pid file (removed on clean shutdown); the dashboard checks
+  at most once a minute, and pid-file-present + tick-stale-10min records
+  ONE High `self_drift` alert per episode plus a red banner on next view
+  (dashboard-only mode never pages; a full disk suppresses it — the disk
+  alert owns that episode). (b) External heartbeat — the existing
+  healthchecks.io pinger now fails closed on non-http(s) URLs (never
+  fetched, loud log, URL never logged), and the health check signals
+  `/fail` when the loop tick itself goes stale so the external service
+  knows before its grace period ends. Setup documented in
+  TROUBLESHOOTING.md (3 sentences).
 - Roles — owner vs. viewer logins. The IT guy sees everything; the business
   owner sees the briefing. (Dashboard login exists in Phase 3; extend it.)
+  DONE 2026-10-04 (batch 16): `auth.owner_password` + `auth.viewer_password`
+  in config.yaml (BRUTEDASH_AUTH_* env overrides; legacy NETMON_PASSWORD
+  still works as the owner password; a lone password is the owner and
+  viewer sign-in stays disabled with a clear note on the login page).
+  The role lives in the signed session (server-side password check only,
+  session cleared at login against fixation); EVERY mutating route
+  (all 25 POST/DELETE handlers) carries `@_owner_required` → 403 for
+  viewers — enforced structurally (functools `__wrapped__` audit test)
+  and behaviorally (viewer gets 403 on every mutating route, owner is
+  not locked out). Viewers get a "👁 View only" badge, owner-only
+  controls hidden (server still 403s them), and the ask/pcap pages
+  refuse viewers. Two shared secrets, no user database — documented as
+  right-sized for a home/small-biz box.
 
 ### Dashboard polish (his call 2026-09-30)
 - Visual refresh, traffic charts, mobile-friendly layout, smoother
@@ -584,7 +619,10 @@ already hinted at in Phase 4 — Phase 5 is where it becomes the product.
 - [x] debug=True removed; deps pinned; config.yaml chmod 600; /brief input validation; CR/LF stripped from email strings. (M1/M3/L6/L7/L3)
 - [ ] AI-question (/ask) rate limits.
 - [x] Pipeline-liveness watermarks. DONE 2026-10-04 (batch 14, repo-learning item 4): per-stage watermarks + stale-stage self-alerts, sensor-health "Pipeline health" view.
-- [ ] Rolling database retention + bounded dashboard stats.
+- [x] Rolling database retention + bounded dashboard stats. DONE 2026-10-04
+  (batch 16): retention.py prunes in bounded batches with per-type windows;
+  the retention panel shows policy text + last-prune info (no unbounded
+  COUNT(*) queries on the hot path).
 - [ ] Windows restart-on-failure supervision (docs/run-as-service.md is the start).
 - [ ] SSH detector: log rotation resets accumulated counts — read across rotations.
 - [ ] TLS + Secure/SameSite cookies (Phase 5 work). (M2)

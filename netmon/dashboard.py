@@ -9,6 +9,7 @@ Run via netmon/run.py (starts capture + watchdog threads), or standalone
 for viewing an existing database:  python -m netmon.dashboard
 """
 import hmac
+import functools
 import json
 import os
 import re
@@ -43,23 +44,95 @@ def _no_cache_html(resp):
     return resp
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Optional password gate for the dashboard. When NETMON_PASSWORD is set,
-# every page except /login and /api/health requires a session login.
-NETMON_PASSWORD = os.environ.get("NETMON_PASSWORD", "")
-if not NETMON_PASSWORD:
-    print("WARNING: dashboard has no password "
-          "(set NETMON_PASSWORD to require a login).")
+# Dashboard sign-in: owner vs viewer roles (Phase 3.5 batch 16).
+#
+# Two shared secrets, no user database -- right-sized for a home/small-biz
+# box. The owner password unlocks everything; the viewer password gives a
+# read-only dashboard (sees everything, changes nothing).
+#
+# Resolution (see netmon/config.py auth_passwords): BRUTEDASH_AUTH_* env
+# vars win, then config.yaml auth.*, then the legacy NETMON_PASSWORD as
+# the owner password (deprecated alias). If only one password is set it
+# is the owner and viewer sign-in stays disabled. No passwords at all =
+# open dashboard (localhost dev), exactly like before roles existed.
+#
+# The role lives in the signed Flask session -- it comes from the
+# server-side password check at login, never from a client parameter.
+# Every mutating route is wrapped with @_owner_required (403 otherwise);
+# the login page is rate-limited as before (H2).
+
+
+def _auth():
+    """(owner_password, viewer_password), resolved fresh each call."""
+    return cfgm.auth_passwords()
+
+
+def _role():
+    """The signed-in role: "owner" | "viewer" | None."""
+    role = session.get("role")
+    return role if role in ("owner", "viewer") else None
+
+
+def _auth_enabled():
+    owner_pw, _viewer_pw = _auth()
+    return bool(owner_pw)
 
 
 @app.before_request
 def _password_gate():
-    if not NETMON_PASSWORD:
+    if not _auth_enabled():
         return None
     if request.path in ("/login", "/api/health"):
         return None
-    if session.get("authed"):
+    if _role() is not None:
         return None
     return redirect("/login")
+
+
+def _owner_required(fn):
+    """Route decorator: only the owner role may mutate the monitor.
+
+    Viewers get a 403 with a plain-English reason (JSON for API calls,
+    a short page for page views). When no owner password is configured
+    the dashboard is open (backwards compatible: no gate at all) and
+    the decorator is a no-op.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if _auth_enabled() and _role() != "owner":
+            msg = ("Owner sign-in required -- this changes the monitor."
+                   " Viewers can look, not touch.")
+            if request.method == "GET":
+                return render_template_string(
+                    _OWNER_ONLY_HTML, message=msg), 403
+            return jsonify({"ok": False, "error": msg}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+# --- loop-down watchdog (batch 16, sensor-down alerting, local layer) ---------
+# The monitor loop stamps a tick watermark every pass; if the loop thread
+# dies, the dashboard -- which usually outlives it -- is the thing that
+# notices. Checked at most once a minute (cheap: one pid-file stat + one
+# meta read); a dead loop records ONE High self-alert per episode, shown
+# on the next page view. Dashboard-only mode (no pid file) never pages.
+_LOOP_WATCH_LAST = 0
+
+
+@app.before_request
+def _loop_watchdog_tick():
+    global _LOOP_WATCH_LAST
+    now = time.time()
+    if now - _LOOP_WATCH_LAST < 60:
+        return None
+    _LOOP_WATCH_LAST = now
+    try:
+        from . import pipeline as pipelinem
+        pipelinem.safe_step("loop-watchdog",
+                            pipelinem.check_and_alert_loop_down)
+    except Exception:
+        pass
+    return None
 
 
 STYLE = """
@@ -133,6 +206,8 @@ details.settings>summary::before{content:"\\25B8  ";color:#58a6ff}
 details.settings[open]>summary::before{content:"\\25BE  "}
 details.settings .inner{padding:0 1.2em 1.2em}
 footer.site{margin-top:2.5em;padding-top:1em;border-top:1px solid #30363d}
+/* viewer role: hide owner-only controls (server still 403s them) */
+.viewonly .owneronly{display:none!important}
 /* ---- mobile: phones and narrow tablets ---- */
 @media (max-width:640px){
   body{margin:0 auto;padding:0 .7em;font-size:15px}
@@ -160,6 +235,9 @@ LOGIN_HTML = """<html><head><title>netmon -- sign in</title>
 <h1>netmon sign in</h1>
 <p class="note">This dashboard is password-protected. Enter the dashboard
 password to continue.</p>
+{% if viewer_note %}<p class="note">Viewer sign-in isn't set up on this box --
+use the owner password. (The owner can add a read-only viewer password under
+<code>auth.viewer_password</code> in config.yaml.)</p>{% endif %}
 {% if error %}<p class="high">{{ error }}</p>{% endif %}
 <form method="post">
 <input type="password" name="password" autofocus autocomplete="current-password"><br><br>
@@ -168,23 +246,44 @@ password to continue.</p>
 </body></html>"""
 
 
+_OWNER_ONLY_HTML = """<html><head><title>netmon -- owner only</title>
+<style>""" + STYLE + """</style></head><body>
+<h1>Owner sign-in required</h1>
+<p>{{ message }}</p>
+<p><a href="/">Back to the dashboard</a> | <a href="/logout">Sign in as owner</a></p>
+</body></html>"""
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    owner_pw, viewer_pw = _auth()
     if request.method == "GET":
-        return render_template_string(LOGIN_HTML, error=None)
+        return render_template_string(
+            LOGIN_HTML, error=None,
+            viewer_note=not viewer_pw)
     ip = request.remote_addr or "unknown"
     # H2: no unlimited guessing. 5 failures/minute per IP -> 5-min block.
     if not _login_allowed(ip):
         return render_template_string(
-            LOGIN_HTML, error="Too many attempts. Try again later."), 429
+            LOGIN_HTML, error="Too many attempts. Try again later.",
+            viewer_note=not viewer_pw), 429
     password = request.form.get("password", "")
-    if NETMON_PASSWORD and hmac.compare_digest(password, NETMON_PASSWORD):
+    role = None
+    if owner_pw and hmac.compare_digest(password, owner_pw):
+        role = "owner"
+    elif viewer_pw and hmac.compare_digest(password, viewer_pw):
+        role = "viewer"
+    if role is not None:
         _clear_login_failures(ip)
-        session["authed"] = True
+        # Session fixation: drop any pre-login session contents, then
+        # record the role that the server-side password check granted.
+        session.clear()
+        session["role"] = role
         return redirect("/")
     _record_login_failure(ip)
     return render_template_string(
-        LOGIN_HTML, error="Wrong password, try again.")
+        LOGIN_HTML, error="Wrong password, try again.",
+        viewer_note=not viewer_pw)
 
 
 # --- login rate limiting (H2, stdlib only) ---------------------------------
@@ -228,15 +327,16 @@ def _clear_login_failures(ip):
 
 @app.route("/logout")
 def logout():
-    session.pop("authed", None)
-    return redirect("/login" if NETMON_PASSWORD else "/")
+    session.clear()
+    return redirect("/login" if _auth_enabled() else "/")
 
 INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>""" + STYLE + """</style></head><body>
+<style>""" + STYLE + """</style></head><body class="%%BODY_CLASS%%">
 <nav class="top">
 <a class="brand" href="/">netmon</a>
 <span id="status-pill" class="pill ok">&#9679; LIVE</span>
+%%ROLE_BADGE%%
 <a class="nl" href="#overview">Overview</a>
 <a class="nl" href="#alerts">Alerts <span id="nav-alert-badge"></span></a>
 <a class="nl" href="#surface">Attack surface</a>
@@ -250,6 +350,7 @@ INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <a class="nl" href="#settings">Settings</a>
 </nav>
 <div id="stalebanner" class="banner-red" style="display:none"></div>
+<div id="loopbanner" class="banner-red" style="display:none"></div>
 <div id="wnbanner" class="banner-blue" style="display:none">&#128225; Whole-network view: this computer is relaying the LAN, so every device's traffic is monitored.</div>
 
 <div class="hero" id="overview">
@@ -310,7 +411,7 @@ lays out what it sees.</p>
 </section>
 
 <section class="block" id="summary">
-<h2>&#128172; Summary <button onclick="explain()">Explain now</button></h2>
+<h2>&#128172; Summary <button class="owneronly" onclick="explain()">Explain now</button></h2>
 <div id="summarybody"><p class="note">Loading...</p></div>
 <h2>&#127968; What's normal?</h2>
 <p>On a normal day, almost everything your computer does online is one of a few
@@ -351,11 +452,11 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 </section>
 
 <section class="block" id="scan">
-<h2>&#128273; Open doors check <button class="btn-sm ghost" onclick="startScan()">Run scan now</button> <span class="note" id="scanmsg"></span></h2>
+<h2>&#128273; Open doors check <button class="btn-sm ghost owneronly" onclick="startScan()">Run scan now</button> <span class="note" id="scanmsg"></span></h2>
 <p class="note">A gentle knock on your own devices' doors -- the way an attacker would check them. Weekly scans run automatically; this button runs one on demand. Scans only ever touch your own network.</p>
 <div id="scanstatus"><p class="note">Loading...</p></div>
 <div id="scanfindings"></div>
-<h3 style="margin-top:1em">Deeper check <span class="note">(Nuclei)</span> <button class="btn-sm ghost" onclick="startNucleiScan()">Run deeper scan</button> <span class="note" id="nucleimsg"></span></h3>
+<h3 style="margin-top:1em">Deeper check <span class="note">(Nuclei)</span> <button class="btn-sm ghost owneronly" onclick="startNucleiScan()">Run deeper scan</button> <span class="note" id="nucleimsg"></span></h3>
 <p class="note">Nuclei runs thousands of known vulnerability checks against your own devices -- deeper than the door-knock above, still your network only. Weekly when enabled; this button runs one on demand. <span id="nucleiinstall"></span></p>
 <div id="nucleistatus"><p class="note">Loading...</p></div>
 <div id="nucleifindings"></div>
@@ -374,7 +475,7 @@ formula, no AI involved.</p>
 <p class="note">One email a day with the last 24 hours: alerts, cases, your
 score, and exposed doors. Preview it here first, or send one now.</p>
 <p><button class="btn-sm" onclick="previewBriefing()">Preview briefing</button>
-<button class="btn-sm" onclick="sendBriefing()">Send briefing now</button>
+<button class="btn-sm owneronly" onclick="sendBriefing()">Send briefing now</button>
 <span class="note" id="briefingmsg"></span></p>
 <div id="briefingpreview"></div>
 
@@ -409,7 +510,7 @@ history.</p>
 <label><input type="checkbox" class="qh_day" value="4" checked>Fri</label>
 <label><input type="checkbox" class="qh_day" value="5" checked>Sat</label>
 <label><input type="checkbox" class="qh_day" value="6" checked>Sun</label>
-<button class="btn-sm" onclick="addQuietWindow()">Add</button></p>
+<button class="btn-sm owneronly" onclick="addQuietWindow()">Add</button></p>
 </div></details>
 
 <details class="settings"><summary>Detection rules</summary><div class="inner">
@@ -434,7 +535,7 @@ history.</p>
 <option value="arp_spoof">arp_spoof</option>
 </select>
 <input id="al_pattern" placeholder="e.g. aa:bb:cc:dd:ee:ff or 8080" size="28">
-<button class="btn-sm" onclick="addAllow()">Add</button></p>
+<button class="btn-sm owneronly" onclick="addAllow()">Add</button></p>
 </div></details>
 
 <details class="settings"><summary>Learning from your dismissals</summary><div class="inner">
@@ -443,8 +544,14 @@ history.</p>
 </div></details>
 
 <details class="settings"><summary>Email digest</summary><div class="inner">
-<p><button class="btn-sm" onclick="sendDigest()">Send digest now</button> <span class="note" id="digestmsg"></span></p>
+<p><button class="btn-sm owneronly" onclick="sendDigest()">Send digest now</button> <span class="note" id="digestmsg"></span></p>
 <p class="note">A digest email goes out automatically once a day (Medium alerts and up, skipping anything you dismissed). Change the timing in config.yaml under alerts &rarr; digest_hours (0 turns it off).</p>
+</div></details>
+
+<details class="settings"><summary>Data retention</summary><div class="inner">
+<p class="note">How long each kind of data is kept. A daily prune deletes expired rows in small batches so the database never locks up. Alerts on open or escalated cases are never pruned. Change the windows in config.yaml under <code>retention</code> (0 disables pruning for that type).</p>
+<div id="retention"><p class="note">Loading...</p></div>
+<p><button class="btn-sm owneronly" onclick="pruneNow()">Prune now</button> <span class="note" id="prunemsg"></span></p>
 </div></details>
 
 <details class="settings"><summary>Windows logs</summary><div class="inner">
@@ -471,9 +578,11 @@ the monitor flags those for you automatically.</p>
 </div></details>
 </section>
 
-<p><a href="/pcap">Analyze a pcap file</a> | <a href="/ask">Ask your network</a> | <a href="/logout" id="logoutlink" style="display:none">Logout</a></p>
+<p><a href="/pcap" class="owneronly">Analyze a pcap file</a><span class="owneronly"> | </span><a href="/ask" class="owneronly">Ask your network</a> | <a href="/logout" id="logoutlink" style="display:none">Logout</a></p>
 
 <script>
+var ORION_ROLE = "%%ORION_ROLE%%";  // "owner" | "viewer", from the server session
+function canWrite(){ return ORION_ROLE === "owner"; }
 const SEV_WORDS = {Critical:"Act now", High:"Needs attention", Medium:"Worth a look", Low:"Heads up"};
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
 // Live traffic graph: MB and packets per 5s tick from cumulative counters, last ~6 min.
@@ -529,6 +638,15 @@ async function refreshInner(){
     sb.textContent = "No fresh data \u2014 the monitor may have stopped. Check that netmon is still running.";
   } else {
     sb.style.display = "none";
+  }
+  // Loop-down watchdog (batch 16): the monitor loop itself went quiet.
+  const lb = document.getElementById("loopbanner");
+  if (d.loop_down && d.loop_down.down) {
+    lb.style.display = "block";
+    lb.textContent = "The monitor itself stopped checking (" + d.loop_down.detail + ") "
+      + "Restart brutedash so it can watch your network again.";
+  } else {
+    lb.style.display = "none";
   }
   // Nav: live/stale pill + urgent-alert badge.
   const pill = document.getElementById("status-pill");
@@ -596,9 +714,11 @@ async function refreshInner(){
       + `<div id="group-${gi}" style="display:none">`
       + g.items.slice(1).map(a=>`<span class="note">${esc(a.ts)}${a.detail ? " -- " + esc(a.detail) : ""}</span><br>`).join("")
       + `</div>` : "")
-    + `<br><button class="btn-sm" onclick="triageGroup(${gi},'ack')">Ack${n > 1 ? " all" : ""}</button>`
-    + `<button class="btn-sm ghost" onclick="triageGroup(${gi},'dismiss')">Dismiss${n > 1 ? " all" : ""}</button>`
-    + `<button class="btn-sm ghost" onclick="aiVerdict(${lead.id})">AI verdict</button>`
+    + `<br>${canWrite()
+      ? `<button class="btn-sm" onclick="triageGroup(${gi},'ack')">Ack${n > 1 ? " all" : ""}</button>`
+        + `<button class="btn-sm ghost" onclick="triageGroup(${gi},'dismiss')">Dismiss${n > 1 ? " all" : ""}</button>`
+        + `<button class="btn-sm ghost" onclick="aiVerdict(${lead.id})">AI verdict</button>`
+      : `<span class="note">View-only sign-in: ask the owner to act on this.</span>`}`
     + ` <span class="note" id="verdict-${lead.id}">${vtxt}</span></div>`;
   }).join("") : '<p class="note">No alerts in the last hour. All quiet.</p>';
 
@@ -675,6 +795,7 @@ async function refresh(){
   }
 }
 async function triageGroup(gi, action){
+  if(!canWrite()) return;  // viewer role: read-only
   const g = ALERT_GROUPS[gi];
   if (!g) return;
   const note = action === "ack" ? prompt("Optional note (leave blank for none):", "") : "";
@@ -693,6 +814,7 @@ function toggleGroup(gi, btn){
   btn.textContent = open ? "hide" : ("show all " + ALERT_GROUPS[gi].items.length);
 }
 async function aiVerdict(aid){
+  if(!canWrite()) return;  // viewer role: read-only
   const el = document.getElementById("verdict-" + aid);
   if (el) el.textContent = "thinking...";
   const r = await fetch("/api/triage/" + aid, {method:"POST"});
@@ -704,6 +826,7 @@ async function aiVerdict(aid){
 }
 let EXPLAINING = false;
 async function explain(){
+  if(!canWrite()) return;  // viewer role: read-only
   const sdiv = document.getElementById("summarybody");
   EXPLAINING = true;
   sdiv.innerHTML = '<p class="note">Writing summary...</p>';
@@ -742,7 +865,7 @@ async function loadDevices(){
       const prof = v.profile
         ? `<span class="note">~${v.profile.avg_mb_per_hr} MB/hr · busiest ${esc(v.profile.busy)} · learned over ${v.profile.days}d</span>`
         : `<span class="note">Still learning (needs 3 days)</span>`;
-      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="showDeviceDetails(this.dataset.mac)">Details</button> <button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button> ${v.quarantined ? `<button class="btn-sm" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="releaseDevice(this.dataset.mac, this.dataset.label)">Release</button>` : `<button class="btn-sm ghost" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="quarantineDevice(this.dataset.mac, this.dataset.label)">Isolate</button>`}</td></tr>`;
+      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="showDeviceDetails(this.dataset.mac)">Details</button>${canWrite() ? ` <button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button> ${v.quarantined ? `<button class="btn-sm" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="releaseDevice(this.dataset.mac, this.dataset.label)">Release</button>` : `<button class="btn-sm ghost" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="quarantineDevice(this.dataset.mac, this.dataset.label)">Isolate</button>`}` : ""}</td></tr>`;
     }).join("") + `</table>`
     : '<p class="note">No devices seen yet.</p>');
   } catch(e) {
@@ -752,6 +875,7 @@ async function loadDevices(){
   }
 }
 async function renameDevice(mac){
+  if(!canWrite()) return;  // viewer role: read-only
   const name = prompt("Name for " + mac + " (blank clears it):", DEV_NAMES[mac] || "");
   if (name === null) return;
   await fetch("/api/devices/name", {method:"POST",
@@ -813,7 +937,7 @@ async function loadIntelStatus(){
         d.feeds.map(f=>`<tr><td>${esc(f.label)}</td><td>${esc(f.kind)}</td><td>${esc(String(f.entries))}</td><td class="note">${esc(f.last_updated)}${f.stale ? ' <span class="badge warn">stale</span>' : ""}</td></tr>`).join("") +
         `</table><p class="note">${esc(String(d.total_entries))} known-bad addresses and sites on file, checked locally.</p>`;
     } else {
-      html += `<p class="note">No feeds loaded yet. They load automatically in the background, or <button class="btn-sm" onclick="refreshFeeds()">load them now</button>.</p>`;
+      html += `<p class="note">No feeds loaded yet. They load automatically in the background${canWrite() ? `, or <button class="btn-sm" onclick="refreshFeeds()">load them now</button>` : ""}.</p>`;
     }
     if (d.feed_health && d.feed_health.failed_recently) {
       html += `<p class="note">The last refresh didn't go through (network down?), so these are the saved lists from the last good refresh. Detection keeps working from the saved lists.</p>`;
@@ -828,6 +952,7 @@ async function loadIntelStatus(){
   }
 }
 async function refreshFeeds(){
+  if(!canWrite()) return;  // viewer role: read-only
   const box = document.getElementById("feedstatus");
   box.innerHTML = '<p class="note">Fetching the latest lists... this can take a few seconds.</p>';
   try {
@@ -913,7 +1038,7 @@ async function loadQuietHours(){
   QH_CACHE = d.windows || [];
   document.getElementById("quiethours").innerHTML = QH_CACHE.length ?
     `<table><tr><th>Days</th><th>From</th><th>To</th><th>Applies to</th><th></th></tr>` +
-    QH_CACHE.map((x,i)=>`<tr><td>${x.days.map(dd=>DAY_NAMES[dd]).join(", ")}</td><td>${esc(x.start)}</td><td>${esc(x.end)}</td><td>${esc((x.kinds||["all"]).join(", "))}</td><td><button class="btn-sm ghost" onclick="delQuietWindow(${i})">Remove</button></td></tr>`).join("") + `</table>`
+    QH_CACHE.map((x,i)=>`<tr><td>${x.days.map(dd=>DAY_NAMES[dd]).join(", ")}</td><td>${esc(x.start)}</td><td>${esc(x.end)}</td><td>${esc((x.kinds||["all"]).join(", "))}</td><td>${canWrite() ? `<button class="btn-sm ghost" onclick="delQuietWindow(${i})">Remove</button>` : ""}</td></tr>`).join("") + `</table>`
     : '<p class="note">No quiet hours set -- emails send any time.</p>';
 }
 async function saveQuietWindows(wins){
@@ -923,6 +1048,7 @@ async function saveQuietWindows(wins){
   loadQuietHours();
 }
 async function addQuietWindow(){
+  if(!canWrite()) return;  // viewer role: read-only
   const days = [...document.querySelectorAll(".qh_day:checked")].map(c=>parseInt(c.value,10));
   saveQuietWindows(QH_CACHE.concat([{days: days,
     start: document.getElementById("qh_start").value || "22:00",
@@ -930,6 +1056,7 @@ async function addQuietWindow(){
     kinds: ["all"]}]));
 }
 async function delQuietWindow(i){
+  if(!canWrite()) return;  // viewer role: read-only
   saveQuietWindows(QH_CACHE.filter((_,j)=>j!==i));
 }
 async function loadRuleHealth(){
@@ -949,10 +1076,11 @@ async function loadAllowlist(){
   const d = await r.json();
   document.getElementById("allowlist").innerHTML = d.entries.length ?
     `<table><tr><th>Rule</th><th>Pattern</th><th>Note</th><th></th></tr>` +
-    d.entries.map(e=>`<tr><td>${esc(e.kind)}</td><td>${esc(e.pattern)}</td><td>${esc(e.note)}</td><td><button class="btn-sm ghost" onclick="delAllow(${e.id})">Remove</button></td></tr>`).join("") + `</table>`
+    d.entries.map(e=>`<tr><td>${esc(e.kind)}</td><td>${esc(e.pattern)}</td><td>${esc(e.note)}</td><td>${canWrite() ? `<button class="btn-sm ghost" onclick="delAllow(${e.id})">Remove</button>` : ""}</td></tr>`).join("") + `</table>`
     : '<p class="note">Allowlist is empty.</p>';
 }
 async function addAllow(){
+  if(!canWrite()) return;  // viewer role: read-only
   const kind = document.getElementById("al_kind").value;
   const pattern = document.getElementById("al_pattern").value.trim();
   if (!pattern) return;
@@ -963,6 +1091,7 @@ async function addAllow(){
   loadAllowlist();
 }
 async function delAllow(id){
+  if(!canWrite()) return;  // viewer role: read-only
   await fetch("/api/allowlist/" + id, {method:"DELETE"});
   loadAllowlist();
 }
@@ -975,21 +1104,64 @@ async function loadSuggestions(){
       (s.broad ? `<p class="warn">This would silence every '${esc(s.kind)}' alert -- only apply if the whole rule is noise for you.</p>` : ``) +
       `<p class="note">Pattern: <code>${esc(s.pattern)}</code> &middot; Rule: <code>${esc(s.kind)}</code><br>` +
       `The pattern matches anywhere it appears in the alert text, so it can cover more than one exact case (e.g. "port 80" also matches "port 8000").</p>` +
-      `<button class="btn-sm" onclick="decideSug(${s.id},'apply')">Apply -- never alert me about this</button> ` +
-      `<button class="btn-sm ghost" onclick="decideSug(${s.id},'ignore')">Ignore</button></div>`).join("")
+      (canWrite()
+        ? `<button class="btn-sm" onclick="decideSug(${s.id},'apply')">Apply -- never alert me about this</button> ` +
+          `<button class="btn-sm ghost" onclick="decideSug(${s.id},'ignore')">Ignore</button></div>`
+        : `</div>`)).join("")
     : '<p class="note">No suggestions yet. Dismiss a few alerts you do not care about and the monitor will start proposing these.</p>';
 }
 async function decideSug(id, what){
+  if(!canWrite()) return;  // viewer role: read-only
   await fetch("/api/learn/suggestions/" + id + "/" + what, {method:"POST"});
   loadSuggestions(); loadAllowlist();
 }
 async function sendDigest(){
+  if(!canWrite()) return;  // viewer role: read-only
   const el = document.getElementById("digestmsg");
   el.textContent = "sending...";
   const r = await fetch("/api/digest/send", {method:"POST"});
   const d = await r.json();
   el.textContent = d.sent ? "Digest sent."
     : "Nothing to send (no recent alerts, or email isn't configured).";
+}
+// --- data retention (Phase 3.5 batch 16) ---
+async function loadRetention(){
+  const el = document.getElementById("retention");
+  try {
+    const r = await fetch("/api/retention");
+    const d = await r.json();
+    const labels = {flows_days:"Flow records", observations_days:"DNS/ARP observations",
+      alerts_days:"Alerts", summaries_days:"Summaries", outages_days:"Internet uptime log",
+      score_snapshots_days:"Score snapshots"};
+    let html = "<table><tr><th>Data</th><th>Kept</th></tr>" +
+      Object.entries(d.policy || {}).map(([k,v]) =>
+        `<tr><td>${esc(labels[k] || k)}</td><td>${v > 0 ? esc(String(v)) + " days" : "forever (pruning off)"}</td></tr>`).join("") +
+      "</table>";
+    html += `<p class="note">${esc(d.policy_note || "")}</p>`;
+    if (d.last_run) {
+      const parts = Object.entries(d.last_counts || {}).filter(([,n])=>n)
+        .map(([t,n])=>`${esc(t)}: ${esc(String(n))}`).join(", ");
+      html += `<p class="note">Last prune: ${esc(d.last_run)} -- deleted ${parts || "nothing (nothing had expired)"}.</p>`;
+    } else {
+      html += `<p class="note">No prune has run yet.</p>`;
+    }
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<p class="note">Could not load retention info.</p>';
+  }
+}
+async function pruneNow(){
+  if(!canWrite()) return;  // viewer role: read-only
+  const el = document.getElementById("prunemsg");
+  el.textContent = "pruning...";
+  try {
+    const r = await fetch("/api/retention/prune", {method:"POST"});
+    const d = await r.json();
+    el.textContent = d.ok ? "Done." : ("Prune failed: " + (d.error || "unknown"));
+  } catch(e) {
+    el.textContent = "Prune failed.";
+  }
+  loadRetention();
 }
 // --- cases (Phase 3.5): incidents, not scattered alerts -------------------
 let CASES_CACHE = [];
@@ -1009,12 +1181,13 @@ async function loadCases(){
       + (c.status === "escalated"
           ? ` <span class="badge warn">awaiting admin</span>`
           : "")
-      + (status === "open"
+      + (canWrite() ? (status === "open"
           ? ` <button class="btn-sm ghost" onclick="closeCase(${c.id})">close case</button>`
             + ` <button class="btn-sm" data-iid="${c.id}" onclick="escalateCase(this.dataset.iid)">escalate to admin</button>`
           : (status === "escalated"
               ? ` <button class="btn-sm ghost" onclick="closeCase(${c.id})">close case</button>`
               : ` <button class="btn-sm ghost" onclick="reopenCase(${c.id})">reopen</button>`))
+        : "")
       + `<div id="case-${c.id}" style="display:none"></div></div>`
     ).join("") : '<p class="note">No ' + esc(status) + ' cases. A quiet network is a healthy network.</p>';
   } catch(e) {
@@ -1057,14 +1230,17 @@ async function toggleCase(iid, btn){
   btn.textContent = open ? "hide timeline" : "show timeline";
 }
 async function closeCase(iid){
+  if(!canWrite()) return;  // viewer role: read-only
   await fetch("/api/incidents/" + iid + "/close", {method:"POST"});
   loadCases();
 }
 async function reopenCase(iid){
+  if(!canWrite()) return;  // viewer role: read-only
   await fetch("/api/incidents/" + iid + "/reopen", {method:"POST"});
   loadCases();
 }
 async function escalateCase(iid){
+  if(!canWrite()) return;  // viewer role: read-only
   const c = CASES_CACHE.find(x => x.id === Number(iid));
   const title = c ? c.title : "this case";
   const msg = `Escalate "${title}" to your administrator?
@@ -1125,6 +1301,7 @@ async function previewBriefing(){
   }
 }
 async function sendBriefing(){
+  if(!canWrite()) return;  // viewer role: read-only
   const msg = document.getElementById("briefingmsg");
   if (msg) msg.textContent = "sending...";
   try {
@@ -1155,6 +1332,7 @@ async function loadRewindStatus(){
   }
 }
 async function quarantineDevice(mac, label){
+  if(!canWrite()) return;  // viewer role: read-only
   const msg = `Isolate ${label} (${mac})?
 
 This cuts the device off from the internet: its traffic gets redirected to this monitor box, which drops it. The device can still talk to other devices on your own network.
@@ -1171,6 +1349,7 @@ Only do this on a network you own.`;
   loadDevices();
 }
 async function releaseDevice(mac, label){
+  if(!canWrite()) return;  // viewer role: read-only
   if (!confirm(`Bring ${label} (${mac}) back? Full network access returns in seconds.`)) return;
   const r = await fetch("/api/devices/quarantine/release", {method:"POST",
     headers:{"Content-Type":"application/json"},
@@ -1313,8 +1492,8 @@ function renderAmass(d){
     return "<p class='note'>No domains configured. Add your own domain(s) under "
       + "<code>amass.domains</code> in config.yaml -- only configured domains are ever scanned.</p>";
   }
-  let h = '<p><button class="btn-sm" onclick="startAmass()">Run scan now</button> '
-    + '<span class="note" id="amassmsg"></span></p>'
+  let h = (canWrite() ? '<p><button class="btn-sm" onclick="startAmass()">Run scan now</button> '
+    + '<span class="note" id="amassmsg"></span></p>' : "")
     + "<p class='note'>Passive sources only -- this never touches your servers directly. "
     + "Weekly scans run automatically.</p>";
   for (const dom of d.domains) {
@@ -1347,6 +1526,7 @@ function renderAmass(d){
   return h;
 }
 async function startAmass(){
+  if(!canWrite()) return;  // viewer role: read-only
   const m = document.getElementById("amassmsg");
   m.textContent = "starting...";
   try {
@@ -1429,6 +1609,7 @@ function renderNuclei(n){
   if (n.running) setTimeout(loadScanStatus, 10000);
 }
 async function startNucleiScan(){
+  if(!canWrite()) return;  // viewer role: read-only
   const m = document.getElementById("nucleimsg");
   m.textContent = "starting...";
   try {
@@ -1439,6 +1620,7 @@ async function startNucleiScan(){
   loadScanStatus();
 }
 async function startScan(){
+  if(!canWrite()) return;  // viewer role: read-only
   const m = document.getElementById("scanmsg");
   m.textContent = "starting...";
   try {
@@ -1643,10 +1825,12 @@ function renderTopoDetails(){
     + "<tr><th>Type</th><td>" + esc(n.icon) + " " + esc(n.type_label)
     + ' <span class="note">(' + esc(src) + ")</span><br>"
     + (n.mac
-      ? '<label class="note">Wrong type? Fix it: </label>'
-        + '<select id="topo-relabel" data-mac="' + esc(n.mac)
-        + '" onchange="relabelTopo(this)">'
-        + '<option value="">auto-detect</option>' + opts + "</select>"
+      ? (canWrite()
+        ? '<label class="note">Wrong type? Fix it: </label>'
+          + '<select id="topo-relabel" data-mac="' + esc(n.mac)
+          + '" onchange="relabelTopo(this)">'
+          + '<option value="">auto-detect</option>' + opts + "</select>"
+        : "")
       : '<span class="note">MAC unknown \u2014 type cannot be pinned for this node.</span>')
     + "</td></tr>"
     + "<tr><th>Traffic (last hour)</th><td>up " + esc(String(n.up_mb))
@@ -1660,6 +1844,7 @@ function renderTopoDetails(){
     + "</td></tr></table>";
 }
 async function relabelTopo(sel){
+  if(!canWrite()) return;  // viewer role: read-only
   const mac = sel.getAttribute("data-mac");
   const dtype = sel.value;
   try {
@@ -1679,7 +1864,7 @@ async function relabelTopo(sel){
 refresh(); setInterval(refresh, 5000);
 loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions(); loadCases(); loadTopology();
 loadAssets(); loadTopTalkers(); setInterval(loadTopTalkers, 30000);
-loadAttackSurface(); loadAmass();
+loadAttackSurface(); loadAmass(); loadRetention();
 loadIntelStatus();
 loadScanStatus(); loadHostEvents(); loadSelfcheck();
 loadScore(); loadRewindStatus();
@@ -1867,6 +2052,7 @@ def _set_alert_status(aid, status, note=None):
 
 
 @app.route("/api/alerts/<int:aid>/ack", methods=["POST"])
+@_owner_required
 def alert_ack(aid):
     note = _note_from_request()
     if not _set_alert_status(aid, "acknowledged", note):
@@ -1876,6 +2062,7 @@ def alert_ack(aid):
 
 
 @app.route("/api/alerts/<int:aid>/dismiss", methods=["POST"])
+@_owner_required
 def alert_dismiss(aid):
     note = _note_from_request()
     if not _set_alert_status(aid, "dismissed", note):
@@ -1933,6 +2120,7 @@ def api_incident(iid):
 
 
 @app.route("/api/incidents/<int:iid>/close", methods=["POST"])
+@_owner_required
 def api_incident_close(iid):
     if not dbm.set_incident_status(iid, "closed"):
         return jsonify({"ok": False, "error": "case not found"}), 404
@@ -1940,6 +2128,7 @@ def api_incident_close(iid):
 
 
 @app.route("/api/incidents/<int:iid>/reopen", methods=["POST"])
+@_owner_required
 def api_incident_reopen(iid):
     if not dbm.set_incident_status(iid, "open"):
         return jsonify({"ok": False, "error": "case not found"}), 404
@@ -1947,6 +2136,7 @@ def api_incident_reopen(iid):
 
 
 @app.route("/api/incidents/<int:iid>/escalate", methods=["POST"])
+@_owner_required
 def api_incident_escalate(iid):
     """Escalate a case to the administrator (his feature call).
 
@@ -1986,6 +2176,7 @@ def api_quarantine_list():
 
 
 @app.route("/api/devices/quarantine", methods=["POST"])
+@_owner_required
 def api_device_quarantine():
     """Isolate one device (ARP-isolate it from the internet).
 
@@ -2005,6 +2196,7 @@ def api_device_quarantine():
 
 
 @app.route("/api/devices/quarantine/release", methods=["POST"])
+@_owner_required
 def api_device_quarantine_release():
     """Lift the isolation on one device (one-click undo)."""
     from . import quarantine as qm
@@ -2065,6 +2257,7 @@ def api_devices():
 
 
 @app.route("/api/devices/name", methods=["POST"])
+@_owner_required
 def api_device_name():
     data = request.get_json(silent=True) or {}
     mac = (data.get("mac") or "").strip().lower()
@@ -2135,6 +2328,7 @@ def api_amass():
 
 
 @app.route("/api/amass/run", methods=["POST"])
+@_owner_required
 def api_amass_run():
     """On-demand external scan. SECURITY BOUNDARY: targets come from
     config.yaml only -- the request body is ignored entirely, so the UI
@@ -2298,6 +2492,7 @@ def api_scan():
 
 
 @app.route("/api/scan/run", methods=["POST"])
+@_owner_required
 def api_scan_run():
     """Start an on-demand self scan in the background."""
     from . import scan as scanm
@@ -2309,6 +2504,7 @@ def api_scan_run():
 
 
 @app.route("/api/nuclei/run", methods=["POST"])
+@_owner_required
 def api_nuclei_run():
     """Start an on-demand Nuclei scan in the background.
 
@@ -2413,6 +2609,7 @@ def api_topology():
 
 
 @app.route("/api/device_type", methods=["POST"])
+@_owner_required
 def api_device_type():
     """Pin (or clear) a device's type by MAC -- the map's correction loop.
 
@@ -2545,6 +2742,7 @@ def api_intel_status():
 
 
 @app.route("/api/intel/refresh", methods=["POST"])
+@_owner_required
 def api_intel_refresh():
     """Refresh the community feeds on demand. Best-effort per feed."""
     from . import threatintel as tim
@@ -2782,6 +2980,7 @@ def api_quiet_hours_get():
 
 
 @app.route("/api/settings/quiet_hours", methods=["POST"])
+@_owner_required
 def api_quiet_hours_set():
     data = request.get_json(silent=True) or {}
     try:
@@ -2839,6 +3038,7 @@ def api_allowlist_get():
 
 
 @app.route("/api/allowlist", methods=["POST"])
+@_owner_required
 def api_allowlist_add():
     data = request.get_json(silent=True) or {}
     kind = (data.get("kind") or "").strip()
@@ -2855,6 +3055,7 @@ def api_allowlist_add():
 
 
 @app.route("/api/allowlist/<int:eid>", methods=["DELETE"])
+@_owner_required
 def api_allowlist_del(eid):
     dbm.remove_allowlist(eid)
     return jsonify({"ok": True})
@@ -2873,18 +3074,21 @@ def api_learn_suggestions():
 
 
 @app.route("/api/learn/suggestions/<int:sid>/apply", methods=["POST"])
+@_owner_required
 def api_learn_apply(sid):
     ok = dbm.decide_suggestion(sid, "applied")
     return jsonify({"ok": ok})
 
 
 @app.route("/api/learn/suggestions/<int:sid>/ignore", methods=["POST"])
+@_owner_required
 def api_learn_ignore(sid):
     ok = dbm.decide_suggestion(sid, "ignored")
     return jsonify({"ok": ok})
 
 
 @app.route("/api/digest/send", methods=["POST"])
+@_owner_required
 def api_digest_send():
     from . import notify as notifm
     sent = notifm.send_digest()
@@ -2920,6 +3124,7 @@ def api_briefing_preview():
 
 
 @app.route("/api/briefing/send", methods=["POST"])
+@_owner_required
 def api_briefing_send():
     """Send the morning briefing now (synchronous, reports the outcome)."""
     from . import reporting as repm
@@ -2928,6 +3133,35 @@ def api_briefing_send():
         return jsonify({"ok": True})
     return jsonify({"ok": False,
                     "error": reason or "could not send the briefing"})
+
+
+# --- data retention (Phase 3.5 batch 16) --------------------------------------
+# Rolling windows per data type (config.yaml: retention.*), pruned daily by
+# the monitor loop in bounded batches. This endpoint shows the policy and
+# the last prune run; owners can trigger a prune on demand.
+
+@app.route("/api/retention")
+def api_retention():
+    """Retention policy + last prune run. Read-only (viewers welcome)."""
+    from . import retention as retm
+    last_ts, last_counts = retm.last_prune()
+    return jsonify({
+        "policy": retm.policy(),
+        "policy_note": ("Alerts attached to open or escalated cases are"
+                        " never pruned; the forensic rewind buffer has its"
+                        " own bounds."),
+        "last_run": _fmt_ts(last_ts) if last_ts else None,
+        "last_counts": last_counts,
+    })
+
+
+@app.route("/api/retention/prune", methods=["POST"])
+@_owner_required
+def api_retention_prune():
+    """Run a prune pass now (owner only)."""
+    from . import retention as retm
+    counts = retm.prune_once()
+    return jsonify({"ok": True, "pruned": counts})
 
 
 def _report_period():
@@ -3097,10 +3331,17 @@ async function ask(){
 
 @app.route("/ask")
 def ask_page():
+    if _auth_enabled() and _role() != "owner":
+        return render_template_string(
+            _OWNER_ONLY_HTML,
+            message=("Ask-your-network spends the AI budget and can run"
+                     " scans -- owner sign-in required. Viewers can look,"
+                     " not touch.")), 403
     return render_template_string(ASK_HTML)
 
 
 @app.route("/api/ask", methods=["POST"])
+@_owner_required
 def api_ask():
     if request.is_json:
         q = (request.get_json(silent=True) or {}).get("question", "")
@@ -3122,6 +3363,7 @@ def api_ask():
 
 
 @app.route("/api/triage/<int:aid>", methods=["POST"])
+@_owner_required
 def api_triage(aid):
     rows = dbm.query(
         "SELECT severity, title, detail, meaning, is_normal, what_to_do, ts"
@@ -3149,6 +3391,20 @@ def api_triage(aid):
 watchdog = None
 
 
+def _loop_down_state():
+    """Loop-down watchdog state for the banner: {"down": bool, "detail"}.
+
+    State only -- firing the self-alert happens in _loop_watchdog_tick.
+    Never raises.
+    """
+    try:
+        from . import pipeline as pipelinem
+        down, detail = pipelinem.check_loop_down()
+        return {"down": bool(down), "detail": detail or ""}
+    except Exception:
+        return {"down": False, "detail": ""}
+
+
 def _port_guide_html():
     from . import explainer as expl
     rows = "".join(
@@ -3161,8 +3417,15 @@ def _port_guide_html():
 
 @app.route("/")
 def index():
-    return render_template_string(
-        INDEX_HTML.replace("%%PORT_GUIDE%%", _port_guide_html()))
+    role = _role() or "owner"  # no-password mode: everyone is the owner
+    badge = ('<span class="badge warn" id="rolebadge">'
+             "&#128065; View only</span>" if role == "viewer" else "")
+    html = INDEX_HTML.replace("%%PORT_GUIDE%%", _port_guide_html())
+    html = html.replace("%%ROLE_BADGE%%", badge)
+    html = html.replace("%%BODY_CLASS%%", "viewonly" if role == "viewer"
+                        else "")
+    html = html.replace("%%ORION_ROLE%%", role)
+    return render_template_string(html)
 
 
 @app.route("/api/stats")
@@ -3269,12 +3532,14 @@ def api_stats():
         "outage_log": outage_log,
         "stale": stale,
         "last_flow_ts": last_flow_ts,
-        "auth_required": bool(NETMON_PASSWORD),
+        "loop_down": _loop_down_state(),
+        "auth_required": _auth_enabled(),
         "device_names": device_names,
     })
 
 
 @app.route("/explain", methods=["POST"])
+@_owner_required
 def explain_now():
     from . import explainer as expl
     summary, origin = expl.summarize(save=True)
@@ -3283,6 +3548,7 @@ def explain_now():
 
 
 @app.route("/pcap", methods=["GET", "POST"])
+@_owner_required
 def pcap():
     if request.method == "GET":
         return render_template_string(PCAP_HTML)

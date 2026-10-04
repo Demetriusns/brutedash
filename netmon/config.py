@@ -61,6 +61,37 @@ DEFAULTS = {
         # Can also come from the BRUTEDASH_RESPONSE_ADMIN_EMAIL env var.
         "admin_email": "",
     },
+    "auth": {
+        # Dashboard sign-in roles: owner (full control) vs viewer
+        # (read-only -- sees everything, changes nothing). Two shared
+        # secrets, no user database: right-sized for a home/small-biz box
+        # where the owner hands the viewer password to one trusted person.
+        # Prefer the BRUTEDASH_AUTH_OWNER_PASSWORD /
+        # BRUTEDASH_AUTH_VIEWER_PASSWORD env vars -- values here are
+        # readable by anyone who can read this file. If only ONE password
+        # is set (either field), it is the owner password and viewer
+        # sign-in stays disabled. No passwords at all = open dashboard
+        # (localhost dev), exactly like before.
+        "owner_password": "",
+        "viewer_password": "",
+    },
+    "retention": {
+        # Data retention: how long each kind of data is kept, in days.
+        # A scheduled prune job (daily, from the monitor loop) deletes
+        # expired rows in bounded batches. Alerts attached to OPEN or
+        # ESCALATED cases are NEVER pruned -- only history that's no
+        # longer actionable goes. The forensic rewind buffer has its own
+        # bounds (rewind_minutes / rewind_max_mb) and is not pruned here.
+        "flows_days": 30,          # raw flow records (the bulk of the DB)
+        "observations_days": 30,   # dns_queries + arp_observations
+        "alerts_days": 365,        # alert history (open/escalated cases exempt)
+        "summaries_days": 90,      # AI/plain-English summaries
+        "outages_days": 365,       # internet uptime log
+        "score_snapshots_days": 365,  # security-score trend
+        "prune_enabled": True,     # the daily prune job
+        "prune_batch": 5000,       # rows per DELETE -- bounded, never locks for minutes
+        "prune_interval_hours": 24,
+    },
     "monitor": {
         # healthchecks.io ping URL for the heartbeat. Empty = disabled.
         # Prefer the BRUTEDASH_MONITOR_HEARTBEAT_URL env var for this --
@@ -191,6 +222,21 @@ alerts:
 
 response:
   admin_email: ""  # who "Escalate to admin" emails the incident bundle to -- set this to your admin's address
+
+auth:
+  owner_password: ""   # full control. Prefer the BRUTEDASH_AUTH_OWNER_PASSWORD env var -- values here are readable by anyone who can read this file
+  viewer_password: ""  # read-only dashboard. Prefer BRUTEDASH_AUTH_VIEWER_PASSWORD. If only one password is set, it is the owner and viewer sign-in stays off
+
+retention:
+  flows_days: 30            # raw flow records (the bulk of the database)
+  observations_days: 30     # dns_queries + arp_observations
+  alerts_days: 365          # alert history -- alerts on OPEN or ESCALATED cases are never pruned
+  summaries_days: 90        # AI/plain-English summaries
+  outages_days: 365         # internet uptime log
+  score_snapshots_days: 365 # security-score trend
+  prune_enabled: true       # daily prune job from the monitor loop
+  prune_batch: 5000         # rows per DELETE -- bounded so the database never locks for minutes
+  prune_interval_hours: 24
 
 monitor:
   heartbeat_url: ""  # healthchecks.io ping URL; empty = heartbeat disabled
@@ -371,3 +417,41 @@ def ai_enabled() -> bool:
 def ai_model() -> str:
     """Configured LLM model for briefs and Q&A."""
     return get(load_cached(), "ai.model", "gpt-4o-mini")
+
+
+_WARNED_LEGACY_PASSWORD = False
+
+
+def auth_passwords():
+    """(owner_password, viewer_password) for the dashboard roles.
+
+    Resolution: BRUTEDASH_AUTH_OWNER_PASSWORD / BRUTEDASH_AUTH_VIEWER_PASSWORD
+    env vars win (read fresh from the environment, never cache-stale), then
+    the config file's auth.* values, then the legacy NETMON_PASSWORD env var
+    as the owner password (deprecated alias -- warns once).
+
+    If only ONE password is set (either field), it is the owner password
+    and viewer sign-in stays disabled. No passwords at all means the
+    dashboard runs open (localhost dev), exactly like before roles existed.
+    """
+    global _WARNED_LEGACY_PASSWORD
+    cfg = load_cached()
+    owner = str(get(cfg, "auth.owner_password", "") or "")
+    viewer = str(get(cfg, "auth.viewer_password", "") or "")
+    # Env overrides are read directly so a changed variable takes effect
+    # without waiting for the config file's mtime to move.
+    owner = os.environ.get("BRUTEDASH_AUTH_OWNER_PASSWORD", "") or owner
+    viewer = os.environ.get("BRUTEDASH_AUTH_VIEWER_PASSWORD", "") or viewer
+    legacy = os.environ.get("NETMON_PASSWORD", "")
+    if legacy and not owner:
+        if not _WARNED_LEGACY_PASSWORD:
+            _WARNED_LEGACY_PASSWORD = True
+            import sys
+            print("WARNING: NETMON_PASSWORD is deprecated as the dashboard"
+                  " password; use BRUTEDASH_AUTH_OWNER_PASSWORD instead.",
+                  file=sys.stderr)
+        owner = legacy
+    if not owner and viewer:
+        # A lone password is the owner; viewer sign-in stays disabled.
+        owner, viewer = viewer, ""
+    return owner, viewer

@@ -95,6 +95,21 @@ def local_health():
 
 # -------------------------------------------------------------- heartbeat
 
+def _heartbeat_url_ok(url):
+    """Scheme allowlist for the heartbeat target: http/https only.
+
+    The URL is operator-configured (their own healthchecks.io check), but
+    a typo'd or pasted value (ftp://, file://, ...) must fail closed
+    instead of being fetched. The URL itself is never logged -- anyone
+    with it can fake heartbeats.
+    """
+    from urllib.parse import urlparse
+    try:
+        return urlparse(url or "").scheme.lower() in ("http", "https")
+    except Exception:
+        return False
+
+
 class Heartbeat(threading.Thread):
     """Background pinger. Never raises; a broken heartbeat must not break
     the monitor it watches."""
@@ -111,6 +126,12 @@ class Heartbeat(threading.Thread):
 
     def run(self):
         if not self.url:
+            return
+        if not _heartbeat_url_ok(self.url):
+            # Fail closed and LOUD: a heartbeat that silently never
+            # pings is worse than none -- the operator must fix the URL.
+            self.log.error("heartbeat: refusing to ping a non-http(s)"
+                           " URL; heartbeat disabled until the URL is fixed")
             return
         # Ping immediately on startup so a fresh boot is visible fast.
         self._ping_once()
