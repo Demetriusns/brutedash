@@ -22,8 +22,8 @@ Design principles:
     LAN<->LAN flows, low-trust device -> high-value device, and stop
     there. Anything deeper would be a guess.
 
-PLAYBOOK SLUGS (the playbooks batch implements /playbook/<slug> next;
-until then the dashboard route renders a friendly placeholder):
+PLAYBOOK SLUGS (the fix-it guides; full content lives in
+netmon/playbooks.py, rendered by the dashboard's /playbook/<slug> route):
     internet-exposed-door    a door the internet can reach (general case)
     internet-exposed-printer a printer reachable from the internet
     open-admin-interface     an admin page (router/camera/hub) reachable
@@ -34,7 +34,12 @@ until then the dashboard route renders a friendly placeholder):
                              address or site
     iot-lateral-path         a low-trust device seen talking to a
                              high-value one
+    ...plus one guide per detection kind the monitor emits
+    (port-scan, arp-spoofing, beaconing, dns-tunneling, ... --
+    see playbooks.KIND_TO_SLUG for the full mapping).
 Slug grammar: ^[a-z0-9-]{1,64}$ -- validated by valid_playbook_slug().
+Well-formed but unknown slugs render a friendly "coming soon" page;
+the dashboard never 404s on valid grammar.
 """
 
 import ipaddress
@@ -75,6 +80,9 @@ HIGH_VALUE_TYPES = ("server", "desktop")
 
 # slug -> {title, blurb}: the fix-it guide each exposure links to.
 # Slugs are lowercase kebab-case by convention; see module docstring.
+# The first six came from the attack-surface review; the rest cover the
+# detection kinds the monitor emits (see netmon/playbooks.py for the
+# kind -> slug mapping and the full guide content).
 PLAYBOOK_SLUGS = {
     "internet-exposed-door": {
         "title": "A door the internet can reach",
@@ -112,6 +120,114 @@ PLAYBOOK_SLUGS = {
         "blurb": ("A low-trust gadget (smart plug, camera, TV) has been seen"
                   " talking to a computer or server on your network. This"
                   " guide explains network segmentation in plain English."),
+    },
+    "port-scan": {
+        "title": "Someone is knocking on your doors",
+        "blurb": ("Something probed lots of ports on a device, looking for"
+                  " a way in. Usually background internet noise -- this"
+                  " guide shows how to tell."),
+    },
+    "arp-spoofing": {
+        "title": "Something is tampering with your network's address book",
+        "blurb": ("A device is answering address requests it shouldn't,"
+                  " which can reroute traffic through it. Could also be"
+                  " the monitor's own relay -- this guide sorts it out."),
+    },
+    "beaconing": {
+        "title": "A device keeps checking in with an outside address",
+        "blurb": ("Regular, rhythmic check-ins with one address look like"
+                  " malware phoning home -- but legit apps do it too. This"
+                  " guide walks through telling the difference."),
+    },
+    "dns-tunneling": {
+        "title": "Data may be sneaking out inside DNS lookups",
+        "blurb": ("Odd DNS traffic can hide data theft. This guide shows"
+                  " how to check which device and program is behind it."),
+    },
+    "dns-lookup-burst": {
+        "title": "A device is hammering DNS lookups",
+        "blurb": ("A burst of address lookups -- usually a misbehaving app"
+                  " or an ad-heavy page, occasionally malware. How to"
+                  " check."),
+    },
+    "unusual-port": {
+        "title": "A device is talking on an odd channel",
+        "blurb": ("Traffic on a port nothing normally uses. Games and chat"
+                  " apps do this legitimately; so does malware. This guide"
+                  " helps you figure out which."),
+    },
+    "traffic-spike": {
+        "title": "A sudden surge of data left your network",
+        "blurb": ("A device suddenly uploaded far more than usual. Could be"
+                  " a backup or photo sync -- or files leaving. How to"
+                  " match it to something innocent first."),
+    },
+    "volume-anomaly": {
+        "title": "Unusual data volume on the network",
+        "blurb": ("More data moved than the network's recent normal."
+                  " This guide shows how to find the device behind it and"
+                  " decide if it's fine."),
+    },
+    "behavior-deviation": {
+        "title": "A device is acting unlike itself",
+        "blurb": ("The monitor learned this device's habits and it just"
+                  " broke them. New app, houseguest, or something to look"
+                  " at -- this guide walks through it."),
+    },
+    "new-device": {
+        "title": "A new device joined your network",
+        "blurb": ("Hardware the monitor has never seen showed up. Yours,"
+                  " a guest's, or a stranger's? How to tell, and what to"
+                  " do if you don't recognize it."),
+    },
+    "new-external-ip": {
+        "title": "First contact with a new outside address",
+        "blurb": ("Your network talked to an outside address for the first"
+                  " time. Almost always fine -- this guide shows the quick"
+                  " check that proves it."),
+    },
+    "new-busy-domain": {
+        "title": "A new domain got busy all of a sudden",
+        "blurb": ("A never-seen domain suddenly got lots of lookups. Often"
+                  " ads or analytics on a page you visited; occasionally"
+                  " malware cycling names. How to check."),
+    },
+    "brute-force": {
+        "title": "Someone is hammering logins",
+        "blurb": ("Repeated failed logons on one of your computers. Might"
+                  " be you fat-fingering a password, might be an attack."
+                  " This guide shows how to tell -- and what a success"
+                  " after the failures would mean."),
+    },
+    "usb-drive": {
+        "title": "A USB drive was plugged in",
+        "blurb": ("A removable drive showed up on a monitored computer."
+                  " Fine if it was you; worth a look if it wasn't. USB"
+                  " drops are a classic trick."),
+    },
+    "defender-detection": {
+        "title": "Defender caught something on a computer",
+        "blurb": ("Windows Defender flagged or removed something. This"
+                  " guide shows how to confirm it finished the job and"
+                  " what to do if it keeps coming back."),
+    },
+    "host-compromise": {
+        "title": "A computer looks compromised",
+        "blurb": ("Endpoint detection plus suspicious network traffic from"
+                  " the same machine -- the serious one. Stay calm, isolate"
+                  " it first, then work the steps."),
+    },
+    "self-drift": {
+        "title": "This monitor box itself changed",
+        "blurb": ("New listeners, services, or startup entries appeared on"
+                  " the computer running the monitor. Expected if you"
+                  " installed something; worth a look if you didn't."),
+    },
+    "amass-new-asset": {
+        "title": "A new public-facing asset appeared",
+        "blurb": ("A new subdomain or address of yours showed up on the"
+                  " public internet. Yours and intentional, or a surprise?"
+                  " How to check."),
     },
 }
 

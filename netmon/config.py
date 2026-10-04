@@ -54,6 +54,13 @@ DEFAULTS = {
         # Hours between email digest sends; 0 disables.
         "digest_hours": 24,
     },
+    "response": {
+        # Where "Escalate to admin" sends the incident bundle.
+        # EMPTY BY DEFAULT -- never commit a real address here. The person
+        # running brutedash types their admin's address in after install.
+        # Can also come from the BRUTEDASH_RESPONSE_ADMIN_EMAIL env var.
+        "admin_email": "",
+    },
     "monitor": {
         # healthchecks.io ping URL for the heartbeat. Empty = disabled.
         # Prefer the BRUTEDASH_MONITOR_HEARTBEAT_URL env var for this --
@@ -134,6 +141,9 @@ ai:
 alerts:
   min_confidence: 0    # 0-100; alerts below this stay logged but don't notify
   digest_hours: 24     # hours between email digests; 0 disables
+
+response:
+  admin_email: ""  # who "Escalate to admin" emails the incident bundle to -- set this to your admin's address
 
 monitor:
   heartbeat_url: ""  # healthchecks.io ping URL; empty = heartbeat disabled

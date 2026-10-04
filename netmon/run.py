@@ -206,6 +206,15 @@ def main():
                                daemon=True)
     monitor.start()
 
+    # Re-enforce any isolations a human left active across a restart.
+    # The worker only re-sends for rows the dashboard created via a
+    # human click -- it never isolates anything on its own.
+    try:
+        from . import quarantine as qm
+        qm.ensure_worker()
+    except Exception:
+        pass
+
     capture_thread = None
     if not args.dashboard_only:
         from . import capture as capm

@@ -369,12 +369,15 @@ class AttackSurfaceRouteTests(_DbTest):
 
     def test_playbook_placeholder(self):
         c = self._client()
+        # open-admin-interface now has a full guide (batch 9).
         r = c.get("/playbook/open-admin-interface")
         self.assertEqual(r.status_code, 200)
-        self.assertIn(b"still being written", r.data)
+        self.assertIn(b"what we found", r.data)
+        self.assertNotIn(b"still being written", r.data)
         # Unknown-but-well-formed slug: still graceful, never 404.
         r = c.get("/playbook/some-future-guide")
         self.assertEqual(r.status_code, 200)
+        self.assertIn(b"still being written", r.data)
 
     def test_playbook_malformed_404(self):
         c = self._client()

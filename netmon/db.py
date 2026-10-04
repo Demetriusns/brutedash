@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS incidents(
     updated_ts REAL,             -- last member alert attached
     title TEXT,                  -- e.g. "Suspicious activity involving 203.0.113.7"
     severity TEXT,               -- highest severity among member alerts
-    status TEXT NOT NULL DEFAULT 'open',  -- open | closed
+    status TEXT NOT NULL DEFAULT 'open',  -- open | escalated | closed
     device_key TEXT,             -- IP tying the case together (may be NULL)
     summary TEXT                 -- plain-English one-liner
 );
@@ -308,6 +308,51 @@ CREATE TABLE IF NOT EXISTS amass_assets(
     PRIMARY KEY(domain, kind, value)
 );
 CREATE INDEX IF NOT EXISTS idx_amass_assets_domain ON amass_assets(domain);
+
+-- Phase 3.5 "act, not just watch": one-click quarantine state. One row
+-- per device MAC; state is 'active' (isolated right now) or 'released'
+-- (isolation lifted). The ARP enforcement lives in netmon/quarantine.py;
+-- this table is the durable record of what the human asked for.
+CREATE TABLE IF NOT EXISTS quarantines(
+    mac TEXT PRIMARY KEY,      -- lowercased hardware address
+    ip TEXT,                   -- last known IP when isolated
+    state TEXT NOT NULL DEFAULT 'active',  -- active | released
+    created_ts REAL,
+    updated_ts REAL,
+    actor TEXT,                -- who clicked (e.g. "dashboard")
+    note TEXT
+);
+
+-- Phase 3.5 "act, not just watch": audit log. APPEND-ONLY -- rows are
+-- inserted by audit() and read by list_audit(); there is intentionally
+-- no update or delete path anywhere in the codebase, so the trail of
+-- who did what, when, cannot be rewritten after the fact.
+CREATE TABLE IF NOT EXISTS audit_log(
+    id INTEGER PRIMARY KEY,
+    ts REAL,
+    actor TEXT,                -- who did it (e.g. "dashboard")
+    action TEXT,               -- quarantine | quarantine_refused | release
+                               -- | escalate | escalate_failed | ...
+    target TEXT,               -- MAC, incident id, or slug acted on
+    detail TEXT                -- plain-English note, free text
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target);
+
+-- Phase 3.5 "act, not just watch": escalations to the administrator.
+-- One row per escalation attempt; sent_ok=0 means the email failed and
+-- the case was NOT marked escalated (the state only moves on success).
+CREATE TABLE IF NOT EXISTS escalations(
+    id INTEGER PRIMARY KEY,
+    incident_id INTEGER NOT NULL,
+    ts REAL,
+    actor TEXT,
+    admin_email TEXT,
+    subject TEXT,
+    sent_ok INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(incident_id) REFERENCES incidents(id)
+);
+CREATE INDEX IF NOT EXISTS idx_escalations_incident ON escalations(incident_id);
 """
 
 
@@ -609,7 +654,8 @@ def attach_to_incident(alert_id, kind, severity, title, detail, ts):
         if key:
             row = conn.execute(
                 "SELECT id, severity FROM incidents"
-                " WHERE status='open' AND device_key=? AND updated_ts > ?"
+                " WHERE status IN ('open','escalated') AND device_key=?"
+                " AND updated_ts > ?"
                 " ORDER BY updated_ts DESC LIMIT 1",
                 (key, ts - INCIDENT_WINDOW_S),
             ).fetchone()
@@ -692,15 +738,226 @@ def get_incident(incident_id):
 
 
 def set_incident_status(incident_id, status):
-    """Close or reopen a case. Returns True if the case exists."""
-    if status not in ("open", "closed"):
+    """Move a case through its state machine. Returns True if the case
+    exists and the transition is legal.
+
+    States: open -> escalated -> closed. Reopening goes back to open.
+    Legal moves: open->escalated, open->closed, escalated->closed,
+    closed->open, escalated->open. Escalating a closed case is refused
+    (reopen it first) -- an escalation must always describe live work.
+    """
+    if status not in ("open", "escalated", "closed"):
         return False
     with _lock:
         conn = _db()
+        row = conn.execute(
+            "SELECT status FROM incidents WHERE id=?",
+            (incident_id,)).fetchone()
+        if not row:
+            return False
+        current = row[0] or "open"
+        if status == "escalated" and current != "open":
+            return False  # only a live, open case can be escalated
         cur = conn.execute(
             "UPDATE incidents SET status=? WHERE id=?", (status, incident_id))
         conn.commit()
         return cur.rowcount > 0
+
+
+# --- audit log: who did what, when (append-only) --------------------------
+# Phase 3.5 "act, not just watch". Every quarantine, release, and
+# escalation lands here. There is deliberately no update/delete path:
+# the trail cannot be rewritten after the fact.
+
+
+def audit(action, actor, target, detail=""):
+    """Append one audit row. Never raises (a broken audit trail must not
+    break the action it records); returns the row id or None."""
+    import time
+    try:
+        with _lock:
+            conn = _db()
+            cur = conn.execute(
+                "INSERT INTO audit_log (ts, actor, action, target, detail)"
+                " VALUES (?,?,?,?,?)",
+                (time.time(), actor or "", action or "", target or "",
+                 detail or ""))
+            conn.commit()
+            return cur.lastrowid
+    except Exception:
+        return None
+
+
+def list_audit(limit=200, target=None):
+    """Newest audit rows first; optionally filtered to one target."""
+    with _lock:
+        conn = _db()
+        if target:
+            rows = conn.execute(
+                "SELECT id, ts, actor, action, target, detail FROM audit_log"
+                " WHERE target=? ORDER BY id DESC LIMIT ?",
+                (target, limit)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, ts, actor, action, target, detail FROM audit_log"
+                " ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+    return [{"id": r[0], "ts": r[1], "actor": r[2], "action": r[3],
+             "target": r[4], "detail": r[5]} for r in rows]
+
+
+# --- quarantine state (the durable half of netmon/quarantine.py) ----------
+
+
+def quarantine_upsert(mac, ip, actor, note=""):
+    """Record that a human asked for this device to be isolated."""
+    import time
+    mac = (mac or "").lower()
+    now = time.time()
+    with _lock:
+        conn = _db()
+        conn.execute(
+            "INSERT INTO quarantines (mac, ip, state, created_ts,"
+            " updated_ts, actor, note) VALUES (?,?,?,?,?,?,?)"
+            " ON CONFLICT(mac) DO UPDATE SET ip=excluded.ip,"
+            " state='active', updated_ts=excluded.updated_ts,"
+            " actor=excluded.actor, note=excluded.note",
+            (mac, ip or "", "active", now, now, actor or "", note or ""))
+        conn.commit()
+
+
+def quarantine_release(mac, actor, note=""):
+    """Record that a human lifted the isolation. Returns True if the
+    device was actually isolated (a release of a non-isolated device
+    is a no-op, not an error)."""
+    import time
+    mac = (mac or "").lower()
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "UPDATE quarantines SET state='released', updated_ts=?,"
+            " actor=?, note=? WHERE mac=? AND state='active'",
+            (time.time(), actor or "", note or "", mac))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def get_quarantine(mac):
+    """The quarantine row for a MAC, or None."""
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT mac, ip, state, created_ts, updated_ts, actor, note"
+            " FROM quarantines WHERE mac=?", ((mac or "").lower(),)
+        ).fetchone()
+    if not row:
+        return None
+    return {"mac": row[0], "ip": row[1], "state": row[2],
+            "created_ts": row[3], "updated_ts": row[4],
+            "actor": row[5], "note": row[6]}
+
+
+def active_quarantines():
+    """Every device currently isolated: [{mac, ip, ...}]."""
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT mac, ip, created_ts, updated_ts, actor, note"
+            " FROM quarantines WHERE state='active'").fetchall()
+    return [{"mac": r[0], "ip": r[1], "created_ts": r[2],
+             "updated_ts": r[3], "actor": r[4], "note": r[5]}
+            for r in rows]
+
+
+def is_quarantined(mac):
+    """True when this MAC is currently isolated."""
+    q = get_quarantine(mac)
+    return bool(q and q["state"] == "active")
+
+
+# --- escalations ----------------------------------------------------------
+
+
+def record_escalation(incident_id, actor, admin_email, subject, sent_ok):
+    """Log one escalation attempt. sent_ok=0 means the email failed and
+    the case was NOT moved to 'escalated'. Returns the row id."""
+    import time
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "INSERT INTO escalations (incident_id, ts, actor, admin_email,"
+            " subject, sent_ok) VALUES (?,?,?,?,?,?)",
+            (incident_id, time.time(), actor or "", admin_email or "",
+             subject or "", 1 if sent_ok else 0))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_escalations(incident_id):
+    """Escalation attempts for a case, oldest first."""
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT id, ts, actor, admin_email, subject, sent_ok"
+            " FROM escalations WHERE incident_id=? ORDER BY id ASC",
+            (incident_id,)).fetchall()
+    return [{"id": r[0], "ts": r[1], "actor": r[2], "admin_email": r[3],
+             "subject": r[4], "sent_ok": bool(r[5])} for r in rows]
+
+
+def incident_what_was_tried(incident_id):
+    """Plain-English list of what the human already tried on this case:
+    alert triage (acknowledged/dismissed + notes), quarantine/release
+    actions on the case's device, and past escalation attempts. This is
+    the "what the user already tried" section of the escalation bundle,
+    so the admin never re-asks what was already done."""
+    case = get_incident(incident_id)
+    if not case:
+        return []
+    import time
+    tried = []
+    for a in case.get("alerts") or []:
+        st = (a.get("status") or "new").strip()
+        if st in ("acknowledged", "dismissed"):
+            note = (a.get("note") or "").strip()
+            tried.append(
+                f"{st.capitalize()} the alert \"{a.get('title') or a.get('kind')}\""
+                + (f" with the note: {note}" if note else ""))
+    device_key = (case.get("device_key") or "").strip()
+    if device_key:
+        # Quarantine/release audit entries touching this device's IP/MAC.
+        ipmap = {}
+        try:
+            ipmap = ip_to_mac_map()
+        except Exception:
+            pass
+        dev_mac = (ipmap.get(device_key) or "").lower()
+        for entry in list_audit(limit=500):
+            act, tgt = entry.get("action") or "", entry.get("target") or ""
+            if act in ("quarantine", "release", "quarantine_refused") and (
+                    tgt == device_key or (dev_mac and tgt == dev_mac)):
+                when = time.strftime("%b %d %I:%M %p",
+                                     time.localtime(entry.get("ts") or 0))
+                verb = {"quarantine": "Isolated",
+                        "release": "Released",
+                        "quarantine_refused": "Tried to isolate (blocked)"}.get(
+                            act, act)
+                tried.append(f"{verb} the device ({tgt}) on {when}")
+    for esc in list_escalations(incident_id):
+        when = time.strftime("%b %d %I:%M %p",
+                             time.localtime(esc.get("ts") or 0))
+        if esc.get("sent_ok"):
+            tried.append(f"Escalated to {esc.get('admin_email')} on {when}")
+        else:
+            tried.append(f"Tried to escalate on {when}, but the email"
+                         f" failed to send")
+    # De-dupe while keeping order.
+    seen, out = set(), []
+    for t in tried:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
 
 
 def insert_dns_queries(rows):

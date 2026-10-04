@@ -291,7 +291,7 @@ lays out what it sees.</p>
 <h2>&#128193; Cases <span class="note">related alerts, bundled like an analyst would</span>
 <button class="btn-sm ghost" onclick="loadCases()">refresh</button></h2>
 <p class="note">Show: <select id="casestatusfilter" onchange="loadCases()">
-<option value="open" selected>Open</option><option value="closed">Closed</option>
+<option value="open" selected>Open</option><option value="escalated">Escalated</option><option value="closed">Closed</option>
 </select></p>
 <div id="caseslist"><p class="note">Loading...</p></div>
 </section>
@@ -697,7 +697,7 @@ async function loadDevices(){
       const prof = v.profile
         ? `<span class="note">~${v.profile.avg_mb_per_hr} MB/hr · busiest ${esc(v.profile.busy)} · learned over ${v.profile.days}d</span>`
         : `<span class="note">Still learning (needs 3 days)</span>`;
-      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="showDeviceDetails(this.dataset.mac)">Details</button> <button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
+      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="showDeviceDetails(this.dataset.mac)">Details</button> <button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button> ${v.quarantined ? `<button class="btn-sm" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="releaseDevice(this.dataset.mac, this.dataset.label)">Release</button>` : `<button class="btn-sm ghost" data-mac="${esc(v.mac)}" data-label="${esc((v.name || v.mac).replace(/"/g, ""))}" onclick="quarantineDevice(this.dataset.mac, this.dataset.label)">Isolate</button>`}</td></tr>`;
     }).join("") + `</table>`
     : '<p class="note">No devices seen yet.</p>');
   } catch(e) {
@@ -958,9 +958,15 @@ async function loadCases(){
       + ` <span class="note">${c.alert_count} alert${c.alert_count === 1 ? "" : "s"} &middot; updated ${esc(c.updated)}</span>`
       + `<br><span class="note">${esc(c.summary || "")}</span>`
       + `<br><button class="btn-sm ghost" onclick="toggleCase(${c.id}, this)">show timeline</button>`
+      + (c.status === "escalated"
+          ? ` <span class="badge warn">awaiting admin</span>`
+          : "")
       + (status === "open"
           ? ` <button class="btn-sm ghost" onclick="closeCase(${c.id})">close case</button>`
-          : ` <button class="btn-sm ghost" onclick="reopenCase(${c.id})">reopen</button>`)
+            + ` <button class="btn-sm" data-iid="${c.id}" onclick="escalateCase(this.dataset.iid)">escalate to admin</button>`
+          : (status === "escalated"
+              ? ` <button class="btn-sm ghost" onclick="closeCase(${c.id})">close case</button>`
+              : ` <button class="btn-sm ghost" onclick="reopenCase(${c.id})">reopen</button>`))
       + `<div id="case-${c.id}" style="display:none"></div></div>`
     ).join("") : '<p class="note">No ' + esc(status) + ' cases. A quiet network is a healthy network.</p>';
   } catch(e) {
@@ -976,12 +982,19 @@ async function toggleCase(iid, btn){
       const r = await fetch("/api/incidents/" + iid);
       const d = await r.json();
       if (!d.ok) throw new Error(d.error || "not found");
-      el.innerHTML = d.incident.alerts.map(a =>
+      let escBanner = "";
+      const sentEsc = (d.incident.escalations || []).filter(e => e.sent_ok);
+      if (sentEsc.length) {
+        const last = sentEsc[sentEsc.length - 1];
+        escBanner = `<p><span class="badge warn">awaiting admin</span> <span class="note">escalated to ${esc(last.admin_email)} &middot; ${esc(last.when)}</span></p>`;
+      }
+      el.innerHTML = escBanner + d.incident.alerts.map(a =>
         `<p><b>[${esc(a.severity)}]</b> ${esc(a.title)}`
         + (a.mitre_id ? ` <span class="badge mitre" title="${esc(a.mitre_name || "")} — tactic: ${esc(a.mitre_tactic || "")}">${esc(a.mitre_id)}</span>` : "")
         + `<br><span class="note">${esc(a.ts)}${a.detail ? " — " + esc(a.detail) : ""}</span>`
         + (a.meaning ? `<br><span class="note">${esc(a.meaning)}</span>` : "")
         + (a.what_to_do ? `<br><span class="note">Next step: ${esc(a.what_to_do)}</span>` : "")
+        + (a.playbook ? `<br><a href="/playbook/${esc(a.playbook)}">fix-it guide &rarr;</a>` : "")
         + `</p>`
       ).join("") || '<p class="note">No alerts in this case.</p>';
       el.dataset.loaded = "1";
@@ -999,6 +1012,43 @@ async function closeCase(iid){
 async function reopenCase(iid){
   await fetch("/api/incidents/" + iid + "/reopen", {method:"POST"});
   loadCases();
+}
+async function escalateCase(iid){
+  const c = CASES_CACHE.find(x => x.id === Number(iid));
+  const title = c ? c.title : "this case";
+  const msg = `Escalate "${title}" to your administrator?
+
+This packages the whole case -- timeline, what was found, what you already tried -- and emails it to the admin address in your config. The case will show as "awaiting admin" until it is closed.`;
+  if (!confirm(msg)) return;
+  const r = await fetch("/api/incidents/" + iid + "/escalate", {method:"POST"});
+  const d = await r.json();
+  alert(d.ok ? d.message : "Could not escalate: " + (d.error || "unknown error"));
+  loadCases();
+}
+async function quarantineDevice(mac, label){
+  const msg = `Isolate ${label} (${mac})?
+
+This cuts the device off from the internet: its traffic gets redirected to this monitor box, which drops it. The device can still talk to other devices on your own network.
+
+Undo any time: click Release on this device row and full access comes back in seconds.
+
+Only do this on a network you own.`;
+  if (!confirm(msg)) return;
+  const r = await fetch("/api/devices/quarantine", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({mac: mac})});
+  const d = await r.json();
+  if (!d.ok) alert("Could not isolate it: " + (d.error || "unknown error"));
+  loadDevices();
+}
+async function releaseDevice(mac, label){
+  if (!confirm(`Bring ${label} (${mac}) back? Full network access returns in seconds.`)) return;
+  const r = await fetch("/api/devices/quarantine/release", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({mac: mac})});
+  const d = await r.json();
+  if (!d.ok) alert("Could not release it: " + (d.error || "unknown error"));
+  loadDevices();
 }
 function fmtDur(s){
   s = Math.max(0, Math.round(s || 0));
@@ -1622,7 +1672,7 @@ def alert_dismiss(aid):
 @app.route("/api/incidents")
 def api_incidents():
     status = request.args.get("status", "open")
-    if status not in ("open", "closed"):
+    if status not in ("open", "escalated", "closed"):
         status = "open"
     try:
         cases = dbm.list_incidents(status=status)
@@ -1643,8 +1693,16 @@ def api_incident(iid):
         return jsonify({"ok": False, "error": "case not found"}), 404
     case["created"] = _fmt_ts(case["created_ts"])
     case["updated"] = _fmt_ts(case["updated_ts"])
+    from . import playbooks as _pbm
     for a in case["alerts"]:
         a["ts"] = _fmt_ts(a["ts"])
+        a["playbook"] = _pbm.playbook_slug_for_kind(a.get("kind"))
+    try:
+        case["escalations"] = [
+            {**e, "when": _fmt_ts(e["ts"])} for e in
+            dbm.list_escalations(iid)]
+    except Exception:
+        case["escalations"] = []
     return jsonify({"ok": True, "incident": case})
 
 
@@ -1662,6 +1720,78 @@ def api_incident_reopen(iid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/incidents/<int:iid>/escalate", methods=["POST"])
+def api_incident_escalate(iid):
+    """Escalate a case to the administrator (his feature call).
+
+    Packages the full incident bundle -- timeline, MITRE tags, evidence,
+    the plain-English brief, recommended actions, what the owner already
+    tried -- and emails it to response.admin_email. The case moves to
+    'escalated' only when the email actually went out.
+    """
+    from . import escalate as escm
+    ok, message = escm.send_escalation(iid, actor="dashboard")
+    if ok:
+        return jsonify({"ok": True, "message": message})
+    # 409 when the case simply isn't in a state to escalate; 400 for
+    # config problems; the message always says what to do next.
+    code = 409 if "Only open cases" in message else 400
+    return jsonify({"ok": False, "error": message}), code
+
+
+# --- one-click quarantine (Phase 3.5: act, not just watch) -----------------
+# Approval-only, always: a human clicks Isolate/Release on the dashboard.
+# No code path in this repo quarantines autonomously -- the safety rules
+# live in netmon/quarantine.py (gateway/self/viewer blocklist) and every
+# outcome is audit-logged.
+
+
+@app.route("/api/quarantine", methods=["GET"])
+def api_quarantine_list():
+    """Devices currently isolated."""
+    try:
+        active = dbm.active_quarantines()
+    except Exception:
+        active = []
+    names = dbm.device_name_map()
+    return jsonify({"quarantined": [
+        {**q, "name": names.get((q["mac"] or "").lower(), ""),
+         "since": _fmt_ts(q["created_ts"])} for q in active]})
+
+
+@app.route("/api/devices/quarantine", methods=["POST"])
+def api_device_quarantine():
+    """Isolate one device (ARP-isolate it from the internet).
+
+    The safety blocklist (gateway, this box, the viewer's device) is
+    enforced server-side in netmon/quarantine.py -- the UI can't skip it.
+    """
+    from . import quarantine as qm
+    data = request.get_json(silent=True) or {}
+    mac = (data.get("mac") or "").strip().lower()
+    if not mac:
+        return jsonify({"ok": False, "error": "mac is required"}), 400
+    ok, message = qm.request_quarantine(
+        mac, actor="dashboard", viewer_ip=request.remote_addr)
+    if ok:
+        return jsonify({"ok": True, "message": message})
+    return jsonify({"ok": False, "error": message}), 403
+
+
+@app.route("/api/devices/quarantine/release", methods=["POST"])
+def api_device_quarantine_release():
+    """Lift the isolation on one device (one-click undo)."""
+    from . import quarantine as qm
+    data = request.get_json(silent=True) or {}
+    mac = (data.get("mac") or "").strip().lower()
+    if not mac:
+        return jsonify({"ok": False, "error": "mac is required"}), 400
+    ok, message = qm.release_quarantine(mac, actor="dashboard")
+    if ok:
+        return jsonify({"ok": True, "message": message})
+    return jsonify({"ok": False, "error": message}), 400
+
+
 # --- devices: friendly names ---------------------------------------------
 # Name your hardware ("PS5", "Mom's iPhone") so alerts and tables read
 # like English instead of MAC addresses.
@@ -1673,6 +1803,10 @@ PROBATION_HOURS = 24  # new devices stay on probation watch this long
 def api_devices():
     now = time.time()
     devs = dbm.known_devices(limit=100)
+    try:
+        quarantined = {q["mac"] for q in dbm.active_quarantines()}
+    except Exception:
+        quarantined = set()
     up = {ip: (b or 0) for ip, b in dbm.query(
         "SELECT src_ip, SUM(bytes) FROM flows WHERE ts > ?"
         " AND direction='outbound' GROUP BY src_ip", (now - 900,)) if ip}
@@ -1692,6 +1826,7 @@ def api_devices():
         out.append({
             "mac": mac, "name": d.get("name", ""),
             "last_ip": lip,
+            "quarantined": mac in quarantined,
             "up_mb": round(up.get(lip, 0) / 1e6, 2),
             "down_mb": round(down.get(lip, 0) / 1e6, 2),
             "last_seen": _fmt_ts(d["last_seen"]) if d.get("last_seen") else "",
@@ -1798,44 +1933,74 @@ def api_amass_run():
 
 @app.route("/playbook/<slug>")
 def playbook(slug):
-    """Fix-it guides, one per exposure type.
+    """Fix-it guides, one per exposure type and detection kind.
 
-    PLACEHOLDER until the playbooks batch lands: any well-formed slug
-    renders a friendly "coming soon" page so exposure links never 404.
-    Malformed slugs 404. Slug grammar lives in netmon/attacksurface.py
-    (valid_playbook_slug); the real guides will implement these routes.
+    Full step-by-step guides live in netmon/playbooks.py (content) with
+    titles/blurbs in netmon/attacksurface.py PLAYBOOK_SLUGS. Malformed
+    slugs 404; well-formed but unknown slugs keep the friendly "coming
+    soon" placeholder so nothing ever 404s on valid grammar.
     """
     import html as _html
     from . import attacksurface as asm
+    from . import playbooks as pbm
     if not asm.valid_playbook_slug(slug):
         return "Not found", 404
     info = asm.PLAYBOOK_SLUGS.get(slug, {})
     title = info.get("title") or "Fix-it guide"
     blurb = info.get("blurb") or ""
-    body = (
-        "<html><head><title>" + _html.escape(title)
-        + " -- netmon playbook</title>"
-        + '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        + "<style>" + STYLE + "</style></head><body>"
-        + '<nav class="top"><a class="brand" href="/">netmon</a>'
-        + '<a class="nl" href="/#surface">Attack surface</a></nav>'
-        + "<h1>" + _html.escape(title) + "</h1>"
-        + ("<p>" + _html.escape(blurb) + "</p>" if blurb else "")
-        + "<p>Here is the deal: the step-by-step guide for this one is"
-        + " still being written -- it lands with the next update.</p>"
-        + "<p>What you can do right now:</p>"
-        + "<ul><li>Read the exposure above it on the"
-        + ' <a href="/#surface">Attack surface</a> page -- it says what we'
-        + " found and why it matters.</li>"
-        + "<li>If something is reachable from the internet and should not"
-        + " be, your router's port-forwarding and UPnP settings are the"
-        " first place to look.</li>"
-        + "<li>When in doubt, unplug the device until you have had a"
-        " proper look -- you cannot be hacked through a cable that is"
-        + " not plugged in.</li></ul>"
-        + '<p><a href="/#surface">&larr; Back to Attack surface</a></p>'
-        + "</body></html>")
-    return body
+    nav = ('<nav class="top"><a class="brand" href="/">netmon</a>'
+           '<a class="nl" href="/#surface">Attack surface</a>'
+           '<a class="nl" href="/#cases">Cases</a></nav>')
+    head = ("<html><head><title>" + _html.escape(title)
+            + " -- netmon playbook</title>"
+            + '<meta name="viewport" content="width=device-width,'
+            ' initial-scale=1">'
+            + "<style>" + STYLE + "</style></head><body>" + nav
+            + "<h1>" + _html.escape(title) + "</h1>"
+            + ("<p>" + _html.escape(blurb) + "</p>" if blurb else ""))
+    guide = pbm.get_guide(slug)
+    if guide is None:
+        # Well-formed but no guide written yet: the friendly placeholder.
+        return (head
+                + "<p>Here is the deal: the step-by-step guide for this one"
+                + " is still being written -- it lands with the next"
+                + " update.</p>"
+                + "<p>What you can do right now:</p>"
+                + "<ul><li>Read the exposure above it on the"
+                + ' <a href="/#surface">Attack surface</a> page -- it says'
+                + " what we found and why it matters.</li>"
+                + "<li>If something is reachable from the internet and"
+                + " should not be, your router's port-forwarding and UPnP"
+                + " settings are the first place to look.</li>"
+                + "<li>When in doubt, unplug the device until you have had"
+                + " a proper look -- you cannot be hacked through a cable"
+                + " that is not plugged in.</li></ul>"
+                + '<p><a href="/#surface">&larr; Back to Attack surface</a>'
+                + "</p></body></html>")
+    # Full guide: what we found / what to do / when to escalate.
+    parts = [head]
+    parts.append("<h2>Here's what we found</h2>")
+    for para in guide["found"]:
+        parts.append("<p>" + _html.escape(para) + "</p>")
+    parts.append("<h2>Here's what to do</h2><ol>")
+    for step, detail in guide["do"]:
+        parts.append("<li><b>" + _html.escape(step) + "</b>"
+                     + ("<br>" + _html.escape(detail) if detail else "")
+                     + "</li>")
+    parts.append("</ol>")
+    parts.append("<h2>When to escalate</h2>")
+    parts.append("<p>" + _html.escape(guide["escalate"]) + "</p>")
+    parts.append(
+        '<p>To escalate: open the <a href="/#cases">Cases</a> page, find'
+        ' the case for this, and hit <b>Escalate to admin</b>. It packages'
+        ' the whole timeline, what was found, and what you already tried,'
+        ' and emails it to your administrator. If the button says no admin'
+        ' email is set, add <code>response.admin_email</code> to'
+        ' config.yaml first.</p>')
+    parts.append('<p><a href="/#surface">&larr; Back to Attack surface</a>'
+                 ' | <a href="/#cases">Cases</a></p>')
+    parts.append("</body></html>")
+    return "".join(parts)
 
 
 @app.route("/api/top_talkers")

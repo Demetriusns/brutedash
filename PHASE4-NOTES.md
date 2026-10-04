@@ -246,7 +246,32 @@ North star: the automated analyst for a network with nobody watching it.
 - One-click contain — per-device quarantine (ARP-isolate a single device)
   from the dashboard, with his approval. Detection without response is a
   newsletter. (The 2026-09-30 kill-switch test was the prototype.)
+  DONE 2026-10-03 (batch 9): `netmon/quarantine.py` -- Isolate/Release
+  buttons on device rows with an explicit confirmation dialog; hard
+  safety rules enforced server-side (gateway, this box, viewer's device
+  refused; unknown/malformed MACs refused); daemon re-poisons every 10s
+  for human-created rows only; append-only audit log. NO autonomous
+  quarantine -- only the dashboard route calls it (source-inspection
+  test). Methodology note: this is active-response-WITH-approval in the
+  Wazuh tradition (methodology only -- no Wazuh code, which is GPLv2).
 - Full playbooks — step-by-step runbooks per alert type, beyond the tip line.
+  DONE 2026-10-03 (batch 9): `netmon/playbooks.py` -- 24 guides (6
+  attack-surface + 18 detection-kind), each "Here's what we found /
+  Here's what to do / When to escalate", plain-spoken; case timelines link
+  each alert to its guide; well-formed unknown slugs keep the placeholder.
+- Escalate to administrator (HIS FEATURE CALL, first-class) — DONE
+  2026-10-03 (batch 9): `netmon/escalate.py` -- Escalate button on open
+  cases packages the full bundle (timeline, MITRE tags, brief,
+  recommended actions, what the owner already tried, past escalations)
+  and emails it to `response.admin_email` (config.yaml, default empty --
+  never hardcoded). New `escalated` case state (open -> escalated ->
+  closed) with "awaiting admin" badge; state moves only on successful
+  send. This productizes his model: AI triages, the owner handles routine
+  with guidance, the expert handles the hard 5%. (Core differentiator vs
+  Huntress: the escalation path is built in, not a support ticket.)
+- Future: configurable protected-devices list for quarantine (DHCP/DNS/
+  Pi-hole beyond the gateway blocklist) -- deferred 2026-10-03; the
+  confirmation dialog + instant undo bound the risk today.
 
 ### Prove it (reporting)
 - Daily morning briefing email — overnight summary, the SOC ritual.
