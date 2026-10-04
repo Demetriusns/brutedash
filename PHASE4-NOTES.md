@@ -181,16 +181,39 @@ North star: the automated analyst for a network with nobody watching it.
 
 ### Rap sheets (threat intel)
 - Threat intel lookups — check external IPs/domains against blocklists;
-  "known malicious scanner" on sight.
+  "known malicious scanner" on sight. DONE 2026-10-03 (batch 7): new
+  `netmon/threatintel.py` keeps local copies of the URLhaus
+  malware/phishing domain feed (abuse.ch) and the Emerging Threats
+  compromised-IP feed in a `ti_entries` table (lookups hit the local
+  table first — fast, offline-capable); `check_threat_intel` in detect.py
+  fires High `phishing_domain` (T1566.002) and `malicious_ip` (T1071.001)
+  alerts, one per domain/IP per 24h, allowlist-aware, auto-attached to
+  incidents. Optional AbuseIPDB enrichment (score/country/ISP/ASN) via
+  `ABUSEIPDB_API_KEY` env var only — graceful without it, never an error
+  or a nag. Council security + robustness reviewed, all findings fixed.
+- Phishing/malicious-domain feed (his addition, first-class) — check
+  every DNS lookup and every new external domain against a local
+  phishing/malware domain blocklist file that auto-updates on a schedule.
+  DONE 2026-10-03 (batch 7): the URLhaus hostfile refreshes every 12h
+  (1h backoff on failure, old rows kept); every recent lookup is checked
+  with exact + parent-domain matching; a hit is a High alert with
+  T1566.002 context, attached to an incident automatically.
 - Per-IP intel page (his call 2026-09-30): blocklist status/reason,
   abuse-confidence score, scanning/brute-force/phishing/malware/botnet
   behavior, country/city, ISP/hosting owner + ASN, associated domains,
-  provider first-seen/last-seen, reverse DNS.
+  provider first-seen/last-seen, reverse DNS. DONE 2026-10-03 (batch 7):
+  `/api/intel/ip/<ip>` (+ a per-domain companion) feeds the Threat intel
+  dashboard section's lookup box; only fields with real data are shown.
 - Auto-updating feeds (new 2026-09-30) — pull community blocklists
   (AbuseIPDB, emerging-threats) on a schedule into a local table, not just
-  on-demand lookup.
+  on-demand lookup. DONE 2026-10-03 (batch 7): 12h refresh from the
+  monitor loop + on-demand dashboard button; lookups never touch the
+  network (AbuseIPDB enrichment is the only exception, and only on the
+  intel page with a key configured).
 - Local device page (his call 2026-09-30): first seen, last seen, bytes
-  sent/received, ports contacted, local device involved, full alert history.
+  sent/received, ports contacted, local device involved, full alert
+  history. DONE 2026-10-03 (batch 7): `/api/device/<mac>` + Details
+  button on every device row.
 
 ### Act, not just watch (response)
 - One-click contain — per-device quarantine (ARP-isolate a single device)

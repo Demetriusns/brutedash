@@ -69,6 +69,13 @@ def _monitor_loop(stop_event, digest_hours=24):
             selfm.maybe_scheduled_selfcheck()
         except Exception:
             pass
+        # Threat-intel feeds: refresh on their own cadence (12h);
+        # a failed refresh keeps the old data, never breaks the loop.
+        try:
+            from . import threatintel as tim
+            tim.maybe_refresh_feeds()
+        except Exception:
+            pass
         if digest_hours > 0 and now - last_digest >= digest_hours * 3600:
             last_digest = now
             try:

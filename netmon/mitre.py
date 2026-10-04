@@ -102,6 +102,16 @@ _TECHNIQUES = {
         "Persistence",
         "New listeners, services, or autoruns on the monitor box itself.",
     ),
+    "phishing_domain": (
+        "T1566.002", "Phishing: Spearphishing Link",
+        "Initial Access",
+        "A site on a phishing/malware blocklist was looked up or visited.",
+    ),
+    "malicious_ip": (
+        "T1071.001", "Application Layer Protocol: Web Protocols",
+        "Command and Control",
+        "Traffic with an address the blocklists flag as malicious.",
+    ),
 }
 
 

@@ -23,6 +23,7 @@ Tables:
   host_events  Windows Event Log + firewall log events (see INGEST.md)
   ingest_state  per-file read progress for log ingestion
   meta        small key/value store (heartbeats, watermarks, ...)
+  ti_entries  local threat-intel blocklists (domains + IPs)
 
 All writers take the module lock; SQLite runs in WAL mode so the
 dashboard can read while capture threads write.
@@ -267,6 +268,22 @@ CREATE TABLE IF NOT EXISTS meta(
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Phase 3.5 "rap sheets": threat-intel feeds. ti_entries is the local
+-- copy of community blocklists (phishing/malware domains + malicious
+-- IPs); lookups hit this table first so they are fast and offline-capable.
+-- Refreshed on a schedule by netmon/threatintel.py. Feed update
+-- timestamps live in meta as ti_feed_updated_<feed>.
+CREATE TABLE IF NOT EXISTS ti_entries(
+    key TEXT NOT NULL,         -- domain (lowercased) or IP string
+    kind TEXT NOT NULL,        -- 'domain' | 'ip'
+    feed TEXT NOT NULL,        -- which feed listed it
+    detail TEXT,               -- reason/category from the feed
+    first_seen REAL,           -- when we first saw it listed
+    last_seen REAL,            -- when the listing was last confirmed
+    PRIMARY KEY(key, kind, feed)
+);
+CREATE INDEX IF NOT EXISTS idx_ti_entries_kind_key ON ti_entries(kind, key);
 """
 
 
@@ -1723,6 +1740,115 @@ def list_outages(limit=30):
             for i, t, s, e, g in conn.execute(
                 "SELECT id, target, start_ts, end_ts, gap_seconds"
                 " FROM outages ORDER BY start_ts DESC LIMIT ?", (limit,))]
+
+
+# --- threat intel ("rap sheets") -------------------------------------------
+# Local copy of community blocklists (netmon/threatintel.py). Lookups
+# hit ti_entries first: fast, offline-capable, no per-lookup API calls.
+# Feed refreshes swap one feed's rows atomically, preserving first_seen
+# for keys that were already listed.
+
+
+def ti_replace_feed(feed, kind, entries):
+    """Atomically replace one feed's rows.
+
+    entries: iterable of (key, detail). Keys already listed keep their
+    original first_seen; last_seen becomes now for every fresh row.
+    """
+    import time as _t
+    now = _t.time()
+    feed = (feed or "").strip()[:64]
+    kind = (kind or "").strip()[:16]
+    clean = []
+    for key, detail in entries or []:
+        key = (str(key or "").strip().lower()
+               if kind == "domain" else str(key or "").strip())
+        if not key:
+            continue
+        clean.append((key, (detail or "")[:300]))
+    with _lock:
+        conn = _db()
+        old = {r[0]: r[1] for r in conn.execute(
+            "SELECT key, first_seen FROM ti_entries"
+            " WHERE feed=? AND kind=?", (feed, kind))}
+        conn.execute("DELETE FROM ti_entries WHERE feed=? AND kind=?",
+                     (feed, kind))
+        conn.executemany(
+            "INSERT INTO ti_entries (key, kind, feed, detail, first_seen,"
+            " last_seen) VALUES (?,?,?,?,?,?)",
+            [(k, kind, feed, d, old.get(k, now), now) for k, d in clean])
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"ti_feed_updated_{feed}", str(now)))
+        conn.commit()
+    return len(clean)
+
+
+def ti_lookup(kind, keys):
+    """Local feed hits for a batch of keys.
+
+    Returns {key: [{feed, detail, first_seen, last_seen}]}; keys with no
+    hits map to []. Chunked so arbitrarily long key lists stay within
+    SQLite's variable limit.
+    """
+    keys = [k for k in dict.fromkeys(keys or []) if k]
+    out = {k: [] for k in keys}
+    if not keys:
+        return out
+    with _lock:
+        conn = _db()
+        for i in range(0, len(keys), 500):
+            chunk = keys[i:i + 500]
+            rows = conn.execute(
+                "SELECT key, feed, detail, first_seen, last_seen"
+                " FROM ti_entries WHERE kind=? AND key IN (%s)"
+                % ",".join("?" * len(chunk)),
+                (kind, *chunk)).fetchall()
+            for key, feed, detail, first_seen, last_seen in rows:
+                out.setdefault(key, []).append({
+                    "feed": feed or "", "detail": detail or "",
+                    "first_seen": first_seen, "last_seen": last_seen})
+    return out
+
+
+def ti_feed_status():
+    """Per-feed status for the dashboard: [{feed, kind, entries,
+    last_updated}] with the feed's human label looked up from
+    threatintel's registry when available."""
+    labels = {}
+    try:
+        from . import threatintel as tim
+        labels = {n: s.get("label", n) for n, s in tim._FEEDS.items()}
+    except Exception:
+        pass
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT feed, kind, COUNT(*) FROM ti_entries"
+            " GROUP BY feed, kind").fetchall()
+        updates = {r[0]: r[1] for r in conn.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'ti_feed_updated\\_%'"
+            " ESCAPE '\\'")}
+    out = []
+    for feed, kind, count in rows:
+        raw = updates.get(f"ti_feed_updated_{feed}")
+        try:
+            updated = float(raw) if raw else 0
+        except (TypeError, ValueError):
+            updated = 0
+        out.append({"feed": feed, "label": labels.get(feed, feed),
+                    "kind": kind, "entries": count,
+                    "last_updated": updated or None})
+    return sorted(out, key=lambda r: r["feed"])
+
+
+def ti_entry_count():
+    """Total rows in the local threat-intel tables."""
+    with _lock:
+        conn = _db()
+        return conn.execute(
+            "SELECT COUNT(*) FROM ti_entries").fetchone()[0]
 
 
 def query(sql, params=()):

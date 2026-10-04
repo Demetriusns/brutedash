@@ -772,6 +772,137 @@ def check_behavior_deviation(now=None):
     return fired
 
 
+# --- threat intel ("rap sheets", phase 3.5) -----------------------------
+# Every recent DNS lookup and every recent external IP is checked against
+# the local threat-intel tables (netmon/threatintel.py). Matching is
+# deterministic exact matching -- code decides, the AI only narrates.
+# Quiet by design: one alert per domain/IP per 24h, allowlist-aware, and
+# only for things actually seen on the wire.
+TI_WINDOW = 3600       # look back one hour of lookups/flows
+TI_COOLDOWN = 86400    # one alert per domain/IP per day
+
+# Local-only suffixes are never feed material -- skip them before lookup.
+_TI_SKIP_SUFFIXES = (".local", ".lan", ".home.arpa", ".in-addr.arpa",
+                     ".ip6.arpa", ".internal")
+
+
+def _ti_skip_domain(norm):
+    """True for names that can never be a feed hit."""
+    if not norm or "." not in norm:
+        return True
+    if norm.endswith(_TI_SKIP_SUFFIXES):
+        return True
+    try:
+        ipaddress.ip_address(norm)  # PTR-style literals aren't domains
+        return True
+    except ValueError:
+        return False
+
+
+def check_threat_intel(now=None):
+    """Rap sheets: feed hits for recent DNS lookups and external IPs.
+
+    (a) phishing_domain (High): a looked-up domain sits on the local
+        phishing/malware domain list -- MITRE T1566.002.
+    (b) malicious_ip (High): recent traffic with an IP on the local
+        malicious-IP list -- "known malicious scanner" on sight.
+    """
+    now = now or time.time()
+    try:
+        from . import threatintel as tim
+    except Exception:
+        return []
+    fired = []
+
+    # (a) every recent DNS lookup against the phishing/malware domain list
+    try:
+        names = dbm.query(
+            "SELECT DISTINCT COALESCE(src_ip,'unknown'), name"
+            " FROM dns_queries WHERE ts > ?", (now - TI_WINDOW,))
+    except Exception:
+        names = []
+    for src_ip, name in names:
+        norm = tim.normalize_domain(name or "")
+        if _ti_skip_domain(norm):
+            continue
+        hits = tim.lookup_domain(norm)
+        if not hits:
+            continue
+        if _suppressed("phishing_domain", norm):
+            continue
+        if dbm.recent_alert_kind("phishing_domain", norm, TI_COOLDOWN):
+            continue
+        feeds = sorted({h.get("feed") or "threat-intel feed"
+                        for h in hits})
+        matched = hits[0].get("matched") or norm
+        matched_note = (f" (the listing is for {matched})"
+                        if matched != norm else "")
+        dev = _device_label(src_ip if src_ip != "unknown" else None)
+        dev_s = _device_sentence(src_ip if src_ip != "unknown" else None)
+        dbm.add_alert(
+            "phishing_domain", "High",
+            f"That site is on a known bad list: {norm}",
+            (f"{dev_s} looked up {norm}, which is on"
+             f" {', '.join(feeds)}{matched_note}:"
+             f" {hits[0].get('detail') or 'flagged as malicious'}."),
+            meaning=(f"Someone on your network looked up {norm}, and that"
+                     " site sits on a list of websites known for phishing or"
+                     " spreading malware -- the kind behind fake login pages"
+                     " and bad downloads. Think of it as a phone number on a"
+                     " scam-call list."),
+            is_normal=("These lists are rarely wrong about a site. If you"
+                       " meant to visit it, type the address yourself instead"
+                       " of clicking a link -- typos and lookalike links are"
+                       " how people end up on these lists."),
+            what_to_do=("Do not type passwords or card numbers into that"
+                        " site. If someone clicked a link to reach it, run"
+                        " an antivirus scan on that device."),
+            ts=now,
+        )
+        fired.append(("phishing_domain", norm))
+
+    # (b) every recent external IP against the malicious-IP list
+    try:
+        ips = dbm.query(
+            "SELECT DISTINCT dst_ip FROM flows WHERE ts > ?"
+            " AND direction='outbound'", (now - TI_WINDOW,))
+    except Exception:
+        ips = []
+    for (ip,) in ips:
+        if not ip or not _is_external_ip(ip):
+            continue
+        hits = tim.lookup_ip(ip, include_abuseipdb=False)["listed"]
+        if not hits:
+            continue
+        if _suppressed("malicious_ip", ip):
+            continue
+        if dbm.recent_alert_kind("malicious_ip", ip, TI_COOLDOWN):
+            continue
+        feeds = sorted({h.get("feed") or "threat-intel feed"
+                        for h in hits})
+        dbm.add_alert(
+            "malicious_ip", "High",
+            f"Talked to a known bad address: {ip}",
+            (f"A device on your network exchanged traffic with {ip}, which"
+             f" is on {', '.join(feeds)}:"
+             f" {hits[0].get('detail') or 'flagged as malicious'}."),
+            meaning=(f"One of your devices talked to {ip}, an address that"
+                     " security researchers flag as malicious. That is like"
+                     " getting mail from an address the post office has"
+                     " flagged -- it does not prove anything happened, but"
+                     " it is worth a look."),
+            is_normal=("Not normal. Legitimate apps and services do not run"
+                       " from addresses on these lists."),
+            what_to_do=("Check the Cases view for which device was involved"
+                        " and what it was doing at that time. If nothing"
+                        " explains it, disconnect the device and run an"
+                        " antivirus scan."),
+            ts=now,
+        )
+        fired.append(("malicious_ip", ip))
+    return fired
+
+
 def run_all(now=None):
     """Run every periodic rule once. Called on a schedule by run.py.
 
@@ -785,3 +916,4 @@ def run_all(now=None):
     check_new_devices(now=now)
     check_arp_spoof(now=now)
     check_behavior_deviation(now=now)
+    check_threat_intel(now=now)

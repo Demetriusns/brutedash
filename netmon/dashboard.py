@@ -238,6 +238,7 @@ INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <span id="status-pill" class="pill ok">&#9679; LIVE</span>
 <a class="nl" href="#overview">Overview</a>
 <a class="nl" href="#alerts">Alerts <span id="nav-alert-badge"></span></a>
+<a class="nl" href="#intel">Threat intel</a>
 <a class="nl" href="#traffic">Traffic</a>
 <a class="nl" href="#devices">Devices</a>
 <a class="nl" href="#assets">Assets</a>
@@ -279,6 +280,18 @@ Urgency: <select id="alertsevfilter" onchange="refresh()">
 <div id="caseslist"><p class="note">Loading...</p></div>
 </section>
 
+<section class="block" id="intel">
+<h2>&#128737;&#65039; Threat intel <span class="note">known bad addresses &amp; sites</span>
+<button class="btn-sm ghost" onclick="loadIntelStatus()">refresh</button></h2>
+<p class="note">Lists of addresses and sites flagged by security researchers. When your network talks to one, you hear about it here. The lists update on their own every 12 hours.</p>
+<div id="feedstatus"><p class="note">Loading...</p></div>
+<p class="note">Look up an address or a site:
+<input id="intelq" placeholder="e.g. 203.0.113.7 or evil.example.com" size="34">
+<button class="btn-sm" onclick="intelLookup()">Check</button>
+<span class="note" id="intelmsg"></span></p>
+<div id="intelresult"></div>
+</section>
+
 <section class="block" id="summary">
 <h2>&#128172; Summary <button onclick="explain()">Explain now</button></h2>
 <div id="summarybody"><p class="note">Loading...</p></div>
@@ -304,6 +317,7 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 <h2>&#128241; Your devices</h2>
 <p class="note">Name your devices so alerts read like English instead of hardware addresses.</p>
 <div id="devices"><p class="note">Loading...</p></div>
+<div id="devicedetails"></div>
 </section>
 
 <section class="block" id="assets">
@@ -667,7 +681,7 @@ async function loadDevices(){
       const prof = v.profile
         ? `<span class="note">~${v.profile.avg_mb_per_hr} MB/hr · busiest ${esc(v.profile.busy)} · learned over ${v.profile.days}d</span>`
         : `<span class="note">Still learning (needs 3 days)</span>`;
-      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
+      return `<tr><td>${v.name?`<b>${esc(v.name)}</b><br>` :""}<span class="note">${esc(v.mac)}</span></td><td>${status}</td><td>${esc(v.last_ip)}</td><td>${traf}</td><td>${prof}</td><td class="note">${esc(v.first_seen)}</td><td class="note">${esc(v.last_seen)}</td><td><button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="showDeviceDetails(this.dataset.mac)">Details</button> <button class="btn-sm ghost" data-mac="${esc(v.mac)}" onclick="renameDevice(this.dataset.mac)">Rename</button></td></tr>`;
     }).join("") + `</table>`
     : '<p class="note">No devices seen yet.</p>');
   } catch(e) {
@@ -683,6 +697,149 @@ async function renameDevice(mac){
     headers:{"Content-Type":"application/json"},
     body: JSON.stringify({mac: mac, name: name})});
   loadDevices();
+}
+
+// --- per-device detail page (rap sheets: local device page) ---
+async function showDeviceDetails(mac){
+  const box = document.getElementById("devicedetails");
+  box.innerHTML = '<p class="note">Loading details...</p>';
+  try {
+    const r = await fetch("/api/device/" + encodeURIComponent(mac));
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "lookup failed");
+    const head = d.name ? `<b>${esc(d.name)}</b> <span class="note">${esc(d.mac)}</span>`
+                       : `<b>${esc(d.mac)}</b>`;
+    let html = `<div class="sugcard"><h3>${head}</h3>`;
+    html += `<p class="note">First seen: ${esc(d.first_seen || "unknown")} &middot; Last seen: ${esc(d.last_seen || "unknown")}`;
+    if (d.ips && d.ips.length) html += ` &middot; Addresses: ${d.ips.map(x=>esc(x)).join(", ")}`;
+    if (d.hostname) html += `<br>Hostname: ${esc(d.hostname)}`;
+    if (d.vendor) html += ` &middot; Maker: ${esc(d.vendor)}`;
+    if (d.os_guess) html += ` &middot; OS guess: ${esc(d.os_guess)}`;
+    html += `</p>`;
+    html += `<p>Traffic (last 24h): <b>&uarr;${esc(String(d.up_mb_24h || 0))} MB</b> sent &middot; <b>&darr;${esc(String(d.down_mb_24h || 0))} MB</b> received</p>`;
+    if (d.ports && d.ports.length) {
+      html += `<p><b>Ports it talked on (last 24h):</b></p><table><tr><th>Port</th><th>Type</th><th>Connections</th><th>MB</th></tr>` +
+        d.ports.map(p=>`<tr><td>${esc(String(p.port))}</td><td>${esc(p.proto)}</td><td>${esc(String(p.flows))}</td><td>${esc(String(p.mb))}</td></tr>`).join("") + `</table>`;
+    } else {
+      html += `<p class="note">No outbound connections recorded in the last 24h.</p>`;
+    }
+    if (d.alerts && d.alerts.length) {
+      html += `<p><b>Alert history (${d.alerts.length}):</b></p>` +
+        d.alerts.map(a=>`<div class="alert ${esc(a.severity)}"><b>[${esc(a.severity)}]</b> ${esc(a.title)} <span class="note">${esc(a.ts)} &middot; ${esc(a.kind)}</span></div>`).join("");
+    } else {
+      html += `<p class="note">No alerts ever involved this device. A quiet device is a healthy device.</p>`;
+    }
+    html += `<p><button class="btn-sm ghost" onclick="document.getElementById('devicedetails').innerHTML=''">Close</button></p></div>`;
+    box.innerHTML = html;
+    box.scrollIntoView();
+  } catch(e) {
+    box.innerHTML = '<p class="banner-red">Could not load device details: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+
+// --- threat intel section (rap sheets) ---
+async function loadIntelStatus(){
+  const box = document.getElementById("feedstatus");
+  try {
+    const r = await fetch("/api/intel/status");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    let html = "";
+    if (d.feeds && d.feeds.length) {
+      html += `<table><tr><th>Feed</th><th>Kind</th><th>Entries</th><th>Last updated</th></tr>` +
+        d.feeds.map(f=>`<tr><td>${esc(f.label)}</td><td>${esc(f.kind)}</td><td>${esc(String(f.entries))}</td><td class="note">${esc(f.last_updated)}</td></tr>`).join("") +
+        `</table><p class="note">${esc(String(d.total_entries))} known-bad addresses and sites on file, checked locally.</p>`;
+    } else {
+      html += `<p class="note">No feeds loaded yet. They load automatically in the background, or <button class="btn-sm" onclick="refreshFeeds()">load them now</button>.</p>`;
+    }
+    if (d.abuseipdb) {
+      html += `<p class="note">AbuseIPDB scores are on (API key configured).</p>`;
+    }
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = '<p class="banner-red">Could not load feed status: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+async function refreshFeeds(){
+  const box = document.getElementById("feedstatus");
+  box.innerHTML = '<p class="note">Fetching the latest lists... this can take a few seconds.</p>';
+  try {
+    const r = await fetch("/api/intel/refresh", {method:"POST"});
+    const d = await r.json();
+    if (!d.ok) throw new Error("refresh failed");
+    const parts = Object.entries(d.results || {}).map(([k, v]) =>
+      v.ok ? (k + ": " + v.entries + " entries") : (k + ": failed"));
+    box.innerHTML = `<p class="note">Refresh done: ${esc(parts.join(" | "))}</p>`;
+    loadIntelStatus();
+  } catch(e) {
+    box.innerHTML = '<p class="banner-red">Feed refresh failed: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+function intelMeaning(d){
+  // Plain-English read of an intel result: what it means, what to do.
+  if (d.listed && d.listed.length) {
+    return {meaning: "This one is on a known-bad list, so treat anything involving it as worth a careful look -- not proof of a break-in, but a real flag.",
+            todo: "Check the Cases view for what your network did with it and when. If nothing on your network explains it, disconnect the device and run an antivirus scan."};
+  }
+  return {meaning: "Not on any of the known-bad lists. That does not make it safe -- it just means nobody has flagged it yet.",
+          todo: "If it showed up in an alert, read the alert above for what to do next."};
+}
+async function intelLookup(){
+  const q = document.getElementById("intelq").value.trim();
+  const msg = document.getElementById("intelmsg");
+  const box = document.getElementById("intelresult");
+  msg.textContent = "";
+  if (!q) { msg.textContent = "Type an address or a site first."; return; }
+  const isIp = /^[0-9a-fA-F:.]+$/.test(q) && (q.indexOf(".") >= 0 || q.indexOf(":") >= 0);
+  box.innerHTML = '<p class="note">Checking...</p>';
+  try {
+    const url = isIp ? "/api/intel/ip/" + encodeURIComponent(q)
+                     : "/api/intel/domain/" + encodeURIComponent(q);
+    const r = await fetch(url);
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || ("server returned " + r.status));
+    const copy = intelMeaning(d);
+    let html = `<div class="sugcard"><h3>Here is what we found: ${esc(isIp ? d.ip : d.domain)}</h3>`;
+    if (d.listed && d.listed.length) {
+      html += `<p><span class="badge warn">&#9888;&#65039; On ${d.listed.length} known-bad list${d.listed.length>1?"s":""}</span></p>`;
+      d.listed.forEach(h => {
+        html += `<p><b>${esc(h.feed)}</b><br><span class="note">${esc(h.detail)}${h.matched ? " (matched: " + esc(h.matched) + ")" : ""}<br>Listed since ${esc(h.first_seen || "unknown")} &middot; last confirmed ${esc(h.last_seen || "unknown")}</span></p>`;
+      });
+    } else {
+      html += `<p><span class="badge ok">&#10003; Not on any known-bad list</span></p>`;
+    }
+    if (d.tags && d.tags.length)
+      html += `<p class="note">Seen doing: ${d.tags.map(t=>`<span class="badge warn">${esc(t)}</span>`).join(" ")}</p>`;
+    if (d.reverse_dns)
+      html += `<p class="note">Reverse lookup: ${esc(d.reverse_dns)}</p>`;
+    const ab = [];
+    if (d.abuse_score !== undefined && d.abuse_score !== null)
+      ab.push("abuse score " + esc(String(d.abuse_score)) + "/100");
+    if (d.abuse_country) ab.push(esc(d.abuse_country));
+    if (d.abuse_isp) ab.push(esc(d.abuse_isp));
+    if (d.abuse_asn) ab.push("AS" + esc(String(d.abuse_asn)));
+    if (d.abuse_usage) ab.push(esc(d.abuse_usage));
+    if (d.abuse_reports) ab.push(esc(String(d.abuse_reports)) + " reports");
+    if (d.abuse_domain) ab.push("domain: " + esc(d.abuse_domain));
+    if (ab.length) html += `<p><b>AbuseIPDB:</b> ${ab.join(" &middot; ")}${d.abuse_last_reported ? `<br><span class="note">last reported ${esc(d.abuse_last_reported)}</span>` : ""}</p>`;
+    if (d.first_seen_here || d.first_lookup)
+      html += `<p class="note">On your network: first seen ${esc(d.first_seen_here || d.first_lookup || "never")}${d.last_seen_here || d.last_lookup ? " &middot; last seen " + esc(d.last_seen_here || d.last_lookup) : ""}${d.up_mb_24h !== undefined ? ` &middot; last 24h: &uarr;${esc(String(d.up_mb_24h))} MB &darr;${esc(String(d.down_mb_24h))} MB` : ""}${d.lookups_total !== undefined ? ` &middot; ${esc(String(d.lookups_total))} lookups on file` : ""}</p>`;
+    html += `<p><b>Here is what it means:</b> ${esc(copy.meaning)}</p>`;
+    html += `<p><b>Here is what to do:</b> ${esc(copy.todo)}</p>`;
+    if (d.alerts && d.alerts.length) {
+      html += `<p><b>Alerts involving it (${d.alerts.length}):</b></p>` +
+        d.alerts.map(a=>`<div class="alert ${esc(a.severity)}"><b>[${esc(a.severity)}]</b> ${esc(a.title)} <span class="note">${esc(a.ts)} &middot; ${esc(a.kind)}</span></div>`).join("");
+    }
+    html += `</div>`;
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = '<p class="banner-red">Lookup failed: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
 }
 const DAY_NAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 let QH_CACHE = [];
@@ -1103,6 +1260,7 @@ async function relabelTopo(sel){
 refresh(); setInterval(refresh, 5000);
 loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions(); loadCases(); loadTopology();
 loadAssets(); loadTopTalkers(); setInterval(loadTopTalkers, 30000);
+loadIntelStatus();
 loadScanStatus(); loadHostEvents(); loadSelfcheck();
 </script></body></html>
 """
@@ -1574,6 +1732,297 @@ def api_device_type():
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True, "dtype": dtype or "auto"})
+
+
+# --- threat intel ("rap sheets", phase 3.5) ---------------------------------
+# Per-IP and per-domain intel pages, feed status, and on-demand feed
+# refresh. All input is validated (400 on junk); every dynamic value is
+# esc()-escaped by the JS that renders it.
+
+_MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+
+# Alert kinds -> plain behavior tags for the intel page. host_event only
+# counts as brute-force when its detail names a 4625 (failed logon).
+_BEHAVIOR_TAGS = {
+    "port_scan": "scanning",
+    "beaconing": "botnet",
+    "phishing_domain": "phishing",
+    "malicious_ip": "malware",
+    "defender_detection": "malware",
+    "host_compromise": "botnet",
+}
+
+
+def _ip_mentioned(detail, ip):
+    """True if `ip` appears in detail as a whole address (not as a prefix
+    of a longer address -- the 192.168.1.1 vs 192.168.1.10 class of bug)."""
+    return re.search(r"(?<![0-9.])" + re.escape(ip) + r"(?![0-9.])",
+                     detail or "") is not None
+
+
+def _behavior_tags_for_ip(ip):
+    """Plain behavior tags from alerts that name this IP."""
+    tags = set()
+    try:
+        rows = dbm.query(
+            "SELECT kind, detail FROM alerts WHERE detail LIKE ?",
+            (f"%{ip}%",))
+    except Exception:
+        return []
+    for kind, detail in rows:
+        if not _ip_mentioned(detail, ip):
+            continue
+        tag = _BEHAVIOR_TAGS.get(kind)
+        if kind == "host_event":
+            tag = "brute-force" if "4625" in (detail or "") else None
+        if tag:
+            tags.add(tag)
+    return sorted(tags)
+
+
+def _alerts_mentioning_ip(ip, limit=20):
+    """Recent alerts whose detail names this IP, newest first."""
+    try:
+        rows = dbm.query(
+            "SELECT id, ts, kind, severity, title, detail FROM alerts"
+            " WHERE detail LIKE ? ORDER BY ts DESC LIMIT ?",
+            (f"%{ip}%", limit * 3))
+    except Exception:
+        return []
+    out = []
+    for aid, ts, kind, sev, title, detail in rows:
+        if _ip_mentioned(detail, ip):
+            out.append({"id": aid, "ts": _fmt_ts(ts), "kind": kind,
+                        "severity": sev, "title": title})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _alerts_mentioning_domain(domain, limit=20):
+    """Recent alerts whose detail names this domain, newest first."""
+    try:
+        rows = dbm.query(
+            "SELECT id, ts, kind, severity, title, detail FROM alerts"
+            " WHERE detail LIKE ? ORDER BY ts DESC LIMIT ?",
+            (f"%{domain}%", limit * 3))
+    except Exception:
+        return []
+    out = []
+    for aid, ts, kind, sev, title, detail in rows:
+        if domain.lower() in (detail or "").lower():
+            out.append({"id": aid, "ts": _fmt_ts(ts), "kind": kind,
+                        "severity": sev, "title": title})
+        if len(out) >= limit:
+            break
+    return out
+
+
+@app.route("/api/intel/status")
+def api_intel_status():
+    """Feed health for the dashboard: label, entries, last update."""
+    from . import threatintel as tim
+    try:
+        feeds = dbm.ti_feed_status()
+        total = dbm.ti_entry_count()
+    except Exception:
+        feeds, total = [], 0
+    for f in feeds:
+        f["last_updated"] = (_fmt_ts(f["last_updated"])
+                             if f.get("last_updated") else "never")
+    return jsonify({"feeds": feeds, "total_entries": total,
+                    "abuseipdb": tim.abuseipdb_configured()})
+
+
+@app.route("/api/intel/refresh", methods=["POST"])
+def api_intel_refresh():
+    """Refresh the community feeds on demand. Best-effort per feed."""
+    from . import threatintel as tim
+    try:
+        results = tim.refresh_feeds()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:200]}), 500
+    return jsonify({"ok": True, "results": results})
+
+
+@app.route("/api/intel/ip/<ip>")
+def api_intel_ip(ip):
+    """Per-IP rap sheet: blocklist status/reason, abuse score, behavior
+    tags, country/city, ISP + ASN, associated domains, first/last seen
+    (feed + our network), reverse DNS. Only fields with data are sent."""
+    import ipaddress as _ipm
+    from . import threatintel as tim
+    ip = (ip or "").strip()
+    try:
+        _ipm.ip_address(ip)
+    except ValueError:
+        return jsonify({"ok": False, "error": "not a valid IP"}), 400
+    now = time.time()
+    try:
+        intel = tim.lookup_ip(ip)
+    except Exception:
+        intel = {"listed": [], "abuseipdb": None}
+    listed = [{
+        "feed": h.get("feed", ""), "detail": h.get("detail", ""),
+        "first_seen": _fmt_ts(h["first_seen"]) if h.get("first_seen")
+        else "",
+        "last_seen": _fmt_ts(h["last_seen"]) if h.get("last_seen") else "",
+    } for h in intel.get("listed") or []]
+    try:
+        rdns = tim.reverse_dns(ip)
+    except Exception:
+        rdns = ""
+    try:
+        seen = dbm.query(
+            "SELECT MIN(ts), MAX(ts), COUNT(*) FROM flows"
+            " WHERE src_ip=? OR dst_ip=?", (ip, ip))[0]
+        traf = dbm.query(
+            "SELECT COALESCE(SUM(CASE WHEN src_ip=? THEN bytes END),0),"
+            " COALESCE(SUM(CASE WHEN dst_ip=? THEN bytes END),0)"
+            " FROM flows WHERE ts > ? AND (src_ip=? OR dst_ip=?)",
+            (ip, ip, now - 86400, ip, ip))[0]
+    except Exception:
+        seen, traf = (None, None, 0), (0, 0)
+    out = {
+        "ok": True, "ip": ip,
+        "listed": listed,
+        "tags": _behavior_tags_for_ip(ip),
+        "alerts": _alerts_mentioning_ip(ip),
+    }
+    if rdns:
+        out["reverse_dns"] = rdns
+    if seen and seen[0]:
+        out["first_seen_here"] = _fmt_ts(seen[0])
+        out["last_seen_here"] = _fmt_ts(seen[1]) if seen[1] else ""
+        out["flows_seen"] = seen[2] or 0
+    if (traf[0] or 0) or (traf[1] or 0):
+        out["up_mb_24h"] = round((traf[0] or 0) / 1e6, 2)
+        out["down_mb_24h"] = round((traf[1] or 0) / 1e6, 2)
+    abuse = intel.get("abuseipdb") or {}
+    for key in ("score", "country", "isp", "usage", "asn", "domain",
+                "reports", "last_reported"):
+        if abuse.get(key) not in (None, ""):
+            out["abuse_" + key] = abuse[key]
+    return jsonify(out)
+
+
+@app.route("/api/intel/domain/<domain>")
+def api_intel_domain(domain):
+    """Per-domain rap sheet: feed listings, our lookup history, alerts."""
+    from . import threatintel as tim
+    domain = tim.normalize_domain(domain or "")
+    if not tim.is_plausible_domain(domain):
+        return jsonify({"ok": False, "error": "not a valid domain"}), 400
+    try:
+        hits = tim.lookup_domain(domain)
+    except Exception:
+        hits = []
+    listed = [{
+        "feed": h.get("feed", ""), "detail": h.get("detail", ""),
+        "matched": h.get("matched", ""),
+        "first_seen": _fmt_ts(h["first_seen"]) if h.get("first_seen")
+        else "",
+        "last_seen": _fmt_ts(h["last_seen"]) if h.get("last_seen") else "",
+    } for h in hits]
+    out = {"ok": True, "domain": domain, "listed": listed,
+           "alerts": _alerts_mentioning_domain(domain)}
+    try:
+        row = dbm.query(
+            "SELECT MIN(ts), MAX(ts), COUNT(*) FROM dns_queries"
+            " WHERE name=?", (domain,))[0]
+        if row and row[0]:
+            out["first_lookup"] = _fmt_ts(row[0])
+            out["last_lookup"] = _fmt_ts(row[1]) if row[1] else ""
+            out["lookups_total"] = row[2] or 0
+    except Exception:
+        pass
+    return jsonify(out)
+
+
+@app.route("/api/device/<mac>")
+def api_device(mac):
+    """Per-LAN-device detail page: first/last seen, bytes sent/received,
+    ports contacted, full alert history. (Complements the asset inventory
+    at /api/assets and the map's click-for-details.)"""
+    mac = (mac or "").strip().lower()
+    if not _MAC_RE.match(mac):
+        return jsonify({"ok": False, "error": "not a valid MAC"}), 400
+    now = time.time()
+    try:
+        seen = dbm.query(
+            "SELECT MIN(ts), MAX(ts) FROM arp_observations WHERE mac=?",
+            (mac,))[0]
+        ips = [r[0] for r in dbm.query(
+            "SELECT DISTINCT ip FROM arp_observations WHERE mac=?"
+            " AND ip IS NOT NULL AND ip != ''", (mac,)) if r[0]]
+    except Exception:
+        seen, ips = (None, None), []
+    out = {"ok": True, "mac": mac, "name": "",
+           "first_seen": _fmt_ts(seen[0]) if seen and seen[0] else "",
+           "last_seen": _fmt_ts(seen[1]) if seen and seen[1] else "",
+           "ips": ips, "ports": [], "alerts": []}
+    try:
+        out["name"] = dbm.device_name_map().get(mac, "")
+        asset = next((a for a in dbm.get_assets() if a.get("mac") == mac),
+                     None)
+        if asset:
+            for key in ("hostname", "vendor", "os_guess"):
+                if asset.get(key):
+                    out[key] = asset[key]
+    except Exception:
+        pass
+    if ips:
+        ph = ",".join("?" for _ in ips)
+        try:
+            traf = dbm.query(
+                f"SELECT COALESCE(SUM(CASE WHEN src_ip IN ({ph})"
+                f" THEN bytes END),0),"
+                f" COALESCE(SUM(CASE WHEN dst_ip IN ({ph})"
+                f" THEN bytes END),0)"
+                f" FROM flows WHERE ts > ? AND (src_ip IN ({ph})"
+                f" OR dst_ip IN ({ph}))",
+                (*ips, *ips, now - 86400, *ips, *ips))[0]
+            out["up_mb_24h"] = round((traf[0] or 0) / 1e6, 2)
+            out["down_mb_24h"] = round((traf[1] or 0) / 1e6, 2)
+            rows = dbm.query(
+                f"SELECT dst_port, proto, COUNT(*),"
+                f" COALESCE(SUM(bytes),0) FROM flows"
+                f" WHERE ts > ? AND direction='outbound'"
+                f" AND src_ip IN ({ph})"
+                f" GROUP BY dst_port, proto ORDER BY SUM(bytes) DESC"
+                f" LIMIT 15",
+                (now - 86400, *ips))
+            out["ports"] = [{"port": p, "proto": pr or "",
+                             "flows": c or 0,
+                             "mb": round((b or 0) / 1e6, 2)}
+                            for p, pr, c, b in rows]
+        except Exception:
+            pass
+        # Full alert history: alerts naming the MAC or any of its IPs.
+        try:
+            like_terms = [mac] + ips
+            conds = " OR ".join(["detail LIKE ?"] * len(like_terms))
+            rows = dbm.query(
+                f"SELECT id, ts, kind, severity, title, detail FROM alerts"
+                f" WHERE {conds} ORDER BY ts DESC LIMIT 150",
+                tuple(f"%{t}%" for t in like_terms))
+            seen_ids = set()
+            for aid, ts, kind, sev, title, detail in rows:
+                if aid in seen_ids:
+                    continue
+                dl = (detail or "").lower()
+                if mac not in dl and not any(
+                        _ip_mentioned(detail, ip) for ip in ips):
+                    continue
+                seen_ids.add(aid)
+                out["alerts"].append({"id": aid, "ts": _fmt_ts(ts),
+                                     "kind": kind, "severity": sev,
+                                     "title": title})
+                if len(out["alerts"]) >= 50:
+                    break
+        except Exception:
+            pass
+    return jsonify(out)
 
 
 # --- quiet hours ------------------------------------------------------------
