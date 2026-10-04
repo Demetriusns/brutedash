@@ -655,7 +655,15 @@ already hinted at in Phase 4 — Phase 5 is where it becomes the product.
 - [x] Env prefix consistency — BRUTEDASH_* canonical, NETMON_* deprecated with warning. (B3)
 - [x] local_health() under the DB lock — savepoint/rollback probe, no prod tables. (B4)
 - [x] debug=True removed; deps pinned; config.yaml chmod 600; /brief input validation; CR/LF stripped from email strings. (M1/M3/L6/L7/L3)
-- [ ] AI-question (/ask) rate limits.
+- [x] AI-question (/ask) rate limits. DONE 2026-10-04 (batch 18):
+  per-IP sliding windows (`ai.ask_per_min` 10 / `ai.ask_per_hour` 100)
+  guard the paid LLM calls on `/api/ask` + `/api/triage`; breaches
+  return 429 JSON + Retry-After, dashboard JS shows a plain-English
+  breather note. Free fallback paths (no API key) are never limited;
+  check+record is atomic under one lock; stale IP keys pruned so the
+  usage dict cannot grow unbounded (council primary-seat review: fixed
+  the High + Medium findings, refuted the proxy/decorator-order ones
+  against source).
 - [x] Pipeline-liveness watermarks. DONE 2026-10-04 (batch 14, repo-learning item 4): per-stage watermarks + stale-stage self-alerts, sensor-health "Pipeline health" view.
 - [x] Rolling database retention + bounded dashboard stats. DONE 2026-10-04
   (batch 16): retention.py prunes in bounded batches with per-type windows;
