@@ -26,6 +26,42 @@ analyst" review that night. Everything else was already on the roadmap.
   of council, ships only on quorum: 2-of-3 agreement, or 1 Critical the
   head endorses. One focused batch per session, under Add → Test →
   Release.
+- **Review sheet:** `docs/CODE-REVIEW-CHECKLIST.md` is the Dev-QA loop's
+  review sheet -- blocker/suggestion/nit tiers adapted from the
+  review-checklists skill and tailored to brutedash (SQL parameterization,
+  esc() on UI values, prompt-injection sinks, approval-only response,
+  quiet-is-a-feature, scratch-DB-only testing, node --check served JS,
+  voice rule). Every council review works from it.
+- **Release gate** (repo-learning items 2, 3, 9, 10 -- DONE 2026-10-03):
+  `scripts/release-gate.sh` is the one entry point that enforces quality
+  before anything ships, installed as the git pre-push hook
+  (`.git/hooks/pre-push`, via `scripts/install-hooks.sh`; manual run:
+  `./scripts/release-gate.sh`). In order: (a) full unittest suite on venv
+  python AND plain python3, (b) py_compile on every changed .py file
+  (staged + unstaged + untracked), (c) gitleaks secret scan -- MISSING
+  BINARY FAILS CLOSED (loud block with install instructions, never a
+  silent skip), (d) Semgrep `.semgrep/detection-audit.yml` rules when the
+  binary exists (not installed locally yet -- the gate SKIPs with a note;
+  `scripts/audit_llm_sinks.py` covers local enforcement meanwhile),
+  (e) `scripts/audit_llm_sinks.py` -- the pre-commit audit for
+  LLM-generated detection rules + brief-prompt templates: scans the diff
+  for prompt-injection sinks (untrusted text reaching the model as
+  instructions, missing output-contract validation) plus hard blockers
+  (f-string/concat SQL, shell=True, eval/exec, hardcoded secrets, binary
+  blobs wearing .py). Runs on the staged diff by default; the pre-push
+  hook feeds it the pushed commits via $RELEASE_GATE_DIFF. Heuristic by
+  design (medium confidence, flagged for human verify); known limits are
+  documented in its docstring (no dataflow -- indirect construction is a
+  reviewer check). `.gitleaks.toml` carries ONE narrow allowlist: the
+  exact fake key fixture in `tests/test_release_gate.py`. Measured:
+  ~14s on a clean tree (target <2 min); verified FAIL on a deliberately
+  dirtied scratch copy (B-SQL, B-SHELL, B-SYSINJ, B-HARDKEY + a gitleaks
+  finding), scratch destroyed, never committed. Council security +
+  robustness reviewed the gate scripts before commit: 3 findings applied
+  (binary .py = blocker, interpolated-constant definitions get
+  S-CONSTANT, py_compile size guard), 6 refuted against source
+  (intent-to-add, quoted-path, secret-concat, hook arg injection,
+  missing-gitleaks-must-warn, dataflow-engine).
 - **The council is general-purpose**, not Orion-only: the same review
   pattern serves every project. External heavyweight models (DeepSeek V4,
   Kimi K2, Qwen3.5-max, GLM-5.2) plug into the council once their API

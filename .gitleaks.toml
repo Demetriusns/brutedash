@@ -1,0 +1,17 @@
+# .gitleaks.toml -- brutedash gitleaks config (repo-learning item 9).
+#
+# Extends the default rule set. The release gate (scripts/release-gate.sh)
+# runs `gitleaks detect` with this config; a missing binary fails the gate
+# closed rather than skipping the scan.
+#
+# Allowlist policy: allowlists must be NARROW -- an exact fake value used
+# as a test fixture, never a broad pattern. Real keys always fail.
+
+title = "brutedash gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake key used ONLY as a fixture in tests/test_release_gate.py to exercise the release gate's own B-HARDKEY rule. Obviously sequential, never a real credential."
+regexes = ['''sk-proj-abcdef1234567890''']

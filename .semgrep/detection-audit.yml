@@ -1,0 +1,152 @@
+# .semgrep/detection-audit.yml -- Semgrep rules for brutedash (Project Orion).
+#
+# Repo-learning item 10: pattern-matching-as-code for auditing the detection
+# scripts, feeding the ai-generated-code-auditor pattern (item 2, enforced
+# locally by scripts/audit_llm_sinks.py).
+#
+# METHODOLOGY ONLY: every rule below was written for this repo from scratch.
+# Semgrep itself is LGPL -- we use its pattern language, never its rule code.
+#
+# How to run (semgrep is NOT installed on this machine yet -- the release
+# gate skips this step with a note until it is):
+#   pip install semgrep            # or: brew install semgrep
+#   semgrep --config .semgrep/detection-audit.yml --error .
+# Severity ERROR findings fail the gate (--error); WARNING findings are
+# heuristic and need a human verify (same stance as the ai-code-audit
+# checklist: prompt-injection detection stays heuristic).
+rules:
+
+  # ---- hard blockers ----------------------------------------------------
+
+  - id: brutedash-fstring-sql
+    languages: [python]
+    severity: ERROR
+    message: >-
+      f-string interpolation of a non-constant variable into a SQL query
+      call. Use a parameterized ? placeholder instead. (ALL_CAPS module
+      constants are allowed and not flagged.)
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query(f"...", ...)
+          - pattern: $DB.execute(f"...", ...)
+          - pattern: $DB.executemany(f"...", ...)
+      - metavariable-pattern:
+          metavariable: $DB
+          patterns:
+            - pattern-regex: ^(dbm|cursor|conn|self\.conn|self\.db)$
+      # only flag when the interpolation is a real variable, not a
+      # module-level constant like _ALERT_COLS
+      - pattern-regex: (?s)\{(?![A-Z_][A-Z0-9_]*\})[a-z]
+
+  - id: brutedash-concat-sql
+    languages: [python]
+    severity: ERROR
+    message: >-
+      String concatenation / %-formatting of an identifier into a SQL
+      query call. Use a parameterized ? placeholder instead.
+    patterns:
+      - pattern-either:
+          - pattern: $DB.$Q("..." + $X, ...)
+          - pattern: $DB.$Q("..." % $X, ...)
+      - metavariable-regex:
+          metavariable: $Q
+          regex: ^(query|execute|executemany)$
+      - metavariable-regex:
+          metavariable: $X
+          regex: ^[a-z][a-zA-Z0-9_]*$
+
+  - id: brutedash-shell-true
+    languages: [python]
+    severity: ERROR
+    message: >-
+      subprocess with shell=True. Pass an argv list instead
+      (see netmon/amass.py build_argv).
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$F(..., shell=True, ...)
+      - metavariable-regex:
+          metavariable: $F
+          regex: ^(Popen|call|run|check_output|check_call)$
+
+  - id: brutedash-os-system
+    languages: [python]
+    severity: ERROR
+    message: os.system() -- use subprocess with an argv list instead.
+    pattern: os.system(...)
+
+  - id: brutedash-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: eval()/exec() -- no dynamic code execution on alert/network data.
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+
+  # ---- heuristic warnings (human verify) --------------------------------
+
+  - id: brutedash-dashboard-unescaped-concat
+    languages: [python]
+    severity: WARNING
+    message: >-
+      String concatenation into dashboard HTML without a visible
+      _html.escape()/esc() call on the dynamic value. Verify the value is
+      escaped -- unescaped device names/hostnames are an XSS sink.
+    paths:
+      include:
+        - netmon/dashboard.py
+    patterns:
+      - pattern: $A + $X + $B
+      - pattern-not: $A + _html.escape(...) + $B
+      - pattern-not: $A + esc(...) + $B
+      - metavariable-regex:
+          metavariable: $A
+          regex: (?s)^".*"$|(?s)^'.*'$
+      - metavariable-regex:
+          metavariable: $X
+          regex: ^[a-zA-Z_][a-zA-Z0-9_.()]*$
+
+  - id: brutedash-dashboard-fstring-html
+    languages: [python]
+    severity: WARNING
+    message: >-
+      f-string interpolation into dashboard HTML without a visible
+      _html.escape()/esc() call. Verify escaping -- this rule is
+      heuristic, JS-template f-strings are the usual false positive.
+    paths:
+      include:
+        - netmon/dashboard.py
+    patterns:
+      - pattern-regex: (?s)f["'][^"']*\{[^}]+\}[^"']*["']
+      - pattern-not-regex: (?s)_html\.escape|esc\(
+
+  - id: brutedash-prompt-format-untrusted
+    languages: [python]
+    severity: WARNING
+    message: >-
+      .format() on a prompt template with an untrusted-looking kwarg
+      (alert/context/evidence/...). Confirm an output-contract/schema
+      validator covers this sink (see ai_assist._validate_verdict) and
+      that untrusted content only reaches the model as delimited
+      user-role content, never as instructions.
+    patterns:
+      - pattern: $PROMPT.format(..., $KW=$V, ...)
+      - metavariable-regex:
+          metavariable: $PROMPT
+          regex: (?i)PROMPT$
+      - metavariable-regex:
+          metavariable: $KW
+          regex: >-
+            ^(?i)(alert_block|recent_block|context|evidence|report|question|alert|title|detail|meaning|brief|hostname|domain|ip|alert_text|summary)$
+
+  - id: brutedash-hardcoded-secret
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Secret-looking literal assigned in code. Keys live in environment
+      variables only, never in code. (gitleaks is the primary enforcer;
+      this rule is the backup.)
+    patterns:
+      - pattern-regex: >-
+          (?i)\b(api[_-]?key|secret|passwd|password|token)\b\s*=\s*["'][^"'\s]{8,}["']
+      - pattern-not-regex: environ|getenv
