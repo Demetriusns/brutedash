@@ -57,7 +57,11 @@ def _client():
         if not api_key:
             return None
         from openai import OpenAI  # optional dependency
-        return OpenAI(api_key=api_key)
+        # Council review: no timeout here meant a hung API call wedged the
+        # dashboard worker thread (the SDK default is ~10 minutes); the
+        # rate limiter allows up to 10 concurrent calls. explainer.py
+        # already uses timeout=30 -- same guard here.
+        return OpenAI(api_key=api_key, timeout=30)
     except Exception:
         return None
 

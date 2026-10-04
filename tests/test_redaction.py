@@ -52,6 +52,36 @@ class TestScrub(unittest.TestCase):
         self.assertIn("port: 8080", out)
         self.assertIn("ok=true", out)
 
+    # Council review: _scrub used to miss these real secret shapes.
+
+    def test_quoted_json_password(self):
+        out = _scrub('{"password": "VALUE9"}')
+        self.assertNotIn("VALUE9", out)
+
+    def test_env_pass_name(self):
+        out = _scrub("NETMON_SMTP_PASS=VALUE9")
+        self.assertNotIn("VALUE9", out)
+
+    def test_bare_pass_colon(self):
+        out = _scrub("pass: VALUE9")
+        self.assertNotIn("VALUE9", out)
+
+    def test_url_userinfo(self):
+        out = _scrub("https://user:VALUE9@host/x")
+        self.assertNotIn("VALUE9", out)
+        self.assertIn("https://user:***@host/x", out)
+
+    def test_authorization_header(self):
+        out = _scrub("Authorization: Basic VALUE9")
+        self.assertNotIn("VALUE9", out)
+        out = _scrub("Authorization: Bearer tok123")
+        self.assertNotIn("tok123", out)
+
+    def test_url_with_port_untouched(self):
+        # No userinfo: the port must survive (no over-redaction).
+        text = "http://192.168.1.1:8080/status"
+        self.assertEqual(_scrub(text), text)
+
 
 if __name__ == "__main__":
     unittest.main()

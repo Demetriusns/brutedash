@@ -489,6 +489,20 @@ class ComplianceTests(_DbTest):
         text = repm.compliance_csv(data)
         self.assertIn("# incidents", text)
 
+    def test_csv_neutralizes_formula_injection(self):
+        # Council review: alert titles embed LAN-observed DNS names, so a
+        # hostile hostname must not become a live spreadsheet formula.
+        now = time.time()
+        self._incident("=cmd|'/c calc'!A0", "High", "open", now - 60)
+        data = repm.compliance_report_data(period="weekly", now=now)
+        text = repm.compliance_csv(data)
+        rows = list(csv.reader(io.StringIO(text)))
+        title_cells = [c for r in rows for c in r if "calc" in c]
+        self.assertTrue(title_cells, "seeded title missing from CSV")
+        for cell in title_cells:
+            self.assertTrue(cell.startswith("'="),
+                            f"formula not neutralized: {cell!r}")
+
     def test_monthly_window(self):
         now = time.time()
         self._alert("High", now - 10 * 24 * 3600, title="old one")

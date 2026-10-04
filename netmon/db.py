@@ -285,12 +285,14 @@ CREATE TABLE IF NOT EXISTS host_events(
 CREATE INDEX IF NOT EXISTS idx_host_events_ts ON host_events(ts);
 
 -- Ingest progress: per watched file, how far we've read (mtime for XML
--- exports which are rewritten wholesale; byte offset for append logs).
+-- exports which are rewritten wholesale; byte offset for append logs;
+-- inode so a replaced-under-the-same-name log is re-read from the top).
 CREATE TABLE IF NOT EXISTS ingest_state(
     path TEXT PRIMARY KEY,
     mtime REAL,
     offset INTEGER,
-    last_run_ts REAL
+    last_run_ts REAL,
+    inode INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS meta(
@@ -452,6 +454,14 @@ CREATE TABLE IF NOT EXISTS score_snapshots(
 def _connect(path=None):
     path = path or DB_PATH
     conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
+    # Council review: the DB holds DNS query history, flow records, and
+    # device names (household browsing) -- not world-readable. Fix up both
+    # fresh files and pre-existing ones whose perms predate this guard.
+    try:
+        if os.stat(path).st_mode & 0o077:
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.executescript(_SCHEMA)
     # Migrate older databases that lack the plain-English alert columns.
@@ -474,6 +484,16 @@ def _connect(path=None):
         "PRAGMA table_info(dismissal_lessons)")}
     if "sev" not in lesson_cols:
         conn.execute("ALTER TABLE dismissal_lessons ADD COLUMN sev TEXT")
+    # Council review: ingest_state gains an `inode` column so a .log file
+    # replaced wholesale under the same name is re-read from the top
+    # instead of silently skipping its head at a stale byte offset.
+    try:
+        istate_cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(ingest_state)")}
+        if "inode" not in istate_cols:
+            conn.execute("ALTER TABLE ingest_state ADD COLUMN inode INTEGER")
+    except Exception:
+        pass  # ingest progress is bookkeeping; never break startup over it
     # Phase 3.5: MITRE ATT&CK tags on alerts. Backfill existing rows from
     # the static kind->technique map so old alerts read the same language.
     for col in ("mitre_id", "mitre_name", "mitre_tactic"):
@@ -2120,12 +2140,18 @@ def recent_alert_kind(kind, key, within_s):
     """True if an alert of this kind mentioning `key` fired recently
     (cooldown so we don't spam the alerts table)."""
     import time
+    # Council review: escape LIKE wildcards in `key` (MAC-derived or
+    # domain keys can contain % or _) so they can't over-suppress
+    # unrelated alerts' cooldowns. Backslash is the ESCAPE character.
+    like_key = (key.replace("\\", "\\\\")
+                   .replace("%", "\\%")
+                   .replace("_", "\\_"))
     with _lock:
         conn = _db()
         row = conn.execute(
-            "SELECT 1 FROM alerts WHERE kind=? AND detail LIKE ?"
+            "SELECT 1 FROM alerts WHERE kind=? AND detail LIKE ? ESCAPE '\\'"
             " AND ts > ? LIMIT 1",
-            (kind, f"%{key}%", time.time() - within_s),
+            (kind, f"%{like_key}%", time.time() - within_s),
         ).fetchone()
         return row is not None
 
@@ -2818,24 +2844,45 @@ def mark_host_event_matched(event_id, alert_id):
 def ingest_state_get(path):
     with _lock:
         conn = _db()
-        row = conn.execute(
-            "SELECT mtime, offset, last_run_ts FROM ingest_state"
-            " WHERE path=?", (path,)).fetchone()
+        try:
+            row = conn.execute(
+                "SELECT mtime, offset, last_run_ts, inode FROM ingest_state"
+                " WHERE path=?", (path,)).fetchone()
+        except Exception:
+            # Pre-migration database: the inode column may not exist yet.
+            row = conn.execute(
+                "SELECT mtime, offset, last_run_ts FROM ingest_state"
+                " WHERE path=?", (path,)).fetchone()
+            if not row:
+                return None
+            return {"mtime": row[0], "offset": row[1],
+                    "last_run_ts": row[2], "inode": None}
     if not row:
         return None
-    return {"mtime": row[0], "offset": row[1], "last_run_ts": row[2]}
+    return {"mtime": row[0], "offset": row[1], "last_run_ts": row[2],
+            "inode": row[3]}
 
 
-def ingest_state_set(path, mtime, offset):
+def ingest_state_set(path, mtime, offset, inode=None):
     import time as _t
     with _lock:
         conn = _db()
-        conn.execute(
-            "INSERT INTO ingest_state (path, mtime, offset, last_run_ts)"
-            " VALUES (?,?,?,?)"
-            " ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime,"
-            " offset=excluded.offset, last_run_ts=excluded.last_run_ts",
-            (path, mtime, offset, _t.time()))
+        try:
+            conn.execute(
+                "INSERT INTO ingest_state (path, mtime, offset, last_run_ts,"
+                " inode) VALUES (?,?,?,?,?)"
+                " ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime,"
+                " offset=excluded.offset, last_run_ts=excluded.last_run_ts,"
+                " inode=excluded.inode",
+                (path, mtime, offset, _t.time(), inode))
+        except Exception:
+            # Pre-migration database: fall back to the old column set.
+            conn.execute(
+                "INSERT INTO ingest_state (path, mtime, offset, last_run_ts)"
+                " VALUES (?,?,?,?)"
+                " ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime,"
+                " offset=excluded.offset, last_run_ts=excluded.last_run_ts",
+                (path, mtime, offset, _t.time()))
         conn.commit()
 
 

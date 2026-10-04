@@ -753,6 +753,10 @@ def run_ingest():
             summary["files"] += 1
             state = dbm.ingest_state_get(path) or {}
             mtime = os.path.getmtime(path)
+            try:
+                ino = os.stat(path).st_ino
+            except OSError:
+                ino = None
             ext = os.path.splitext(path)[1].lower()
             if ext == ".xml":
                 if state.get("mtime") == mtime:
@@ -764,12 +768,20 @@ def run_ingest():
                 offset = state.get("offset") or 0
                 if os.path.getsize(path) < offset:
                     offset = 0  # rotated/truncated: start over
+                elif (ino is not None and state.get("inode") is not None
+                        and state["inode"] != ino):
+                    # Council review: the file was replaced wholesale under
+                    # the same name (new export/log copy) with a size >= the
+                    # old one. The stale offset would silently skip the new
+                    # file's head mid-line, so start over. Plain appends keep
+                    # the same inode, so the fast path is unaffected.
+                    offset = 0
                 events, new_offset, skipped = parse_pfirewall(path, offset)
             summary["skipped"] += skipped
             if events:
                 dbm.insert_host_events(events)
                 summary["events"] += len(events)
-            dbm.ingest_state_set(path, mtime, new_offset)
+            dbm.ingest_state_set(path, mtime, new_offset, ino)
         try:
             summary["alerts"] = run_detection_rules()
         except Exception:

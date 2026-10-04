@@ -63,6 +63,20 @@ class CatalogCoverageTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)),
                          "duplicate catalog ids")
 
+    def test_title_for_returns_plain_language(self):
+        # Council review: title_for is the single source of truth for
+        # user-facing rule labels -- never a raw snake_case id.
+        self.assertEqual(cat.title_for("arp_spoof"), "ARP spoofing")
+        self.assertEqual(cat.title_for("new_device"), "New device joined")
+        for r in cat.RULES:
+            self.assertNotIn("_", cat.title_for(r["id"]),
+                             f"raw id leaked for {r['id']}")
+
+    def test_title_for_unknown_kind_degrades(self):
+        self.assertEqual(cat.title_for("some_future_kind"),
+                         "some future kind")
+        self.assertEqual(cat.title_for(""), "unknown")
+
 
 class MitreConsistencyTests(unittest.TestCase):
     def test_every_catalog_entry_matches_mitre_py(self):

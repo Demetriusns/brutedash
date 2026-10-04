@@ -18,6 +18,19 @@ from netmon import db as dbm
 from netmon import learn as learnm
 
 
+class TestWhyTextPlainLanguage(unittest.TestCase):
+    def test_why_text_uses_catalog_title_not_kind_id(self):
+        # Council review: suggestion copy must not show raw kind ids.
+        text = learnm.why_text("arp_spoof", "aa:bb:cc:dd:ee:ff",
+                               True, 7, "High")
+        self.assertNotIn("arp_spoof", text)
+        self.assertIn("ARP spoofing", text)
+
+    def test_why_text_falls_back_gracefully(self):
+        text = learnm.why_text("some_future_kind", "x", False, 3, "Low")
+        self.assertIn("some future kind", text)
+
+
 class TestExtractPattern(unittest.TestCase):
     def test_port_kind_prefers_external_ip(self):
         p, broad = learnm.extract_pattern({

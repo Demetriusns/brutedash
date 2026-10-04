@@ -71,6 +71,20 @@ class DeviceNamingTests(ScratchDbTestCase):
         self.assertTrue(dbm.recent_alert_kind(
             "behavior_deviation", "aa:bb:cc:dd:ee:50", 86400))
 
+    def test_cooldown_key_escapes_like_wildcards(self):
+        # Council review: a key containing % or _ must not over-suppress
+        # unrelated alerts' cooldowns via LIKE wildcards.
+        dbm.add_alert("dns_lookup_burst", "Medium", "t",
+                      "lots of lookups for example.com (host-a)")
+        self.assertTrue(dbm.recent_alert_kind(
+            "dns_lookup_burst", "example.com", 86400))
+        # "%" as a key would previously match every detail; now it must
+        # match nothing (no literal % in any detail).
+        self.assertFalse(dbm.recent_alert_kind(
+            "dns_lookup_burst", "%", 86400))
+        self.assertFalse(dbm.recent_alert_kind(
+            "dns_lookup_burst", "_", 86400))
+
     def test_case_title_uses_friendly_name(self):
         dbm.insert_arp_observations([(time.time(), "192.168.1.50",
                                       "aa:bb:cc:dd:ee:50")])

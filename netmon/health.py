@@ -161,12 +161,39 @@ class Heartbeat(threading.Thread):
 
 # ------------------------------------------------------ diagnostics bundle
 
+# Council review: _scrub missed real secret shapes (quoted JSON values like
+# {"password": "x"}, bare "pass"/"passwd"/"pwd" env names like
+# NETMON_SMTP_PASS=..., Authorization headers, URL userinfo). Three passes:
+# 1. keyword=value (optional quotes around the separator), 2. Authorization
+# header, 3. userinfo in URLs. Over-redaction beats a leak in a bundle the
+# owner may email to support.
+_SECRET_KV_RE = None  # compiled lazily to keep import cheap
+_SECRET_AUTH_RE = None
+_SECRET_URL_RE = None
+
+
+def _secret_res():
+    global _SECRET_KV_RE, _SECRET_AUTH_RE, _SECRET_URL_RE
+    if _SECRET_KV_RE is None:
+        import re
+        _SECRET_KV_RE = re.compile(
+            r"(?i)(key|token|password|passwd|pwd|"
+            r"pass|secret|heartbeat_url|webhook_url)"
+            r"[\"']?\s*[:=]\s*[\"']?\S+")
+        _SECRET_AUTH_RE = re.compile(
+            r"(?i)(authorization\s*:\s*(?:basic|bearer)\s+)\S+")
+        _SECRET_URL_RE = re.compile(
+            r"(?i)(://[^/\s:;?#]+:)[^@/\s]+@")
+    return _SECRET_KV_RE, _SECRET_AUTH_RE, _SECRET_URL_RE
+
+
 def _scrub(text):
     """Redact anything that looks like a secret value."""
-    import re
-    return re.sub(r"(?i)(key|token|password|secret|heartbeat_url|webhook_url)"
-                  r"\s*[:=]\s*\S+",
-                  r"\1=***", text)
+    kv_re, auth_re, url_re = _secret_res()
+    text = kv_re.sub(r"\1=***", text)
+    text = auth_re.sub(r"\1***", text)
+    text = url_re.sub(r"\1***@", text)
+    return text
 
 
 def _git_version():
@@ -189,6 +216,12 @@ def write_diagnostics_bundle(reason="manual"):
     dest = cfgm.config_dir() / "diagnostics" / f"{stamp}-{safe_reason}"
     try:
         dest.mkdir(parents=True, exist_ok=True)
+        # Council review: the bundle holds a (scrubbed) config, log tail,
+        # and thread stacks -- not world-readable.
+        try:
+            os.chmod(dest, 0o700)
+        except OSError:
+            pass
     except OSError:
         return None
     log = logging.getLogger(LOG_NAME)

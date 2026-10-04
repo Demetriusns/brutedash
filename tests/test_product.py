@@ -552,10 +552,14 @@ class RoleTests(_DbTest):
         except the login itself. Endpoint-level (not rule-level): GET and
         POST on the same path are different view functions. This is the
         audit list: if a future batch adds a mutating route without
-        @_owner_required, the tests below fail."""
+        @_owner_required, the tests below fail.
+
+        /logout is exempt: it destroys only the caller's own session (no
+        monitor state), so viewers must be able to reach it too -- it is
+        covered by the dedicated logout tests below instead."""
         out = []
         for rule in dashm.app.url_map.iter_rules():
-            if rule.rule == "/login":
+            if rule.rule in ("/login", "/logout"):
                 continue
             mut = [m for m in (rule.methods or ())
                    if m in ("POST", "PUT", "DELETE")]
@@ -677,6 +681,73 @@ class RoleTests(_DbTest):
         r = owner.post("/api/retention/prune")
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.get_json()["ok"])
+
+    # -- council review batch --
+
+    def test_logout_requires_post(self):
+        # /logout clears the session: a state-changing GET would let a
+        # cross-site navigation log the owner out.
+        c = self._client()
+        self._login(c, OWNER_PW)
+        self.assertEqual(self._role_of(c), "owner")
+        r = c.get("/logout")
+        self.assertEqual(r.status_code, 405)
+        self.assertEqual(self._role_of(c), "owner")
+
+    def test_logout_post_clears_session(self):
+        c = self._client()
+        self._login(c, OWNER_PW)
+        r = c.post("/logout")
+        self.assertEqual(r.status_code, 302)
+        self.assertIsNone(self._role_of(c))
+
+    def test_viewer_can_log_out(self):
+        # /logout is exempt from @_owner_required: it destroys only the
+        # caller's own session, so viewers must reach it too.
+        c = self._client()
+        self._login(c, VIEWER_PW)
+        self.assertEqual(self._role_of(c), "viewer")
+        r = c.post("/logout")
+        self.assertEqual(r.status_code, 302)
+        self.assertIsNone(self._role_of(c))
+
+    def test_login_attempts_sweep_evicts_stale_ips(self):
+        # Council review: one-shot IPs that fail once must not accumulate
+        # forever in _LOGIN_ATTEMPTS.
+        old = dashm._LOGIN_SWEEP_AT
+        dashm._LOGIN_SWEEP_AT = 0.0
+        try:
+            stale = time.time() - dashm._LOGIN_BLOCK - 10
+            with dashm._LOGIN_LOCK:
+                dashm._LOGIN_ATTEMPTS["203.0.113.9"] = [stale]
+            dashm._login_allowed("198.51.100.7")
+            with dashm._LOGIN_LOCK:
+                self.assertNotIn("203.0.113.9", dashm._LOGIN_ATTEMPTS)
+        finally:
+            dashm._LOGIN_SWEEP_AT = old
+            dashm._LOGIN_ATTEMPTS.clear()
+
+    def test_index_uses_plain_kind_labels(self):
+        # Council review: no raw snake_case kind ids in user-facing copy.
+        c = self._client()
+        self._login(c, OWNER_PW)
+        r = c.get("/")
+        self.assertEqual(r.status_code, 200)
+        html = r.data.decode("utf-8")
+        self.assertIn("const KIND_TITLES =", html)
+        self.assertIn('<option value="arp_spoof">ARP spoofing</option>',
+                      html)
+        self.assertNotIn(">arp_spoof<", html)
+        self.assertNotIn(">new_device<", html)
+        self.assertIn("Mark seen", html)
+        self.assertNotIn(">Ack<", html)
+        self.assertIn("You agreed", html)
+
+    def test_ai_unavailable_message_is_plain(self):
+        self.assertIn("to turn them on",
+                      dashm._AI_UNAVAILABLE["message"])
+        self.assertNotIn("config.yaml to enable",
+                         dashm._AI_UNAVAILABLE["message"])
 
 
 if __name__ == "__main__":

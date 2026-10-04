@@ -151,6 +151,7 @@ th{background:#161b22}
 .bar{background:#30363d;border-radius:3px;height:1em;margin:.2em 0}
 .bar>div{background:#58a6ff;height:1em;border-radius:3px}
 a{color:#58a6ff} button{background:#238636;color:#fff;border:0;padding:.5em 1.2em;cursor:pointer;font-family:monospace;border-radius:4px}
+.linkbtn{background:none;border:none;padding:0;color:#58a6ff;cursor:pointer;font-family:monospace;font-size:1em;text-decoration:underline}
 .btn-sm{background:#238636;color:#fff;border:0;padding:.25em .8em;cursor:pointer;font-family:monospace;border-radius:4px;font-size:.85em;margin:.25em .2em 0 0}
 .btn-sm.ghost{background:#21262d;border:1px solid #30363d}
 .badge{display:inline-block;padding:.15em .6em;border-radius:999px;font-size:.8em;white-space:nowrap}
@@ -335,7 +336,7 @@ _OWNER_ONLY_HTML = """<html><head><title>netmon -- owner only</title>
 <style>""" + STYLE + """</style></head><body>
 <h1>Owner sign-in required</h1>
 <p>{{ message }}</p>
-<p><a href="/">Back to the dashboard</a> | <a href="/logout">Sign in as owner</a></p>
+<p><a href="/">Back to the dashboard</a> | <form action="/logout" method="post" style="display:inline"><button type="submit" class="linkbtn">Sign in as owner</button></form></p>
 </body></html>"""
 
 
@@ -381,11 +382,28 @@ _LOGIN_LOCK = threading.Lock()
 _LOGIN_MAX = 5
 _LOGIN_WINDOW = 60
 _LOGIN_BLOCK = 300
+_LOGIN_SWEEP_AT = 0.0
+
+
+def _login_sweep(now):
+    """Evict IPs whose failures all aged out (council review): without a
+    global sweep, one-shot IPs that fail once and never retry accumulate
+    forever on a LAN-wide bind. Throttled to once a minute; callers hold
+    _LOGIN_LOCK."""
+    global _LOGIN_SWEEP_AT
+    if now - _LOGIN_SWEEP_AT < 60:
+        return
+    _LOGIN_SWEEP_AT = now
+    dead = [ip for ip, stamps in _LOGIN_ATTEMPTS.items()
+            if not any(now - t < _LOGIN_BLOCK for t in stamps)]
+    for ip in dead:
+        _LOGIN_ATTEMPTS.pop(ip, None)
 
 
 def _login_allowed(ip):
     now = time.time()
     with _LOGIN_LOCK:
+        _login_sweep(now)
         stamps = [t for t in _LOGIN_ATTEMPTS.get(ip, [])
                   if now - t < _LOGIN_BLOCK]
         if not stamps:
@@ -504,8 +522,11 @@ def _ai_rate_limited(fn):
     return wrapper
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
+    # Council review: logout clears the session, so it is a state-changing
+    # action and must not be a GET (cross-site top-level navigation would
+    # log the owner out). Every other mutating route already requires POST.
     session.clear()
     return redirect("/login" if _auth_enabled() else "/")
 
@@ -715,16 +736,7 @@ for <input id="maint_hours" type="number" min="1" max="72" value="4" style="widt
 <div id="allowlist"><p class="note">Loading...</p></div>
 <p class="note">Add:
 <select id="al_kind">
-<option value="new_device">new_device</option>
-<option value="unusual_port">unusual_port</option>
-<option value="traffic_spike">traffic_spike</option>
-<option value="beaconing">beaconing</option>
-<option value="new_external_ip">new_external_ip</option>
-<option value="volume_anomaly">volume_anomaly</option>
-<option value="dns_lookup_burst">dns_lookup_burst</option>
-<option value="dns_tunneling">dns_tunneling</option>
-<option value="new_busy_domain">new_busy_domain</option>
-<option value="arp_spoof">arp_spoof</option>
+%%ALLOW_KIND_OPTIONS%%
 </select>
 <input id="al_pattern" placeholder="e.g. aa:bb:cc:dd:ee:ff or 8080" size="28">
 <button class="btn-sm owneronly" onclick="addAllow()">Add</button></p>
@@ -773,10 +785,19 @@ the monitor flags those for you automatically.</p>
 </div></details>
 </section>
 
-<p><a href="/pcap" class="owneronly">Analyze a pcap file</a><span class="owneronly"> | </span><a href="/ask" class="owneronly">Ask your network</a> | <a href="/logout" id="logoutlink" style="display:none">Logout</a></p>
+<p><a href="/pcap" class="owneronly">Analyze a pcap file</a><span class="owneronly"> | </span><a href="/ask" class="owneronly">Ask your network</a> | <form action="/logout" method="post" style="display:inline"><button type="submit" class="linkbtn" id="logoutlink" style="display:none">Logout</button></form></p>
 
+%%KIND_TITLES%%
 <script>
 var ORION_ROLE = "%%ORION_ROLE%%";  // "owner" | "viewer", from the server session
+// Council review: user-facing labels for alert kinds. KIND_TITLES is
+// injected by the server from the detection catalog; unknown kinds fall
+// back to a prettified id so new rules degrade gracefully.
+function kindLabel(k){
+  k = String(k == null ? "" : k);
+  if (window.KIND_TITLES && KIND_TITLES[k]) return KIND_TITLES[k];
+  return k.replace(/_/g, " ") || "unknown";
+}
 function canWrite(){ return ORION_ROLE === "owner"; }
 const SEV_WORDS = {Critical:"Act now", High:"Needs attention", Medium:"Worth a look", Low:"Heads up"};
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
@@ -925,7 +946,7 @@ async function refreshInner(){
       + g.items.slice(1).map(a=>`<span class="note">${esc(a.ts)}${a.detail ? " -- " + esc(a.detail) : ""}</span><br>`).join("")
       + `</div>` : "")
     + `<br>${canWrite()
-      ? `<button class="btn-sm" onclick="triageGroup(${gi},'ack')">Ack${n > 1 ? " all" : ""}</button>`
+      ? `<button class="btn-sm" title="I've looked at this -- keep the record, stop bugging me" onclick="triageGroup(${gi},'ack')">Mark seen${n > 1 ? " all" : ""}</button>`
         + `<button class="btn-sm ghost" onclick="triageGroup(${gi},'dismiss')">Dismiss${n > 1 ? " all" : ""}</button>`
         + `<button class="btn-sm ghost" onclick="aiVerdict(${lead.id})">AI verdict</button>`
       : `<span class="note">View-only sign-in: ask the owner to act on this.</span>`}`
@@ -1334,7 +1355,7 @@ async function loadRuleHealth(){
       mutes.map(m=>{
         const until = new Date(m.muted_until * 1000).toLocaleString([], {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"});
         return `<p class="note" style="border-left:4px solid #8a6d1f;padding:.4em .8em;background:#161b22">` +
-          `<b>${esc(m.kind)}</b> is muted until ${esc(until)} -- it fired ${m.fired_count} times in ${m.window_min} minutes` +
+          `<b>${esc(kindLabel(m.kind))}</b> is muted until ${esc(until)} -- it fired ${m.fired_count} times in ${m.window_min} minutes` +
           (m.suppressed ? `, and ${m.suppressed} more since were held back` : "") +
           `. Detection keeps running.` +
           (canWrite() ? ` <button class="btn-sm ghost" onclick="unmuteRule('${esc(m.kind)}')">Unmute now</button>` : "") +
@@ -1342,12 +1363,12 @@ async function loadRuleHealth(){
       }).join("");
   }
   html += d.rules.length ?
-    `<table><tr><th>Rule</th><th>Alerts (30d)</th><th>Acknowledged</th><th>Dismissed</th><th>Precision</th></tr>` +
+    `<table><tr><th>Rule</th><th>Alerts (30d)</th><th>Acknowledged</th><th>Dismissed</th><th>You agreed</th></tr>` +
     d.rules.map(x=>{
       const prec = x.precision===null ? "--" : (x.precision*100).toFixed(0)+"%";
       const noisy = x.dismissed > 0 && x.fp_note ?
         `<br><span class="note">Why this might be noise: ${esc(x.fp_note)}</span>` : "";
-      return `<tr><td>${esc(x.kind)}${noisy}</td><td>${x.total}</td><td>${x.acknowledged}</td><td>${x.dismissed}</td><td>${prec}</td></tr>`;
+      return `<tr><td>${esc(kindLabel(x.kind))}${noisy}</td><td>${x.total}</td><td>${x.acknowledged}</td><td>${x.dismissed}</td><td>${prec}</td></tr>`;
     }).join("") + `</table>`
     : '<p class="note">No alert history yet -- rule health appears once alerts have been acknowledged or dismissed.</p>';
   document.getElementById("rulehealth").innerHTML = html;
@@ -1358,7 +1379,7 @@ async function loadRuleHealth(){
   }
 }
 async function unmuteRule(kind){
-  if (!confirm("Hear every '" + kind + "' alert again right away?")) return;
+  if (!confirm("Hear every '" + kindLabel(kind) + "' alert again right away?")) return;
   await fetch("/api/rule_health/unmute", {method:"POST",
     headers:{"Content-Type":"application/json"},
     body: JSON.stringify({kind: kind})});
@@ -1370,7 +1391,7 @@ async function loadAllowlist(){
   const d = await r.json();
   document.getElementById("allowlist").innerHTML = d.entries.length ?
     `<table><tr><th>Rule</th><th>Pattern</th><th>Note</th><th></th></tr>` +
-    d.entries.map(e=>`<tr><td>${esc(e.kind)}</td><td>${esc(e.pattern)}</td><td>${esc(e.note)}</td><td>${canWrite() ? `<button class="btn-sm ghost" onclick="delAllow(${e.id})">Remove</button>` : ""}</td></tr>`).join("") + `</table>`
+    d.entries.map(e=>`<tr><td>${esc(kindLabel(e.kind))}</td><td>${esc(e.pattern)}</td><td>${esc(e.note)}</td><td>${canWrite() ? `<button class="btn-sm ghost" onclick="delAllow(${e.id})">Remove</button>` : ""}</td></tr>`).join("") + `</table>`
     : '<p class="note">Allowlist is empty.</p>';
   } catch(e) {
     document.getElementById("allowlist").innerHTML =
@@ -1401,8 +1422,8 @@ async function loadSuggestions(){
   document.getElementById("learnsug").innerHTML = d.suggestions.length ?
     d.suggestions.map(s=>
       `<div class="sugcard"><p>${esc(s.why)}</p>` +
-      (s.broad ? `<p class="warn">This would silence every '${esc(s.kind)}' alert -- only apply if the whole rule is noise for you.</p>` : ``) +
-      `<p class="note">Pattern: <code>${esc(s.pattern)}</code> &middot; Rule: <code>${esc(s.kind)}</code><br>` +
+      (s.broad ? `<p class="warn">This would silence every '${esc(kindLabel(s.kind))}' alert -- only apply if the whole rule is noise for you.</p>` : ``) +
+      `<p class="note">Pattern: <code>${esc(s.pattern)}</code> &middot; Rule: ${esc(kindLabel(s.kind))}<br>` +
       `The pattern matches anywhere it appears in the alert text, so it can cover more than one exact case (e.g. "port 80" also matches "port 8000").</p>` +
       (canWrite()
         ? `<button class="btn-sm" onclick="decideSug(${s.id},'apply')">Apply -- never alert me about this</button> ` +
@@ -1623,7 +1644,7 @@ async function loadRewindStatus(){
     const r = await fetch("/api/rewind/status");
     const d = await r.json();
     if (!d.enabled) {
-      el.innerHTML = '<p class="note">Forensic rewind is <b>off</b>. Turn it on in config.yaml under <span class="note">reporting &rarr; rewind_enabled</span> to keep a rolling buffer of raw packets for post-incident review.</p>'
+      el.innerHTML = '<p class="note">Forensic rewind is <b>off</b>. Turn it on in config.yaml under <span class="note">reporting &rarr; rewind_enabled</span> to keep a short recording of traffic you can review after something happens.</p>'
         + '<p class="note">' + esc(d.privacy_note || "") + "</p>";
       return;
     }
@@ -1790,12 +1811,12 @@ function renderAmass(d){
   }
   if (!d.enabled) {
     return "<p class='note'>Amass is installed, but the external scan is switched off. "
-      + "Turn it on under <code>amass.enabled</code> in config.yaml, and list your own "
-      + "domain(s) under <code>amass.domains</code>.</p>";
+      + "Turn it on in config.yaml under amass &rarr; enabled, and list the "
+      + "domain name(s) you own under amass &rarr; domains.</p>";
   }
   if (!(d.domains || []).length) {
-    return "<p class='note'>No domains configured. Add your own domain(s) under "
-      + "<code>amass.domains</code> in config.yaml -- only configured domains are ever scanned.</p>";
+    return "<p class='note'>No domains configured. Add the domain name(s) you own "
+      + "in config.yaml under amass &rarr; domains -- only those are ever scanned.</p>";
   }
   let h = (canWrite() ? '<p><button class="btn-sm" onclick="startAmass()">Run scan now</button> '
     + '<span class="note" id="amassmsg"></span></p>' : "")
@@ -1905,7 +1926,7 @@ function renderNuclei(n){
   statusEl.innerHTML =
     (n.running ? `<p><span class="badge warn">Deeper scan running&hellip;</span> <span class="note">this takes a while -- thousands of checks</span></p>` : "") +
     (lr ? `<p class="note">Last deeper scan: ${esc(new Date(lr.when * 1000).toLocaleString())} &mdash; ${lr.targets} devices, ${lr.findings} findings (${lr.new_findings} new), took ${lr.duration_s}s.</p>`
-        : `<p class="note">No deeper scan yet. ${n.enabled ? "Weekly scans run automatically; you can run one now." : "Turn on <code>nuclei.enabled</code> in config.yaml for weekly scans, or run one now."}</p>`);
+        : `<p class="note">No deeper scan yet. ${n.enabled ? "Weekly scans run automatically; you can run one now." : "Turn on the weekly deeper scan in config.yaml under nuclei &rarr; enabled, or run one now."}</p>`);
   const fs = n.findings || [];
   document.getElementById("nucleifindings").innerHTML = fs.length ?
     `<table><tr><th>Device</th><th>Finding</th><th>Urgency</th><th>What it means</th></tr>` +
@@ -1943,7 +1964,7 @@ async function loadHostEvents(){
     const ing = d.ingest || {};
     const head = ing.enabled
       ? `<p class="note">Watching <code>${esc(ing.dir)}</code> &mdash; ${ing.events_stored || 0} events stored, last check ${esc(ing.last_run || "never")}.</p>`
-      : `<p class="note">Not configured. Set <code>ingest.watch_dir</code> in config.yaml (see INGEST.md) to start reading exported Windows logs.</p>`;
+      : `<p class="note">Not set up yet -- point the monitor at your exported Windows logs in config.yaml under ingest &rarr; watch_dir (see INGEST.md for the export steps).</p>`;
     const evs = d.events || [];
     document.getElementById("hostevents").innerHTML = head + (evs.length ?
       `<table><tr><th>When</th><th>Event</th><th>Computer</th><th>What happened</th></tr>` +
@@ -2005,7 +2026,7 @@ function renderCanary(c){
   const el = document.getElementById("canarystatus");
   if (!el) return;
   if (!c.enabled) {
-    el.innerHTML = '<p class="note">Tripwire is off (enable it under <code>canary</code> in config.yaml).</p>';
+    el.innerHTML = '<p class="note">Tripwire is off -- switch it on in config.yaml under canary &rarr; enabled.</p>';
     return;
   }
   const badge = c.running ? '<span class="badge ok">listening</span>'
@@ -2021,7 +2042,7 @@ function renderSwaudit(sw){
   const el = document.getElementById("swaudit");
   if (!el) return;
   if (!sw.enabled) {
-    el.innerHTML = `<p class="note">Disabled. Turn on <code>swaudit.enabled</code> in config.yaml to check installed software against the known-exploited list.</p>`;
+    el.innerHTML = `<p class="note">Turn on the installed-software check in config.yaml under swaudit &rarr; enabled to compare what's on this box against the known-exploited list.</p>`;
     return;
   }
   const head = sw.last_run_ts
@@ -2751,8 +2772,8 @@ def playbook(slug):
         ' the case for this, and hit <b>Escalate to admin</b>. It packages'
         ' the whole timeline, what was found, and what you already tried,'
         ' and emails it to your administrator. If the button says no admin'
-        ' email is set, add <code>response.admin_email</code> to'
-        ' config.yaml first.</p>')
+        " email is set, add your administrator's email in"
+        ' config.yaml under response &rarr; admin_email first.</p>')
     parts.append('<p><a href="/#surface">&larr; Back to Attack surface</a>'
                  ' | <a href="/#cases">Cases</a></p>')
     parts.append("</body></html>")
@@ -3389,10 +3410,12 @@ def api_rule_health():
     # The catalog's false-positive profiles, keyed by kind: the precision
     # numbers land next to the human-readable "why this might be noise".
     fp_notes = {}
+    titles = {}
     try:
         from . import detection_catalog as catm
         for r in catm.RULES:
             fp_notes[r["id"]] = r.get("fp_profile") or ""
+            titles[r["id"]] = catm.title_for(r["id"])
     except Exception:
         pass
     rules = []
@@ -3406,9 +3429,10 @@ def api_rule_health():
         rules.append(d)
         if d["dismissed"] >= 5 and d["precision"] is not None \
                 and d["precision"] < 0.4:
+            label = titles.get(kind, kind)
             suggestions.append({
                 "kind": kind,
-                "text": (f"You've dismissed '{kind}' {d['dismissed']} times"
+                "text": (f"You've dismissed '{label}' {d['dismissed']} times"
                          f" in the last 30 days. Add a pattern to the"
                          f" allowlist below so it stops bothering you?"),
             })
@@ -3686,8 +3710,9 @@ def api_rewind_export():
 # everything so the dashboard works with no AI configured.
 
 _AI_UNAVAILABLE = {"unavailable": True,
-                   "message": "AI answers are off -- set OPENAI_API_KEY "
-                              "and ai.provider in config.yaml to enable."}
+                   "message": "AI answers are off -- to turn them on, set "
+                              "your OpenAI API key as OPENAI_API_KEY and "
+                              "ai.provider in config.yaml."}
 
 
 def _ai_assist():
@@ -3829,6 +3854,35 @@ def _port_guide_html():
             " channel' -- the monitor flags those for you automatically.</p>")
 
 
+# Council review (plain-language UX): alert kinds must never reach the user
+# as raw snake_case ids. The detection catalog already carries a
+# plain-language title per kind -- this is the single source of truth, and
+# kindLabel() in the page JS is its client-side mirror.
+_ALLOW_KIND_IDS = ("new_device", "unusual_port", "traffic_spike",
+                   "beaconing", "new_external_ip", "volume_anomaly",
+                   "dns_lookup_burst", "dns_tunneling", "new_busy_domain",
+                   "arp_spoof")
+
+
+def _kind_titles():
+    try:
+        from . import detection_catalog as catm
+        return {r["id"]: catm.title_for(r["id"]) for r in catm.RULES}
+    except Exception:
+        return {}
+
+
+def _kind_options_html():
+    import html as _html
+    titles = _kind_titles()
+    parts = []
+    for kid in _ALLOW_KIND_IDS:
+        label = titles.get(kid, kid.replace("_", " "))
+        parts.append('<option value="%s">%s</option>'
+                     % (kid, _html.escape(label)))
+    return "".join(parts)
+
+
 @app.route("/")
 def index():
     role = _role() or "owner"  # no-password mode: everyone is the owner
@@ -3839,6 +3893,11 @@ def index():
     html = html.replace("%%BODY_CLASS%%", "viewonly" if role == "viewer"
                         else "")
     html = html.replace("%%ORION_ROLE%%", role)
+    titles_json = json.dumps(_kind_titles()).replace("</", "<\\/")
+    html = html.replace(
+        "%%KIND_TITLES%%",
+        "<script>const KIND_TITLES = " + titles_json + ";</script>")
+    html = html.replace("%%ALLOW_KIND_OPTIONS%%", _kind_options_html())
     return render_template_string(html)
 
 

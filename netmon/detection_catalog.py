@@ -881,6 +881,18 @@ def by_id(kind):
     return None
 
 
+def title_for(kind):
+    """Plain-language title for an alert kind, for user-facing copy.
+
+    Council review: the UI must never show raw snake_case kind ids; this
+    is the single source of truth for the replacement label. Unknown kinds
+    fall back to a prettified id so new rules degrade gracefully."""
+    r = by_id(kind)
+    if r and r.get("title"):
+        return r["title"]
+    return str(kind or "").replace("_", " ").strip() or "unknown"
+
+
 
 # --- rendering ---------------------------------------------------------------
 

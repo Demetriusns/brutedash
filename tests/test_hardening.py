@@ -209,6 +209,49 @@ class TestBootstrapChmod(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_db_created_0600(self):
+        # Council review: netmon.db holds DNS/flow history -- not
+        # world-readable. _connect() fixes up perms on open.
+        path, old_path, old_conn = _fresh_db()
+        try:
+            mode = os.stat(path).st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+        finally:
+            _restore_db(path, old_path, old_conn)
+
+
+class TestAiAssistTimeout(unittest.TestCase):
+    def test_openai_client_has_timeout(self):
+        # Council review: a hung API call must not wedge the dashboard
+        # worker thread (explainer.py already passes timeout=30).
+        import types
+        from netmon import ai_assist as aam
+        captured = {}
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        fake = types.ModuleType("openai")
+        fake.OpenAI = FakeOpenAI
+        old_key = os.environ.get("OPENAI_API_KEY")
+        old_mod = sys.modules.get("openai")
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        sys.modules["openai"] = fake
+        try:
+            client = aam._client()
+            self.assertIsNotNone(client)
+            self.assertEqual(captured.get("timeout"), 30)
+        finally:
+            if old_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = old_key
+            if old_mod is None:
+                sys.modules.pop("openai", None)
+            else:
+                sys.modules["openai"] = old_mod
+
 
 @unittest.skipIf(dashm is None or not _HAVE_SCAPY,
                  "Flask/scapy not installed")

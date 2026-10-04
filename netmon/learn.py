@@ -105,8 +105,10 @@ def threshold_for(severity):
 
 def why_text(kind, pattern, broad, dismissals, severity):
     """Plain-English reason shown next to the suggestion."""
-    scope = (f"every '{kind}' alert (this would silence the whole rule)"
+    from . import detection_catalog as catm
+    label = catm.title_for(kind)
+    scope = (f"every '{label}' alert (this would silence the whole rule)"
              if broad
-             else f"'{kind}' alerts mentioning '{pattern}'")
-    return (f"You've dismissed {dismissals} {severity or ''} {kind} alerts"
+             else f"'{label}' alerts mentioning '{pattern}'")
+    return (f"You've dismissed {dismissals} {severity or ''} {label} alerts"
             f" like this one. Want to stop seeing {scope}?")

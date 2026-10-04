@@ -710,7 +710,7 @@ def check_arp_spoof(now=None):
             continue
         dbm.add_alert(
             "arp_spoof", "High",
-            "Possible ARP spoofing",
+            "A device is lying about who's who on your network",
             (f"Hardware address {mac} claimed {nip} different local"
              f" addresses in the last 30 minutes: {', '.join(ips)}."),
             meaning=("One device on your network is introducing itself as"
@@ -755,7 +755,7 @@ def check_arp_spoof(now=None):
             continue
         dbm.add_alert(
             "arp_spoof", "High",
-            "Possible ARP spoofing",
+            "A device is lying about who's who on your network",
             (f"{ip} used to answer as {first_mac} but is now also answering"
              f" as {', '.join(others)}."),
             meaning=("A local address that used to belong to one device is"

@@ -934,43 +934,56 @@ def compliance_csv(data):
 def _compliance_csv(data):
     buf = io.StringIO()
     w = csv.writer(buf)
+
+    def _csv_safe(v):
+        """Neutralize CSV formula injection (council review): alert titles
+        embed LAN-observed DNS names and device names, so a hostile hostname
+        like =cmd|'...'!A0 would become a live formula in Excel/Sheets.
+        Prefixing with ' keeps the text readable but inert."""
+        if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+            return "'" + v
+        return v
+
+    def row(vals):
+        w.writerow([_csv_safe(v) for v in vals])
+
     days = int(data.get("days", 7) or 7)
-    w.writerow(["# brutedash compliance report"])
-    w.writerow(["# period", data.get("period", "weekly")])
-    w.writerow(["# site", data.get("site", "")])
-    w.writerow(["# window_days", days])
-    w.writerow(["# generated",
+    row(["# brutedash compliance report"])
+    row(["# period", data.get("period", "weekly")])
+    row(["# site", data.get("site", "")])
+    row(["# window_days", days])
+    row(["# generated",
                 datetime.fromtimestamp(
                     data.get("now") or time.time()).isoformat()])
-    w.writerow([])
-    w.writerow(["# incidents"])
-    w.writerow(["id", "title", "category", "severity", "status",
+    row([])
+    row(["# incidents"])
+    row(["id", "title", "category", "severity", "status",
                 "device", "alerts", "mitre_ids", "opened"])
     for i in data.get("incidents") or []:
-        w.writerow([i.get("id"), i.get("title"), i.get("category"),
+        row([i.get("id"), i.get("title"), i.get("category"),
                     i.get("severity"), i.get("status"), i.get("device"),
                     i.get("alerts"),
                     ";".join(mid for mid, _ in (i.get("mitre") or [])),
                     _fmt_dt(i.get("created"))])
-    w.writerow([])
-    w.writerow(["# response actions"])
-    w.writerow(["when", "action", "target", "actor", "detail"])
+    row([])
+    row(["# response actions"])
+    row(["when", "action", "target", "actor", "detail"])
     for a in data.get("actions") or []:
-        w.writerow([_fmt_dt(a.get("ts")), a.get("action"),
+        row([_fmt_dt(a.get("ts")), a.get("action"),
                     a.get("target"), a.get("actor"), a.get("detail")])
-    w.writerow([])
-    w.writerow(["# alert volume by day"])
-    w.writerow(["day", "critical", "high", "medium", "low", "total"])
+    row([])
+    row(["# alert volume by day"])
+    row(["day", "critical", "high", "medium", "low", "total"])
     for v in data.get("volume") or []:
         tot = sum(int(v.get(s) or 0)
                   for s in ("Critical", "High", "Medium", "Low"))
-        w.writerow([v.get("day"), v.get("Critical"), v.get("High"),
+        row([v.get("day"), v.get("Critical"), v.get("High"),
                     v.get("Medium"), v.get("Low"), tot])
-    w.writerow([])
-    w.writerow(["# score history"])
-    w.writerow(["day", "score"])
+    row([])
+    row(["# score history"])
+    row(["day", "score"])
     for s in data.get("scores") or []:
-        w.writerow([s.get("day"), s.get("score")])
+        row([s.get("day"), s.get("score")])
     return buf.getvalue()
 
 # --- PDF exports (via pdfgen.py: stdlib-only, text layout) -------------------

@@ -29,7 +29,8 @@ import time
 from . import db as dbm
 
 try:
-    from scapy.all import sniff, rdpcap, IP, IPv6, TCP, UDP, DNS, Ether
+    from scapy.all import sniff, PcapReader, IP, IPv6, TCP, UDP, \
+        DNS, Ether
     HAVE_SCAPY = True
 except ImportError:  # dashboard-only mode can run without scapy
     HAVE_SCAPY = False
@@ -206,10 +207,6 @@ class FlowAggregator:
                 qtype = int(qtype)
             except (TypeError, ValueError):
                 qtype = str(qtype)
-            return (ts, src, name, qtype)
-        except Exception:
-            return None
-
             return (ts, src, name, qtype)
         except Exception:
             return None
@@ -518,11 +515,16 @@ def run_live(interface=None, stop_event=None):
 
 
 def run_pcap(path):
-    """One-shot: process a pcap file, return (aggregator, alerts_raised)."""
+    """One-shot: process a pcap file, return (aggregator, alerts_raised).
+
+    Council review: rdpcap() loads the whole file into memory as Packet
+    objects (10-20x RAM expansion), so a large upload could OOM the box --
+    PcapReader streams one packet at a time instead."""
     if not HAVE_SCAPY:
         raise RuntimeError("scapy is not installed (pip install scapy)")
     agg = FlowAggregator()
-    for pkt in rdpcap(path):
-        agg.handle(pkt)
+    with PcapReader(path) as reader:
+        for pkt in reader:
+            agg.handle(pkt)
     agg.flush()
     return agg
