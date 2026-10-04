@@ -368,3 +368,44 @@ class AttackSurfaceRouteTests(_DbTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WardenPrioritiesTests(unittest.TestCase):
+    def setUp(self):
+        self._db = _fresh_db()
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self._path = os.path.join(base, "data", "warden-priorities.json")
+        self._had = os.path.exists(self._path)
+        if self._had:
+            os.rename(self._path, self._path + ".bak")
+
+    def tearDown(self):
+        if os.path.exists(self._path):
+            os.unlink(self._path)
+        if self._had:
+            os.rename(self._path + ".bak", self._path)
+        _restore_db(*self._db)
+
+    def _write(self, payload):
+        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        import json as _json
+        with open(self._path, "w") as fh:
+            _json.dump(payload, fh)
+
+    def test_hit_list_surfaces_in_report(self):
+        self._write({"generated": "2026-10-04 12:00:00", "count": 1,
+                     "hit_list": [{"asset": "1.2.3.4", "port": 3389,
+                                    "service": "rdp",
+                                    "vector": "Remote desktop break-in",
+                                    "what_it_means": "Bots guess passwords.",
+                                    "severity": "High", "score": 5}]})
+        rep = asm.build_report()
+        wp = rep["warden_priorities"]
+        self.assertEqual(wp["count"], 1)
+        self.assertEqual(wp["hits"][0]["vector"], "Remote desktop break-in")
+        self.assertEqual(wp["hits"][0]["severity"], "High")
+
+    def test_missing_file_is_empty_not_error(self):
+        rep = asm.build_report()
+        self.assertEqual(rep["warden_priorities"]["hits"], [])
+        self.assertTrue(rep["ok"])

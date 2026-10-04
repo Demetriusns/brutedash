@@ -43,6 +43,8 @@ the dashboard never 404s on valid grammar.
 """
 
 import ipaddress
+import json
+import os
 import re
 import time
 
@@ -939,6 +941,12 @@ def build_report(now=None):
     counts["devices"] = len(devices)
     counts["reachable_devices"] = sum(1 for d in devices if d.get("reachable"))
 
+    # Warden's hit list: the attacker's view, ranked. Warden (the AI)
+    # recons the external targets, thinks like an attacker, and writes
+    # data/warden-priorities.json. This view only displays it -- the file
+    # is data, never code, and a missing file just means no hit list yet.
+    warden_hits = _load_warden_priorities()
+
     return {
         "ok": True,
         "summary_line": _summary_line(counts, flat),
@@ -946,4 +954,33 @@ def build_report(now=None):
         "devices": devices,
         "exposures": flat,
         "lateral_paths": paths,
+        "warden_priorities": warden_hits,
     }
+
+
+def _load_warden_priorities(limit=10):
+    """Read Warden's ranked attack-vector hit list, if published."""
+    try:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(base, "data", "warden-priorities.json")
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        hits = data.get("hit_list") or []
+        return {
+            "generated": data.get("generated", ""),
+            "count": data.get("count", len(hits)),
+            "hits": [
+                {
+                    "asset": h.get("asset", ""),
+                    "port": h.get("port"),
+                    "service": h.get("service", ""),
+                    "vector": h.get("vector", ""),
+                    "what_it_means": h.get("what_it_means", ""),
+                    "severity": h.get("severity", "Low"),
+                    "score": h.get("score", 0),
+                }
+                for h in hits[:limit]
+            ],
+        }
+    except (OSError, ValueError):
+        return {"generated": "", "count": 0, "hits": []}

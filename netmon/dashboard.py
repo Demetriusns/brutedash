@@ -1737,6 +1737,21 @@ async function loadAttackSurface(){
 }
 function renderAttackSurface(d){
   let h = "<p><b>" + esc(d.summary_line || "") + "</b></p>";
+  const wp = d.warden_priorities || {hits: []};
+  if ((wp.hits || []).length) {
+    h += "<h4>Warden's hit list — fix these first</h4>"
+      + '<p class="note">Ranked like an attacker would rank them'
+      + (wp.generated ? " &middot; checked " + esc(wp.generated) : "")
+      + ".</p>"
+      + wp.hits.map(x =>
+      '<div class="alert ' + esc(x.severity) + '">'
+      + sevBadge(x.severity) + " <b>" + esc(x.vector) + "</b>"
+      + ' <span class="note">' + esc(x.asset || "")
+      + (x.port ? ":" + esc(String(x.port)) : "")
+      + (x.service ? " (" + esc(x.service) + ")" : "") + "</span>"
+      + "<br>" + esc(x.what_it_means)
+      + "</div>").join("");
+  }
   const exps = d.exposures || [];
   if (exps.length) {
     h += "<h4>Worth a look</h4>" + exps.map(e =>
