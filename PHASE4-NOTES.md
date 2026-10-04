@@ -167,6 +167,18 @@ North star: the automated analyst for a network with nobody watching it.
   (12 kinds, all covered by test); alerts carry mitre_id/name/tactic
   columns, backfilled on old DBs; dashboard shows MITRE badges on alert
   rows and in case timelines with technique-name tooltips.
+  EXTENDED 2026-10-04 (batch 13, repo-learning items 1 and 11 DONE):
+  `netmon/detection_catalog.py` is now the single source of truth for all
+  23 alert kinds -- description, trigger, severity, MITRE mapping
+  (mechanically cross-checked against mitre.py), honest false-positive
+  profile, tuning, and a validation-test pointer per rule;
+  `docs/DETECTION-CATALOG.md` is rendered from it (never hand-edited).
+  Every rule now has a PoC test proving it fires (31 new firing tests in
+  tests/test_detection_poc.py for the 12 rules that had none, positive +
+  negative cases, scratch-DB only); tests/test_detection_catalog.py keeps
+  the registry consistent (kinds <-> catalog <-> mitre.py <-> playbooks,
+  test pointers resolve, doc in sync) so future rules can't land without
+  catalog + PoC.
 - Canary / honeypot (new 2026-09-30) — plant a fake vulnerable-looking
   target (bogus open port or share); anything touching it is hostile by
   definition. Highest-signal detection there is, cheap to build.
