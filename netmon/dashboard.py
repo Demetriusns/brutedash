@@ -699,7 +699,7 @@ async function loadSuggestions(){
       `The pattern matches anywhere it appears in the alert text, so it can cover more than one exact case (e.g. "port 80" also matches "port 8000").</p>` +
       `<button class="btn-sm" onclick="decideSug(${s.id},'apply')">Apply -- never alert me about this</button> ` +
       `<button class="btn-sm ghost" onclick="decideSug(${s.id},'ignore')">Ignore</button></div>`).join("")
-    : '<p class="note">No suggestions yet. Dismiss a few alerts you don\'t care about and the monitor will start proposing these.</p>';
+    : '<p class="note">No suggestions yet. Dismiss a few alerts you do not care about and the monitor will start proposing these.</p>';
 }
 async function decideSug(id, what){
   await fetch("/api/learn/suggestions/" + id + "/" + what, {method:"POST"});
