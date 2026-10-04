@@ -109,12 +109,25 @@ North star: the automated analyst for a network with nobody watching it.
 
 ### Think like a senior (analysis)
 - Incident grouping — bundle related alerts into one case with a timeline.
-  Analysts think in incidents, not scattered alerts.
+  Analysts think in incidents, not scattered alerts. DONE 2026-10-03
+  (batch 5): new `incidents` + `incident_alerts` tables; every alert is
+  attached to a case keyed by the address it names (external IP preferred,
+  else LAN IP) inside a 2-hour window; case severity escalates to the
+  highest member severity; closing a case keeps it closed (new alerts open
+  a fresh case). Dashboard "Cases" section lists open/closed cases with
+  expandable alert timelines, close/reopen buttons, and per-case MITRE
+  badges. New /api/incidents, /api/incidents/<id>, /close, /reopen routes.
 - Incident pages (new 2026-09-30) — click any alert → full case view:
   timeline, every related flow, raw packets, AI narrative. The
-  investigation workspace.
+  investigation workspace. DONE 2026-10-03 (batch 5): the case timeline
+  view (see incident grouping above); related-flow/packet drill-down
+  stays future work.
 - MITRE ATT&CK tagging — label every detection with the attacker's
-  technique. Professional SOC language; strong resume signal.
+  technique. Professional SOC language; strong resume signal. DONE
+  2026-10-03 (batch 5): new `netmon/mitre.py` static kind→technique map
+  (12 kinds, all covered by test); alerts carry mitre_id/name/tactic
+  columns, backfilled on old DBs; dashboard shows MITRE badges on alert
+  rows and in case timelines with technique-name tooltips.
 - Canary / honeypot (new 2026-09-30) — plant a fake vulnerable-looking
   target (bogus open port or share); anything touching it is hostile by
   definition. Highest-signal detection there is, cheap to build.

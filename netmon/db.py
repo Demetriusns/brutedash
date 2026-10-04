@@ -11,6 +11,10 @@ Tables:
   device_names  user-chosen friendly names keyed by MAC
   device_profiles  per-MAC, per-hour behavior baselines (bytes/contacts)
   allowlist  user-approved (kind, pattern) pairs that suppress alerts
+  dismissal_lessons  stable patterns learned from dismissed alerts
+  suggestions  pending allowlist suggestions awaiting human approval
+  incidents  cases bundling related alerts (Phase 3.5: incidents, not alerts)
+  incident_alerts  which alerts belong to which incident
   meta        small key/value store (heartbeats, watermarks, ...)
 
 All writers take the module lock; SQLite runs in WAL mode so the
@@ -18,6 +22,7 @@ dashboard can read while capture threads write.
 """
 import json
 import os
+import re
 import sqlite3
 import threading
 import contextlib
@@ -139,6 +144,28 @@ CREATE TABLE IF NOT EXISTS suggestions(
     UNIQUE(kind, pattern)
 );
 
+-- Phase 3.5: incidents, not alerts. Related alerts are bundled into one
+-- case with a timeline, the way a senior analyst works.
+CREATE TABLE IF NOT EXISTS incidents(
+    id INTEGER PRIMARY KEY,
+    created_ts REAL,
+    updated_ts REAL,             -- last member alert attached
+    title TEXT,                  -- e.g. "Suspicious activity involving 203.0.113.7"
+    severity TEXT,               -- highest severity among member alerts
+    status TEXT NOT NULL DEFAULT 'open',  -- open | closed
+    device_key TEXT,             -- IP tying the case together (may be NULL)
+    summary TEXT                 -- plain-English one-liner
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+CREATE INDEX IF NOT EXISTS idx_incidents_device ON incidents(device_key);
+
+CREATE TABLE IF NOT EXISTS incident_alerts(
+    incident_id INTEGER NOT NULL,
+    alert_id INTEGER PRIMARY KEY,  -- one alert belongs to at most one case
+    FOREIGN KEY(incident_id) REFERENCES incidents(id)
+);
+CREATE INDEX IF NOT EXISTS idx_incident_alerts_inc ON incident_alerts(incident_id);
+
 CREATE TABLE IF NOT EXISTS meta(
     key TEXT PRIMARY KEY,
     value TEXT
@@ -171,6 +198,24 @@ def _connect(path=None):
         "PRAGMA table_info(dismissal_lessons)")}
     if "sev" not in lesson_cols:
         conn.execute("ALTER TABLE dismissal_lessons ADD COLUMN sev TEXT")
+    # Phase 3.5: MITRE ATT&CK tags on alerts. Backfill existing rows from
+    # the static kind->technique map so old alerts read the same language.
+    for col in ("mitre_id", "mitre_name", "mitre_tactic"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT")
+    try:
+        from . import mitre as _mitre_mod
+        needs_backfill = conn.execute(
+            "SELECT 1 FROM alerts WHERE mitre_id IS NULL LIMIT 1").fetchone()
+        if needs_backfill:
+            for kind in _mitre_mod.all_kinds():
+                tag = _mitre_mod.tag_for(kind)
+                conn.execute(
+                    "UPDATE alerts SET mitre_id=?, mitre_name=?,"
+                    " mitre_tactic=? WHERE kind=? AND mitre_id IS NULL",
+                    (tag["id"], tag["name"], tag["tactic"], kind))
+    except Exception:
+        pass  # tags are display metadata; never break startup over them
     try:
         # De-dupe any legacy rows first so the index always builds.
         conn.execute("DELETE FROM allowlist WHERE id NOT IN"
@@ -318,22 +363,44 @@ def add_alert(kind, severity, title, detail, meaning="", is_normal="",
     non-technical readers: what this means, when it's fine vs not, and one
     concrete next step.
 
+    Phase 3.5: the alert is MITRE-tagged from its kind and attached to an
+    incident (a case bundling related alerts) -- both best-effort, and
+    neither can ever break or delay alert storage.
+
     After the row is committed, a best-effort notification hook fires
     (outside the lock); it can never break or delay alert storage.
     """
     import time
     ts = ts if ts is not None else time.time()
+    try:
+        from . import mitre as _mitre_mod
+        tag = _mitre_mod.tag_for(kind) or {}
+    except Exception:
+        tag = {}
     with _lock:
         conn = _db()
         cur = conn.execute(
             "INSERT INTO alerts (ts, kind, severity, title, detail,"
-            " meaning, is_normal, what_to_do)"
-            " VALUES (?,?,?,?,?,?,?,?)",
+            " meaning, is_normal, what_to_do, mitre_id, mitre_name,"
+            " mitre_tactic)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (ts, kind, severity, title, detail, meaning, is_normal,
-             what_to_do),
+             what_to_do, tag.get("id"), tag.get("name"), tag.get("tactic")),
         )
         alert_id = cur.lastrowid
         conn.commit()
+    # Incident attach runs after the insert's lock is released (_lock is a
+    # plain Lock, not re-entrant) and is best-effort: grouping must never
+    # break alerting. Failures are logged so a broken pipeline is visible.
+    try:
+        attach_to_incident(alert_id, kind, severity, title, detail, ts)
+    except Exception as exc:
+        import sys
+        try:
+            print(f"netmon db: attach_to_incident failed for alert"
+                  f" {alert_id}: {exc!r}", file=sys.stderr)
+        except Exception:
+            pass
     _notify_hook({
         "id": alert_id, "ts": ts, "kind": kind, "severity": severity,
         "title": title, "detail": detail, "meaning": meaning,
@@ -341,6 +408,161 @@ def add_alert(kind, severity, title, detail, meaning="", is_normal="",
         "status": "new", "note": None,
     })
     return alert_id
+
+
+# --- Phase 3.5: incidents, not alerts --------------------------------------
+# A senior analyst thinks in cases, not scattered alerts. Every alert is
+# attached to an incident: alerts naming the same address within a 2-hour
+# window join one case with a timeline. Best-effort throughout -- grouping
+# must never break alert storage.
+
+INCIDENT_WINDOW_S = 2 * 3600  # same address, this close together => one case
+
+_SEV_RANK = {"Low": 0, "Medium": 1, "High": 2, "Critical": 3}
+
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _is_lan_ip(ip):
+    """True for RFC1918 / loopback / link-local addresses."""
+    try:
+        parts = [int(p) for p in ip.split(".")]
+        if len(parts) != 4 or any(p > 255 for p in parts):
+            return False
+        a, b = parts[0], parts[1]
+        return (a == 10 or a == 127 or (a == 172 and 16 <= b <= 31)
+                or (a == 192 and b == 168) or (a == 169 and b == 254))
+    except (ValueError, AttributeError):
+        return False
+
+
+def _extract_case_key(title, detail):
+    """The address tying a case together: first external IP named in the
+    alert, else the first LAN IP, else None. External IPs win because the
+    interesting question is usually 'who out there is involved'."""
+    ips = []
+    for text in (title or "", detail or ""):
+        for m in _IPV4_RE.finditer(text):
+            ip = m.group(0)
+            try:
+                if all(int(p) <= 255 for p in ip.split(".")) and ip not in ips:
+                    ips.append(ip)
+            except ValueError:
+                continue
+    for ip in ips:
+        if not _is_lan_ip(ip):
+            return ip
+    return ips[0] if ips else None
+
+
+def attach_to_incident(alert_id, kind, severity, title, detail, ts):
+    """Attach an alert to its incident, creating the case if needed.
+
+    Returns the incident id. Takes the module lock; callers must not hold
+    it (it is a plain Lock, not re-entrant). Never raises -- callers wrap
+    it in try/except as well, belt and suspenders.
+    """
+    import time
+    ts = ts if ts is not None else time.time()
+    key = _extract_case_key(title, detail)
+    with _lock:
+        conn = _db()
+        incident_id = None
+        if key:
+            row = conn.execute(
+                "SELECT id, severity FROM incidents"
+                " WHERE status='open' AND device_key=? AND updated_ts > ?"
+                " ORDER BY updated_ts DESC LIMIT 1",
+                (key, ts - INCIDENT_WINDOW_S),
+            ).fetchone()
+            if row:
+                incident_id = row[0]
+                if _SEV_RANK.get(severity, 0) > _SEV_RANK.get(row[1], 0):
+                    conn.execute(
+                        "UPDATE incidents SET severity=? WHERE id=?",
+                        (severity, incident_id))
+        if incident_id is None:
+            label = key or "your network"
+            cur = conn.execute(
+                "INSERT INTO incidents (created_ts, updated_ts, title,"
+                " severity, status, device_key, summary)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (ts, ts, f"Case: suspicious activity involving {label}",
+                 severity, "open", key, f"Opened by: {title}"),
+            )
+            incident_id = cur.lastrowid
+        else:
+            conn.execute(
+                "UPDATE incidents SET updated_ts=? WHERE id=?",
+                (ts, incident_id))
+        conn.execute(
+            "INSERT OR IGNORE INTO incident_alerts (incident_id, alert_id)"
+            " VALUES (?,?)",
+            (incident_id, alert_id))
+        conn.commit()
+        return incident_id
+
+
+def list_incidents(status="open", limit=50):
+    """Open cases (default), newest activity first, with alert counts."""
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT i.id, i.created_ts, i.updated_ts, i.title, i.severity,"
+            " i.status, i.device_key, i.summary,"
+            " COUNT(a.alert_id) FROM incidents i"
+            " LEFT JOIN incident_alerts a ON a.incident_id=i.id"
+            " WHERE i.status=? GROUP BY i.id"
+            " ORDER BY i.updated_ts DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+    return [{
+        "id": r[0], "created_ts": r[1], "updated_ts": r[2], "title": r[3],
+        "severity": r[4], "status": r[5], "device_key": r[6],
+        "summary": r[7], "alert_count": r[8],
+    } for r in rows]
+
+
+def get_incident(incident_id):
+    """One case with its full alert timeline, oldest first. None if missing."""
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT id, created_ts, updated_ts, title, severity, status,"
+            " device_key, summary FROM incidents WHERE id=?",
+            (incident_id,)).fetchone()
+        if not row:
+            return None
+        alerts = conn.execute(
+            "SELECT al.id, al.ts, al.kind, al.severity, al.title, al.detail,"
+            " al.meaning, al.what_to_do, al.mitre_id, al.mitre_name,"
+            " al.mitre_tactic, al.status"
+            " FROM incident_alerts ia JOIN alerts al ON al.id=ia.alert_id"
+            " WHERE ia.incident_id=? ORDER BY al.ts ASC",
+            (incident_id,)).fetchall()
+    return {
+        "id": row[0], "created_ts": row[1], "updated_ts": row[2],
+        "title": row[3], "severity": row[4], "status": row[5],
+        "device_key": row[6], "summary": row[7],
+        "alerts": [{
+            "id": a[0], "ts": a[1], "kind": a[2], "severity": a[3],
+            "title": a[4], "detail": a[5], "meaning": a[6],
+            "what_to_do": a[7], "mitre_id": a[8], "mitre_name": a[9],
+            "mitre_tactic": a[10], "status": a[11],
+        } for a in alerts],
+    }
+
+
+def set_incident_status(incident_id, status):
+    """Close or reopen a case. Returns True if the case exists."""
+    if status not in ("open", "closed"):
+        return False
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "UPDATE incidents SET status=? WHERE id=?", (status, incident_id))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def insert_dns_queries(rows):

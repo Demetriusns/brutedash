@@ -80,6 +80,7 @@ a{color:#58a6ff} button{background:#238636;color:#fff;border:0;padding:.5em 1.2e
 .badge{display:inline-block;padding:.15em .6em;border-radius:999px;font-size:.8em;white-space:nowrap}
 .badge.ok{background:#1a3a24;color:#7ee787;border:1px solid #2d6a3f}
 .badge.warn{background:#3d2e12;color:#f0b429;border:1px solid #8a6d1f}
+.badge.mitre{background:#1c2b4a;color:#9ecbff;border:1px solid #2f4a7a;cursor:help}
 .sugcard{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:.8em 1em;margin:.6em 0}
 p.warn{background:#3d2e12;border:1px solid #8a6d1f;color:#f0b429;padding:.5em .8em;border-radius:4px}
 input,textarea,select{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;font-family:monospace;padding:.4em;border-radius:4px}
@@ -249,6 +250,15 @@ Urgency: <select id="alertsevfilter" onchange="refresh()">
 <option value="High">High</option><option value="Medium">Medium</option>
 <option value="Low">Low</option></select></p>
 <div id="alertslist"><p class="note">Loading...</p></div>
+</section>
+
+<section class="block" id="cases">
+<h2>&#128193; Cases <span class="note">related alerts, bundled like an analyst would</span>
+<button class="btn-sm ghost" onclick="loadCases()">refresh</button></h2>
+<p class="note">Show: <select id="casestatusfilter" onchange="loadCases()">
+<option value="open" selected>Open</option><option value="closed">Closed</option>
+</select></p>
+<div id="caseslist"><p class="note">Loading...</p></div>
 </section>
 
 <section class="block" id="summary">
@@ -450,6 +460,7 @@ async function refreshInner(){
     return `<div class="alert ${esc(g.sev)}"><b>[${SEV_WORDS[g.sev]||esc(g.sev)}] ${esc(g.title)}</b>`
     + (n > 1 ? ` <span class="note">&times;${n}</span>` : "")
     + ` <span class="note">[${esc(lead.status)}]</span>`
+    + (lead.mitre_id ? ` <span class="badge mitre" title="${esc(lead.mitre_name || "")} — tactic: ${esc(lead.mitre_tactic || "")}">${esc(lead.mitre_id)}</span>` : "")
     + (lead.meaning ? `<br><b>What this means:</b> ${esc(lead.meaning)}` : "")
     + (lead.is_normal ? `<br><b>Is this normal?</b> ${esc(lead.is_normal)}` : "")
     + (lead.what_to_do ? `<br><b>What to do:</b> ${esc(lead.what_to_do)}` : "")
@@ -702,8 +713,65 @@ async function sendDigest(){
   el.textContent = d.sent ? "Digest sent."
     : "Nothing to send (no recent alerts, or email isn't configured).";
 }
+// --- cases (Phase 3.5): incidents, not scattered alerts -------------------
+let CASES_CACHE = [];
+async function loadCases(){
+  const sf = document.getElementById("casestatusfilter");
+  const status = sf ? sf.value : "open";
+  const el = document.getElementById("caseslist");
+  try {
+    const r = await fetch("/api/incidents?status=" + encodeURIComponent(status));
+    const d = await r.json();
+    CASES_CACHE = d.incidents || [];
+    el.innerHTML = CASES_CACHE.length ? CASES_CACHE.map(c =>
+      `<div class="alert ${esc(c.severity)}"><b>${esc(c.title)}</b>`
+      + ` <span class="note">${c.alert_count} alert${c.alert_count === 1 ? "" : "s"} &middot; updated ${esc(c.updated)}</span>`
+      + `<br><span class="note">${esc(c.summary || "")}</span>`
+      + `<br><button class="btn-sm ghost" onclick="toggleCase(${c.id}, this)">show timeline</button>`
+      + (status === "open"
+          ? ` <button class="btn-sm ghost" onclick="closeCase(${c.id})">close case</button>`
+          : ` <button class="btn-sm ghost" onclick="reopenCase(${c.id})">reopen</button>`)
+      + `<div id="case-${c.id}" style="display:none"></div></div>`
+    ).join("") : '<p class="note">No ' + esc(status) + ' cases. A quiet network is a healthy network.</p>';
+  } catch(e) {
+    el.innerHTML = '<p class="note">Could not load cases.</p>';
+  }
+}
+async function toggleCase(iid, btn){
+  const el = document.getElementById("case-" + iid);
+  const open = el.style.display === "none";
+  if (open && !el.dataset.loaded) {
+    el.innerHTML = '<p class="note">Loading timeline...</p>';
+    try {
+      const r = await fetch("/api/incidents/" + iid);
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || "not found");
+      el.innerHTML = d.incident.alerts.map(a =>
+        `<p><b>[${esc(a.severity)}]</b> ${esc(a.title)}`
+        + (a.mitre_id ? ` <span class="badge mitre" title="${esc(a.mitre_name || "")} — tactic: ${esc(a.mitre_tactic || "")}">${esc(a.mitre_id)}</span>` : "")
+        + `<br><span class="note">${esc(a.ts)}${a.detail ? " — " + esc(a.detail) : ""}</span>`
+        + (a.meaning ? `<br><span class="note">${esc(a.meaning)}</span>` : "")
+        + (a.what_to_do ? `<br><span class="note">Next step: ${esc(a.what_to_do)}</span>` : "")
+        + `</p>`
+      ).join("") || '<p class="note">No alerts in this case.</p>';
+      el.dataset.loaded = "1";
+    } catch(e) {
+      el.innerHTML = '<p class="note">Could not load timeline.</p>';
+    }
+  }
+  el.style.display = open ? "block" : "none";
+  btn.textContent = open ? "hide timeline" : "show timeline";
+}
+async function closeCase(iid){
+  await fetch("/api/incidents/" + iid + "/close", {method:"POST"});
+  loadCases();
+}
+async function reopenCase(iid){
+  await fetch("/api/incidents/" + iid + "/reopen", {method:"POST"});
+  loadCases();
+}
 refresh(); setInterval(refresh, 5000);
-loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions();
+loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions(); loadCases();
 </script></body></html>
 """
 
@@ -787,6 +855,7 @@ def api_health():
 _ALERT_COLS = ("id, severity, title, detail, meaning, is_normal, what_to_do,"
                " ts")
 _ALERT_COLS_EXT = _ALERT_COLS + ", status, note"
+_ALERT_COLS_MITRE = _ALERT_COLS_EXT + ", mitre_id, mitre_name, mitre_tactic"
 
 _VALID_STATUS = ("new", "acknowledged", "dismissed")
 
@@ -796,25 +865,40 @@ def _alerts(status_filter="all"):
     status filter."""
     try:
         rows = dbm.query(
-            f"SELECT {_ALERT_COLS_EXT} FROM alerts WHERE ts > ?"
+            f"SELECT {_ALERT_COLS_MITRE} FROM alerts WHERE ts > ?"
             " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
+        with_mitre = True
         extended = True
     except Exception:
-        rows = dbm.query(
-            f"SELECT {_ALERT_COLS} FROM alerts WHERE ts > ?"
-            " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
-        extended = False
+        try:
+            rows = dbm.query(
+                f"SELECT {_ALERT_COLS_EXT} FROM alerts WHERE ts > ?"
+                " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
+            extended = True
+        except Exception:
+            rows = dbm.query(
+                f"SELECT {_ALERT_COLS} FROM alerts WHERE ts > ?"
+                " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
+            extended = False
+        with_mitre = False
     alerts = []
     for r in rows:
-        if extended:
+        if with_mitre:
+            (aid, sev, t, d, m, n, w, ts, st, note,
+             mitre_id, mitre_name, mitre_tactic) = r
+        elif extended:
             aid, sev, t, d, m, n, w, ts, st, note = r
+            mitre_id = mitre_name = mitre_tactic = None
         else:
             aid, sev, t, d, m, n, w, ts = r
             st, note = "new", ""
+            mitre_id = mitre_name = mitre_tactic = None
         alerts.append({
             "id": aid, "severity": sev, "title": t, "detail": d,
             "meaning": m, "is_normal": n, "what_to_do": w,
             "ts": _fmt_ts(ts), "status": st or "new", "note": note or "",
+            "mitre_id": mitre_id, "mitre_name": mitre_name,
+            "mitre_tactic": mitre_tactic,
         })
     if status_filter in _VALID_STATUS:
         alerts = [a for a in alerts if a["status"] == status_filter]
@@ -861,6 +945,53 @@ def alert_dismiss(aid):
     except Exception as exc:
         print(f"netmon dashboard: learn_from_dismissal failed: {exc!r}",
               file=sys.stderr)
+    return jsonify({"ok": True})
+
+
+# --- incidents: cases, not scattered alerts ------------------------------
+# Phase 3.5. Related alerts are bundled into one case with a timeline,
+# the way a senior analyst works.
+
+@app.route("/api/incidents")
+def api_incidents():
+    status = request.args.get("status", "open")
+    if status not in ("open", "closed"):
+        status = "open"
+    try:
+        cases = dbm.list_incidents(status=status)
+    except Exception:
+        cases = []
+    return jsonify({"incidents": [
+        {**c, "created": _fmt_ts(c["created_ts"]),
+         "updated": _fmt_ts(c["updated_ts"])} for c in cases]})
+
+
+@app.route("/api/incidents/<int:iid>")
+def api_incident(iid):
+    try:
+        case = dbm.get_incident(iid)
+    except Exception:
+        case = None
+    if not case:
+        return jsonify({"ok": False, "error": "case not found"}), 404
+    case["created"] = _fmt_ts(case["created_ts"])
+    case["updated"] = _fmt_ts(case["updated_ts"])
+    for a in case["alerts"]:
+        a["ts"] = _fmt_ts(a["ts"])
+    return jsonify({"ok": True, "incident": case})
+
+
+@app.route("/api/incidents/<int:iid>/close", methods=["POST"])
+def api_incident_close(iid):
+    if not dbm.set_incident_status(iid, "closed"):
+        return jsonify({"ok": False, "error": "case not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/incidents/<int:iid>/reopen", methods=["POST"])
+def api_incident_reopen(iid):
+    if not dbm.set_incident_status(iid, "open"):
+        return jsonify({"ok": False, "error": "case not found"}), 404
     return jsonify({"ok": True})
 
 
@@ -1211,7 +1342,9 @@ def api_stats():
         {"id": a["id"], "severity": a["severity"], "title": a["title"],
          "detail": a["detail"], "meaning": a["meaning"],
          "is_normal": a["is_normal"], "what_to_do": a["what_to_do"],
-         "ts": a["ts"], "status": a["status"], "note": a["note"]}
+         "ts": a["ts"], "status": a["status"], "note": a["note"],
+         "mitre_id": a.get("mitre_id"), "mitre_name": a.get("mitre_name"),
+         "mitre_tactic": a.get("mitre_tactic")}
         for a in _alerts(status_filter=request.args.get("status", "all"))
     ]
     last_flow_ts, stale = _flow_health()
