@@ -63,6 +63,16 @@ DEFAULTS = {
         # healthchecks.io (set the check's Grace to ~2x this).
         "heartbeat_minutes": 5,
     },
+    "scan": {
+        # Weekly self vulnerability scan of the OWN LAN (see netmon/scan.py).
+        # On-demand scans are always available from the dashboard.
+        "weekly": True,
+    },
+    "ingest": {
+        # Folder of exported Windows logs to watch (see INGEST.md).
+        # Empty = log ingestion disabled (graceful no-op).
+        "watch_dir": "",
+    },
 }
 
 ENV_PREFIX = "BRUTEDASH_"
@@ -112,6 +122,12 @@ alerts:
 monitor:
   heartbeat_url: ""  # healthchecks.io ping URL; empty = heartbeat disabled
   heartbeat_minutes: 5  # match the check's Period on healthchecks.io
+
+scan:
+  weekly: true  # weekly self vulnerability scan of your OWN LAN (dashboard can also run one on demand)
+
+ingest:
+  watch_dir: ""  # folder of exported Windows logs to watch (see INGEST.md); empty = disabled
 """
 
 

@@ -15,6 +15,13 @@ Tables:
   suggestions  pending allowlist suggestions awaiting human approval
   incidents  cases bundling related alerts (Phase 3.5: incidents, not alerts)
   incident_alerts  which alerts belong to which incident
+  assets  enriched device inventory (Phase 3.5: know the network)
+  device_hostnames  DHCP/mDNS hostname observations
+  device_ttl  last observed IP TTL per device IP (OS guess)
+  scan_runs  self vulnerability scan runs (own LAN only)
+  scan_findings  open ports found by self scans
+  host_events  Windows Event Log + firewall log events (see INGEST.md)
+  ingest_state  per-file read progress for log ingestion
   meta        small key/value store (heartbeats, watermarks, ...)
 
 All writers take the module lock; SQLite runs in WAL mode so the
@@ -105,6 +112,12 @@ CREATE TABLE IF NOT EXISTS device_names(
     updated_ts REAL
 );
 
+CREATE TABLE IF NOT EXISTS device_types(
+    mac TEXT PRIMARY KEY,        -- lowercased hardware address
+    dtype TEXT NOT NULL,         -- user-pinned device type (see topology.DEVICE_TYPES)
+    updated_ts REAL
+);
+
 CREATE TABLE IF NOT EXISTS device_profiles(
     mac TEXT NOT NULL,           -- lowercased hardware address
     hour INTEGER NOT NULL,       -- local hour of day, 0..23
@@ -165,6 +178,90 @@ CREATE TABLE IF NOT EXISTS incident_alerts(
     FOREIGN KEY(incident_id) REFERENCES incidents(id)
 );
 CREATE INDEX IF NOT EXISTS idx_incident_alerts_inc ON incident_alerts(incident_id);
+
+-- Phase 3.5 "know the network": asset inventory. Built by refresh_assets()
+-- from arp_observations (MAC/IP/first/last seen), device_hostnames
+-- (DHCP/mDNS names), device_ttl (OS guess), device_names (friendly name),
+-- and scan_findings (open ports).
+CREATE TABLE IF NOT EXISTS assets(
+    mac TEXT PRIMARY KEY,      -- lowercased hardware address
+    ip TEXT,                   -- most recent IP
+    first_seen REAL,
+    last_seen REAL,
+    hostname TEXT,             -- from DHCP/mDNS, when observed
+    hostname_source TEXT,      -- dhcp | mdns | ""
+    os_guess TEXT,             -- TTL heuristic, may be ""
+    vendor TEXT,               -- MAC OUI vendor, may be ""
+    open_ports TEXT,           -- JSON list of {port, service, risk}
+    updated_ts REAL
+);
+
+-- Raw hostname observations (DHCP option 12, mDNS .local names).
+CREATE TABLE IF NOT EXISTS device_hostnames(
+    id INTEGER PRIMARY KEY,
+    ts REAL,
+    mac TEXT,                  -- lowercased hardware address (may be "")
+    ip TEXT,
+    hostname TEXT,
+    source TEXT                -- dhcp | mdns
+);
+CREATE INDEX IF NOT EXISTS idx_hostnames_ts ON device_hostnames(ts);
+
+-- Last observed IP TTL per device IP (OS guess via TTL heuristics).
+CREATE TABLE IF NOT EXISTS device_ttl(
+    ip TEXT PRIMARY KEY,
+    ttl INTEGER,
+    updated_ts REAL
+);
+
+-- Phase 3.5 "know the network": self vulnerability scans of the LAN.
+CREATE TABLE IF NOT EXISTS scan_runs(
+    id INTEGER PRIMARY KEY,
+    ts REAL,
+    duration_s REAL,
+    devices_scanned INTEGER,
+    findings INTEGER,
+    note TEXT
+);
+
+-- Open ports found by self scans. (ip, port) is the identity: a port
+-- seen open in the latest run is 'open'; one that vanished is 'resolved'.
+CREATE TABLE IF NOT EXISTS scan_findings(
+    id INTEGER PRIMARY KEY,
+    run_ts REAL,               -- when the finding was recorded
+    ip TEXT,
+    mac TEXT,
+    port INTEGER,
+    service TEXT,
+    risk TEXT,                 -- Low | Medium
+    what_it_means TEXT,         -- plain-English explanation
+    status TEXT NOT NULL DEFAULT 'open',  -- open | resolved
+    UNIQUE(ip, port)            -- current state: one row per door
+);
+CREATE INDEX IF NOT EXISTS idx_findings_status ON scan_findings(status);
+
+-- Phase 3.5 "know the network": Windows Event Log + firewall log events
+-- imported from exported logs (see INGEST.md).
+CREATE TABLE IF NOT EXISTS host_events(
+    id INTEGER PRIMARY KEY,
+    ts REAL,
+    source TEXT,               -- eventlog | firewall
+    event_id TEXT,             -- e.g. "4625" or "DROP"
+    computer TEXT,
+    user_name TEXT,
+    detail TEXT,
+    matched_alert INTEGER      -- id of a correlated netmon alert, or NULL
+);
+CREATE INDEX IF NOT EXISTS idx_host_events_ts ON host_events(ts);
+
+-- Ingest progress: per watched file, how far we've read (mtime for XML
+-- exports which are rewritten wholesale; byte offset for append logs).
+CREATE TABLE IF NOT EXISTS ingest_state(
+    path TEXT PRIMARY KEY,
+    mtime REAL,
+    offset INTEGER,
+    last_run_ts REAL
+);
 
 CREATE TABLE IF NOT EXISTS meta(
     key TEXT PRIMARY KEY,
@@ -671,6 +768,39 @@ def device_name_map():
         conn = _db()
         return {m: n for m, n in conn.execute(
             "SELECT mac, name FROM device_names")}
+
+
+def set_device_type(mac, dtype):
+    """Pin a device's type by MAC (the topology map's correction loop).
+
+    An empty dtype clears the override. The value is stored as-is
+    (lowercased, capped); callers validate against topology.DEVICE_TYPES.
+    """
+    import time
+    mac = (mac or "").strip().lower()
+    dtype = (dtype or "").strip().lower()
+    if not mac:
+        raise ValueError("mac is required")
+    with _lock:
+        conn = _db()
+        if dtype:
+            conn.execute(
+                "INSERT INTO device_types (mac, dtype, updated_ts)"
+                " VALUES (?,?,?)"
+                " ON CONFLICT(mac) DO UPDATE SET dtype=excluded.dtype,"
+                " updated_ts=excluded.updated_ts",
+                (mac, dtype[:16], time.time()))
+        else:
+            conn.execute("DELETE FROM device_types WHERE mac=?", (mac,))
+        conn.commit()
+
+
+def device_type_map():
+    """{mac: dtype} for every user-pinned device type."""
+    with _lock:
+        conn = _db()
+        return {m: d for m, d in conn.execute(
+            "SELECT mac, dtype FROM device_types")}
 
 
 def known_devices(limit=100):
@@ -1227,6 +1357,372 @@ def latest_summary():
         "suggested_actions": json.loads(row[5] or "[]"),
         "origin": row[6],
     }
+
+
+# --- asset inventory -----------------------------------------------------
+# "Know the network": every LAN device, enriched. refresh_assets() (see
+# netmon/assets.py) folds arp_observations, device_hostnames, device_ttl,
+# device_names and scan_findings into the assets table; the dashboard
+# reads get_assets().
+
+
+def insert_hostname_observations(rows):
+    """rows: list of (ts, mac, ip, hostname, source).
+
+    mac is lowercased by callers when known; hostname is sanitized here
+    (LAN-derived strings must never reach the UI raw -- defense in depth
+    alongside the dashboard's esc())."""
+    if not rows:
+        return
+    clean = []
+    for ts, mac, ip, hostname, source in rows:
+        name = re.sub(r"[^A-Za-z0-9_.\- ]", "", str(hostname or "")).strip()
+        if not name:
+            continue
+        clean.append((ts, (mac or "").strip().lower() or "",
+                      (ip or "").strip(),
+                      name[:64],
+                      (source or "").strip().lower()[:16]))
+    if not clean:
+        return
+    with _lock:
+        conn = _db()
+        conn.executemany(
+            "INSERT INTO device_hostnames (ts, mac, ip, hostname, source)"
+            " VALUES (?,?,?,?,?)",
+            clean,
+        )
+        conn.commit()
+
+
+def device_hostname_map():
+    """{mac: (hostname, source)} -- latest non-empty name per MAC."""
+    latest = {}
+    for ts, mac, hostname, source in query(
+            "SELECT ts, mac, hostname, source FROM device_hostnames"
+            " WHERE mac != '' ORDER BY ts"):
+        if mac not in latest or ts >= latest[mac][0]:
+            latest[mac] = (ts, hostname, source)
+    return {mac: (hn, src) for mac, (_ts, hn, src) in latest.items()}
+
+
+def record_ttls(rows):
+    """rows: list of (ip, ttl, ts). Keeps the latest TTL per IP."""
+    if not rows:
+        return
+    with _lock:
+        conn = _db()
+        conn.executemany(
+            "INSERT INTO device_ttl (ip, ttl, updated_ts) VALUES (?,?,?)"
+            " ON CONFLICT(ip) DO UPDATE SET ttl=excluded.ttl,"
+            " updated_ts=excluded.updated_ts",
+            [(ip, int(ttl), ts) for ip, ttl, ts in rows
+             if ip and ttl is not None],
+        )
+        conn.commit()
+
+
+def device_ttl_map():
+    """{ip: ttl} -- last observed TTL per device IP."""
+    with _lock:
+        conn = _db()
+        return {ip: ttl for ip, ttl in conn.execute(
+            "SELECT ip, ttl FROM device_ttl")}
+
+
+def refresh_assets(rows):
+    """Replace the assets table with `rows`: list of dicts with keys
+    mac, ip, first_seen, last_seen, hostname, hostname_source, os_guess,
+    vendor, open_ports (list of dicts), updated_ts."""
+    import time as _t
+    with _lock:
+        conn = _db()
+        conn.execute("DELETE FROM assets")
+        conn.executemany(
+            "INSERT INTO assets (mac, ip, first_seen, last_seen, hostname,"
+            " hostname_source, os_guess, vendor, open_ports, updated_ts)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(
+                r.get("mac", ""), r.get("ip", ""), r.get("first_seen"),
+                r.get("last_seen"), r.get("hostname", ""),
+                r.get("hostname_source", ""), r.get("os_guess", ""),
+                r.get("vendor", ""),
+                json.dumps(r.get("open_ports") or []),
+                r.get("updated_ts") or _t.time(),
+            ) for r in rows],
+        )
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('assets_synced_ts', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(_t.time()),))
+        conn.commit()
+
+
+def get_assets():
+    """Enriched device inventory, newest activity first."""
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT mac, ip, first_seen, last_seen, hostname,"
+            " hostname_source, os_guess, vendor, open_ports, updated_ts"
+            " FROM assets ORDER BY last_seen DESC").fetchall()
+    out = []
+    for r in rows:
+        try:
+            ports = json.loads(r[8] or "[]")
+            if not isinstance(ports, list):
+                ports = []
+        except Exception:
+            ports = []
+        out.append({
+            "mac": r[0], "ip": r[1], "first_seen": r[2], "last_seen": r[3],
+            "hostname": r[4] or "", "hostname_source": r[5] or "",
+            "os_guess": r[6] or "", "vendor": r[7] or "",
+            "open_ports": ports, "updated_ts": r[9],
+        })
+    return out
+
+
+def assets_stale(max_age_s=3600):
+    """True when the assets table needs a refresh."""
+    import time as _t
+    raw = get_meta("assets_synced_ts")
+    try:
+        synced = float(raw) if raw else 0
+    except (TypeError, ValueError):
+        synced = 0
+    return (_t.time() - synced) > max_age_s
+
+
+# --- self vulnerability scans --------------------------------------------
+# Weekly, on-demand TCP connect scans of our OWN LAN only (see
+# netmon/scan.py). Findings are stored; alerts fire only for NEW or
+# changed findings so a weekly scan stays quiet.
+
+
+def record_scan_run(ts, duration_s, devices_scanned, findings, note=""):
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "INSERT INTO scan_runs (ts, duration_s, devices_scanned,"
+            " findings, note) VALUES (?,?,?,?,?)",
+            (ts, duration_s, devices_scanned, findings, (note or "")[:200]))
+        conn.commit()
+        return cur.lastrowid
+
+
+def record_scan_findings(run_ts, findings):
+    """Store this run's open findings; mark vanished ones resolved.
+
+    Current-state table (one row per ip/port; the scan_runs table keeps
+    the run history). findings: list of (ip, mac, port, service, risk,
+    what_it_means). Returns (new_findings, resolved_findings,
+    changed_findings) as (ip, port) key lists -- the scan module alerts
+    only on genuinely new/changed doors.
+    """
+    with _lock:
+        conn = _db()
+        prev_risk = {}
+        for ip, port, risk in conn.execute(
+                "SELECT ip, port, risk FROM scan_findings"
+                " WHERE status='open'"):
+            prev_risk[(ip, int(port))] = risk
+        new, changed, current = [], [], {}
+        for ip, mac, port, _svc, risk, _what in findings:
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                continue
+            key = (ip, port)
+            current[key] = True
+            if key not in prev_risk:
+                new.append(key)
+            elif prev_risk[key] != risk:
+                changed.append(key)
+        resolved = [k for k in prev_risk if k not in current]
+        for ip, port in resolved:
+            conn.execute(
+                "UPDATE scan_findings SET status='resolved'"
+                " WHERE ip=? AND port=? AND status='open'",
+                (ip, port))
+        for ip, mac, port, service, risk, what in findings:
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                continue
+            conn.execute(
+                "INSERT INTO scan_findings (run_ts, ip, mac, port, service,"
+                " risk, what_it_means, status)"
+                " VALUES (?,?,?,?,?,?,?,'open')"
+                " ON CONFLICT(ip, port) DO UPDATE SET run_ts=excluded.run_ts,"
+                " mac=excluded.mac, service=excluded.service,"
+                " risk=excluded.risk, what_it_means=excluded.what_it_means,"
+                " status='open'",
+                (run_ts, ip, mac, port, service, risk, what))
+        conn.commit()
+        return new, resolved, changed
+
+
+def latest_scan_run():
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT ts, duration_s, devices_scanned, findings, note"
+            " FROM scan_runs ORDER BY ts DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    return {"ts": row[0], "duration_s": row[1], "devices_scanned": row[2],
+            "findings": row[3], "note": row[4] or ""}
+
+
+def list_scan_findings(status="open", limit=200):
+    with _lock:
+        conn = _db()
+        return [
+            {"id": i, "run_ts": rt, "ip": ip, "mac": m or "",
+             "port": p, "service": s or "", "risk": rk or "",
+             "what_it_means": w or "", "status": st}
+            for i, rt, ip, m, p, s, rk, w, st in conn.execute(
+                "SELECT id, run_ts, ip, mac, port, service, risk,"
+                " what_it_means, status FROM scan_findings"
+                " WHERE status=? ORDER BY ip, port LIMIT ?",
+                (status, limit))]
+
+
+# --- host events (Windows Event Log + firewall log ingestion) -------------
+# Parsed from exported logs watched by netmon/ingest.py (see INGEST.md).
+# Degrades gracefully: an empty table just means no logs were provided.
+
+
+def insert_host_events(rows):
+    """rows: list of (ts, source, event_id, computer, user_name, detail)."""
+    if not rows:
+        return
+    with _lock:
+        conn = _db()
+        conn.executemany(
+            "INSERT INTO host_events (ts, source, event_id, computer,"
+            " user_name, detail) VALUES (?,?,?,?,?,?)",
+            [(ts, (source or "")[:16], str(event_id or "")[:16],
+              (computer or "")[:128], (user_name or "")[:128],
+              (detail or "")[:2000])
+             for ts, source, event_id, computer, user_name, detail in rows],
+        )
+        conn.commit()
+
+
+def host_events_since(ts, limit=200):
+    with _lock:
+        conn = _db()
+        return [
+            {"id": i, "ts": t, "source": s, "event_id": e,
+             "computer": c or "", "user_name": u or "",
+             "detail": d or "", "matched_alert": m}
+            for i, t, s, e, c, u, d, m in conn.execute(
+                "SELECT id, ts, source, event_id, computer, user_name,"
+                " detail, matched_alert FROM host_events WHERE ts > ?"
+                " ORDER BY ts DESC LIMIT ?", (ts, limit))]
+
+
+def mark_host_event_matched(event_id, alert_id):
+    with _lock:
+        conn = _db()
+        conn.execute("UPDATE host_events SET matched_alert=? WHERE id=?",
+                     (alert_id, event_id))
+        conn.commit()
+
+
+def ingest_state_get(path):
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT mtime, offset, last_run_ts FROM ingest_state"
+            " WHERE path=?", (path,)).fetchone()
+    if not row:
+        return None
+    return {"mtime": row[0], "offset": row[1], "last_run_ts": row[2]}
+
+
+def ingest_state_set(path, mtime, offset):
+    import time as _t
+    with _lock:
+        conn = _db()
+        conn.execute(
+            "INSERT INTO ingest_state (path, mtime, offset, last_run_ts)"
+            " VALUES (?,?,?,?)"
+            " ON CONFLICT(path) DO UPDATE SET mtime=excluded.mtime,"
+            " offset=excluded.offset, last_run_ts=excluded.last_run_ts",
+            (path, mtime, offset, _t.time()))
+        conn.commit()
+
+
+# --- sensor-box self-health baselines ---------------------------------------
+# netmon/selfcheck.py stores one JSON blob per check here. First run
+# learns the baseline (no alert); later runs compare and alert on drift.
+
+
+def selfcheck_baseline_get(check_name):
+    raw = get_meta(f"selfcheck_base_{check_name}")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def selfcheck_baseline_set(check_name, value):
+    set_meta(f"selfcheck_base_{check_name}", json.dumps(value))
+
+
+# --- internet uptime log ---------------------------------------------------
+# The outages table already records every watchdog drop (Phase 3). This
+# productizes it: weekly stats for the dashboard's uptime view.
+
+
+def outage_stats(days=7):
+    """Downtime summary for the last `days` days.
+
+    Returns {count, total_s, longest_s, uptime_pct, ongoing_s} where
+    ongoing_s is the length of a currently-open outage (0 if none).
+    """
+    import time as _t
+    now = _t.time()
+    cutoff = now - days * 86400
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT start_ts, gap_seconds FROM outages"
+            " WHERE start_ts > ? AND end_ts IS NOT NULL", (cutoff,)).fetchall()
+        ongoing = conn.execute(
+            "SELECT start_ts FROM outages WHERE end_ts IS NULL"
+            " ORDER BY start_ts DESC LIMIT 1").fetchone()
+    gaps = [(max(0.0, s - cutoff), g or 0.0) for s, g in rows]
+    # Only count the portion of each outage inside the window.
+    total = 0.0
+    longest = 0.0
+    for start, gap in gaps:
+        end = start + gap
+        inside = max(0.0, min(end, now - cutoff) - max(start, 0.0))
+        total += inside
+        longest = max(longest, inside)
+    ongoing_s = (now - ongoing[0]) if ongoing else 0.0
+    window = now - cutoff
+    uptime_pct = max(0.0, min(100.0, 100.0 * (window - total) / window))
+    return {"count": len(rows), "total_s": total, "longest_s": longest,
+            "uptime_pct": uptime_pct, "ongoing_s": ongoing_s}
+
+
+def list_outages(limit=30):
+    """Recent outage log, newest first: target, start, end, duration."""
+    with _lock:
+        conn = _db()
+        return [
+            {"id": i, "target": t or "", "start_ts": s,
+             "end_ts": e, "gap_seconds": g}
+            for i, t, s, e, g in conn.execute(
+                "SELECT id, target, start_ts, end_ts, gap_seconds"
+                " FROM outages ORDER BY start_ts DESC LIMIT ?", (limit,))]
 
 
 def query(sql, params=()):

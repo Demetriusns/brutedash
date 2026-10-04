@@ -144,18 +144,40 @@ North star: the automated analyst for a network with nobody watching it.
 
 ### Know the network (visibility)
 - Asset inventory — auto-discover every device, OS, open ports. Can't spot
-  abnormal without knowing normal per machine.
+  abnormal without knowing normal per machine. DONE 2026-10-03 (batch 6):
+  `assets` table (MAC/IP/first/last seen, DHCP+mDNS hostnames, TTL OS
+  guess, local OUI vendor table `netmon/oui.txt`), dashboard Assets
+  section. Visual asset inventory: network topology map (router/gateway
+  at top, per-device nodes, traffic-weighted edges, click for details,
+  one-click type correction persisted per-MAC) — the first thing a
+  small-business owner looks at. DONE 2026-10-03 (batch 6).
 - Self vulnerability scan (new 2026-09-30) — weekly lightweight scan of his
   OWN network: "here are the open doors on your LAN." The analyst auditing,
-  not just watching.
+  not just watching. DONE 2026-10-03 (batch 6): LAN-only TCP connect scan
+  (RFC1918/loopback enforced, ≤64 devices, 31 ports, 0.8s timeout),
+  local risk knowledge base with plain-English explanations, alerts only
+  on NEW/changed findings (Low/Medium), on-demand + weekly schedule.
 - Windows Event Log + firewall log ingestion — failed logins, new services,
-  USB drives. Network-only is half the picture.
+  USB drives. Network-only is half the picture. DONE 2026-10-03 (batch 6):
+  watch-dir ingestion of pfirewall.log + Security/System/Defender XML
+  exports (graceful when absent; see INGEST.md). Rules: 4625 bursts
+  correlated with network brute-force alerts, 7045 new services, USB
+  mass-storage inserts (unknown device = Medium), Defender 1116/1117
+  detections (Critical incident when paired with C2 beaconing from the
+  same host — brutedash correlates, the endpoint AV handles prevention).
 - Top talkers / "who's slowing my internet" (new 2026-09-30) — live
   per-device bandwidth view. Every small-business owner asks this; answer
-  it in one glance.
+  it in one glance. DONE 2026-10-03 (batch 6): per-device up/down over
+  the last hour, sortable, on the dashboard.
 - Internet uptime log (new 2026-09-30) — "down 4 times this week, 37
   minutes total" with timestamps. Evidence for the ISP call. (Outage
   detection already exists in Phase 3; productize the log.)
+  DONE 2026-10-03 (batch 6): `outage_stats()` + dashboard uptime view.
+- Sensor-box self-health (new 2026-10-03, his call) — lightweight checks
+  on the box running brutedash: unexpected listening ports, new
+  services/autorun entries vs. baseline, Defender real-time protection
+  status. Alerts on drift. Python + OS APIs only, no kernel drivers.
+  DONE 2026-10-03 (batch 6).
 
 ### Rap sheets (threat intel)
 - Threat intel lookups — check external IPs/domains against blocklists;
@@ -237,6 +259,18 @@ alerts, Orion asks 2-3 models at once (e.g. local Qwen3 + Gemini free tier
 -> escalate to the human. Only alert metadata and flow summaries go out --
 never packet contents, never PII (free tiers may train on prompts). Home
 alert volume is a handful per day; free-tier rate limits are plenty.
+
+**Product positioning (his words 2026-10-03, INTERNAL ONLY):** "We are the
+doctor — checking up, diagnosing, testing, aiding, recovering." Most tools
+are the emergency room; brutedash is the network's family doctor:
+preventive care (baselines, vuln scans, quiet monitoring), plain-English
+explanations that make the owner smarter, and escalation of the hard 5%
+to him as the expert admin. NOTE — voice rule (his correction 2026-10-03):
+the doctor metaphor describes what the product IS, never how it talks.
+All user-facing copy (dashboard, emails, reports) stays casual,
+plain-spoken, non-technical — "here's what we found / here's what it
+means / here's what to do." No medical or clinical language in the
+product, ever.
 
 **Constant learning:** every council verdict plus his morning review feeds
 the dismissal-learning loop (Phase 3.5 priority 1: quiet-first). The system

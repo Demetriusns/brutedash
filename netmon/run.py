@@ -30,9 +30,12 @@ DETECT_INTERVAL = 60  # seconds between periodic rule runs
 
 def _monitor_loop(stop_event, digest_hours=24):
     """Detection rules every minute; AI summary every SUMMARY_INTERVAL;
-    email digest every digest_hours (0 disables)."""
+    email digest every digest_hours (0 disables). Also: the weekly self
+    vulnerability scan, the Windows-log ingest poll, and the sensor-box
+    self-health check -- all best-effort, none can break the loop."""
     last_summary = 0
     last_digest = time.time()  # first digest waits a full interval
+    last_ingest = 0
     while not stop_event.wait(DETECT_INTERVAL):
         try:
             detm.run_all()
@@ -45,6 +48,27 @@ def _monitor_loop(stop_event, digest_hours=24):
                 expl.summarize(save=True)
             except Exception:
                 pass
+        # Weekly self scan of our own LAN (scan.py decides if it's due).
+        try:
+            from . import scan as scanm
+            scanm.maybe_weekly_scan()
+        except Exception:
+            pass
+        # Windows Event Log / firewall log ingestion (ingest.py decides
+        # if it's configured); every 5 minutes is plenty for log files.
+        if now - last_ingest >= 300:
+            last_ingest = now
+            try:
+                from . import ingest as ingm
+                ingm.run_ingest()
+            except Exception:
+                pass
+        # Sensor-box self-health (selfcheck.py decides if it's due).
+        try:
+            from . import selfcheck as selfm
+            selfm.maybe_scheduled_selfcheck()
+        except Exception:
+            pass
         if digest_hours > 0 and now - last_digest >= digest_hours * 3600:
             last_digest = now
             try:

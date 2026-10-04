@@ -34,6 +34,12 @@ try:
 except ImportError:  # dashboard-only mode can run without scapy
     HAVE_SCAPY = False
 
+try:
+    from scapy.all import DHCP, BOOTP  # DHCP hostname (option 12)
+    HAVE_DHCP = True
+except ImportError:
+    HAVE_DHCP = False
+
 FLUSH_INTERVAL = 15      # seconds between DB flushes
 SCAN_WINDOW = 120        # seconds of SYN history kept per source
 SCAN_PORT_THRESHOLD = 20  # distinct ports in window -> port scan alert
@@ -138,7 +144,9 @@ class FlowAggregator:
 
     Also buffers observed DNS queries (UDP/53 with a DNS question) and
     IP/MAC observations (from the Ethernet header), which are written to
-    the dns_queries and arp_observations tables on flush()."""
+    the dns_queries and arp_observations tables on flush(). It also buffers
+    hostname observations (DHCP option 12, mDNS .local names) and per-IP
+    TTL sightings (OS guess via TTL heuristics) for the asset inventory."""
 
     def __init__(self):
         self.local_ips = get_local_ips()
@@ -147,6 +155,9 @@ class FlowAggregator:
         self.flows = {}  # (src, dst, sport, dport, proto) -> [pkts, bytes, first, last]
         self.dns_buf = []   # [(ts, src_ip, name, qtype)]
         self.arp_buf = []   # [(ts, ip, mac)]
+        self.hostname_buf = []  # [(ts, mac, ip, hostname, source)]
+        self.ttl_map = {}   # ip -> (ttl, ts); bounded below
+        self.gateway_ip = None  # default gateway from DHCP option 3
         self._mac_seen = set()  # (ip, mac) already buffered this run
         self.lock = threading.Lock()
         self.scans = ScanTracker()
@@ -199,6 +210,132 @@ class FlowAggregator:
         except Exception:
             return None
 
+            return (ts, src, name, qtype)
+        except Exception:
+            return None
+
+    def _dhcp_hostname_row(self, pkt, ts, src, eth_mac):
+        """Return a (ts, mac, ip, hostname, "dhcp") row, or None.
+
+        DHCP clients announce their hostname in option 12; the client's
+        hardware address comes from the BOOTP chaddr field (the IP header
+        is often 0.0.0.0 at this point, so the MAC is the useful key).
+        """
+        if not HAVE_DHCP:
+            return None
+        try:
+            if not pkt.haslayer(DHCP):
+                return None
+            dhcp = pkt.getlayer(DHCP)
+            hostname = None
+            for opt in (getattr(dhcp, "options", None) or []):
+                if not isinstance(opt, tuple) or len(opt) < 2:
+                    continue
+                key = opt[0]
+                if key == "hostname" or key == 12:
+                    hostname = opt[1]
+                    break
+            if not hostname:
+                return None
+            if isinstance(hostname, bytes):
+                hostname = hostname.decode("utf-8", "replace")
+            hostname = str(hostname).strip().strip("\x00")
+            if not hostname:
+                return None
+            mac = eth_mac or ""
+            try:
+                bootp = pkt.getlayer(BOOTP)
+                chaddr = getattr(bootp, "chaddr", b"")
+                if chaddr and len(chaddr) >= 6:
+                    mac = ":".join(f"{b:02x}" for b in chaddr[:6])
+            except Exception:
+                pass
+            return (ts, (mac or "").lower(), src, hostname, "dhcp")
+        except Exception:
+            return None
+
+    def _dhcp_router_ip(self, pkt):
+        """Default gateway from DHCP option 3 (router), or None.
+
+        DHCP OFFER/ACK packets from the LAN's DHCP server carry the
+        router option -- that's the gateway every device routes through.
+        Stored to meta on flush; the topology map uses it, falling back
+        to the most-connected LAN node when no DHCP was observed.
+        """
+        if not HAVE_DHCP:
+            return None
+        try:
+            if not pkt.haslayer(DHCP):
+                return None
+            dhcp = pkt.getlayer(DHCP)
+            for opt in (getattr(dhcp, "options", None) or []):
+                if not isinstance(opt, tuple) or len(opt) < 2:
+                    continue
+                if opt[0] == "router" or opt[0] == 3:
+                    val = opt[1]
+                    if isinstance(val, (list, tuple)):
+                        val = val[0] if val else None
+                    if isinstance(val, bytes):
+                        try:
+                            val = val.decode("ascii", "replace")
+                        except Exception:
+                            return None
+                    val = str(val).strip() if val else ""
+                    # sanity: dotted quad, not 0.0.0.0
+                    parts = val.split(".")
+                    if (len(parts) == 4
+                            and all(p.isdigit() and 0 <= int(p) <= 255
+                                    for p in parts)
+                            and val != "0.0.0.0"):
+                        return val
+        except Exception:
+            pass
+        return None
+
+    def _mdns_hostname_rows(self, pkt, ts, src, eth_mac):
+        """mDNS (.local) name sightings -> [(ts, mac, ip, name, "mdns")].
+
+        Devices announce themselves on UDP/5353 ("myprinter.local").
+        Service names (_http._tcp.local) are skipped; only plain host
+        labels are kept.
+        """
+        rows = []
+        try:
+            dns = pkt.getlayer(DNS)
+            if dns is None:
+                return rows
+            candidates = []
+            qd = getattr(dns, "qd", None)
+            if qd is not None and getattr(qd, "qname", None):
+                candidates.append(qd.qname)
+            try:
+                ancount = int(getattr(dns, "ancount", 0) or 0)
+            except (TypeError, ValueError):
+                ancount = 0
+            for i in range(min(ancount, 10)):
+                try:
+                    rr = dns.an[i]
+                    if getattr(rr, "rrname", None):
+                        candidates.append(rr.rrname)
+                except Exception:
+                    break
+            seen = set()
+            for raw in candidates:
+                name = raw.decode("utf-8", "replace") if isinstance(
+                    raw, bytes) else str(raw)
+                name = name.strip().rstrip(".").lower()
+                if not name.endswith(".local"):
+                    continue
+                first = name[:-len(".local")].split(".")[0]
+                if not first or first.startswith("_") or first in seen:
+                    continue
+                seen.add(first)
+                rows.append((ts, (eth_mac or "").lower(), src, first,
+                             "mdns"))
+        except Exception:
+            pass
+        return rows
+
     def handle(self, pkt):
         """Process one scapy packet. Never touches payload bytes."""
         ip = pkt.getlayer(IP) or pkt.getlayer(IPv6)
@@ -208,6 +345,9 @@ class FlowAggregator:
         ts = float(getattr(pkt, "time", time.time()))
         proto, sport, dport, is_syn = "other", 0, 0, False
         dns_row = None
+        dhcp_row = None
+        dhcp_gateway = None
+        mdns_rows = []
         if pkt.haslayer(TCP):
             t = pkt[TCP]
             proto, sport, dport = "TCP", t.sport, t.dport
@@ -225,6 +365,32 @@ class FlowAggregator:
         eth = pkt.getlayer(Ether)
         mac = eth.src if eth is not None else None
 
+        # TTL sighting for the OS guess (asset inventory). Bounded: busy
+        # networks see thousands of IPs; keep the freshest 2048.
+        try:
+            ttl = getattr(ip, "ttl", None)
+            if ttl is None:
+                ttl = getattr(ip, "hlim", None)  # IPv6
+            if ttl:
+                if len(self.ttl_map) >= 2048 and src not in self.ttl_map:
+                    self.ttl_map.pop(next(iter(self.ttl_map)))
+                self.ttl_map[src] = (int(ttl), ts)
+        except Exception:
+            pass
+
+        # DHCP hostnames (UDP 67/68) and mDNS .local names (UDP 5353).
+        # Bounded like the ARP buffer: already-seen names re-record later.
+        if pkt.haslayer(UDP):
+            try:
+                u = pkt[UDP]
+                if u.dport in (67, 68) or u.sport in (67, 68):
+                    dhcp_row = self._dhcp_hostname_row(pkt, ts, src, mac)
+                    dhcp_gateway = self._dhcp_router_ip(pkt)
+                if u.dport == 5353 and pkt.haslayer(DNS):
+                    mdns_rows = self._mdns_hostname_rows(pkt, ts, src, mac)
+            except Exception:
+                pass
+
         self.packets_seen += 1
         if ts > self.max_ts:
             self.max_ts = ts
@@ -241,6 +407,13 @@ class FlowAggregator:
                 f[3] = ts
             if dns_row is not None:
                 self.dns_buf.append(dns_row)
+            if dhcp_gateway:
+                self.gateway_ip = dhcp_gateway  # latest wins; DHCP is chatty
+            if dhcp_row is not None and len(self.hostname_buf) < 1000:
+                self.hostname_buf.append(dhcp_row)
+            if mdns_rows and len(self.hostname_buf) < 1000:
+                room = 1000 - len(self.hostname_buf)
+                self.hostname_buf.extend(mdns_rows[:room])
             if mac is not None:
                 pair = (src, mac)
                 if pair not in self._mac_seen:
@@ -268,10 +441,22 @@ class FlowAggregator:
             self.dns_buf = []
             arp_rows = self.arp_buf
             self.arp_buf = []
+            hostname_rows = self.hostname_buf
+            self.hostname_buf = []
+            ttl_rows = [(ip, ttl, ts) for ip, (ttl, ts) in self.ttl_map.items()]
+            self.ttl_map = {}
+            gateway_ip = self.gateway_ip
         if dns_rows:
             dbm.insert_dns_queries(dns_rows)
+        if gateway_ip:
+            # Default gateway seen in DHCP -- the topology map reads this.
+            dbm.set_meta("dhcp_gateway_ip", gateway_ip)
         if arp_rows:
             dbm.insert_arp_observations(arp_rows)
+        if hostname_rows:
+            dbm.insert_hostname_observations(hostname_rows)
+        if ttl_rows:
+            dbm.record_ttls(ttl_rows)
         if not items:
             return 0
         rows = [

@@ -72,6 +72,36 @@ _TECHNIQUES = {
         "Defense Evasion",
         "A suddenly-busy new domain can be malware cycling through names.",
     ),
+    "vuln_finding": (
+        "T1046", "Network Service Discovery",
+        "Discovery",
+        "Open doors on your own LAN are what an attacker's scan would find.",
+    ),
+    "host_event": (
+        "T1078", "Valid Accounts",
+        "Persistence",
+        "Odd host events (logons, services) can be an attacker settling in.",
+    ),
+    "usb_insert": (
+        "T1091", "Replication Through Removable Media",
+        "Initial Access",
+        "USB drives carry malware into networks and files out of them.",
+    ),
+    "defender_detection": (
+        "T1204.002", "User Execution: Malicious File",
+        "Execution",
+        "Defender caught something the attacker got executed on the host.",
+    ),
+    "host_compromise": (
+        "T1071.001", "Application Layer Protocol: Web Protocols",
+        "Command and Control",
+        "Endpoint detection plus C2 traffic means the host is owned.",
+    ),
+    "self_drift": (
+        "T1547.001", "Boot or Logon Autostart Execution: Registry Run Keys",
+        "Persistence",
+        "New listeners, services, or autoruns on the monitor box itself.",
+    ),
 }
 
 

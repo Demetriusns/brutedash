@@ -9,7 +9,9 @@ Run via netmon/run.py (starts capture + watchdog threads), or standalone
 for viewing an existing database:  python -m netmon.dashboard
 """
 import hmac
+import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -107,6 +109,19 @@ nav.top a.nl:hover{background:#161b22;color:#c9d1d9}
 section.block{margin:0 0 2.2em}
 section.block>h2{font-size:1.25em;margin-bottom:.4em}
 .card.kpi .v{font-size:2em}
+.tnode{cursor:pointer}
+.tnode circle{stroke-width:2}
+.tnode text{fill:#c9d1d9;font-family:monospace}
+.tnode:hover circle{stroke:#58a6ff;stroke-width:3}
+.tnode.sel circle{stroke:#f0b429;stroke-width:3}
+.tedge{stroke:#58a6ff;opacity:.4}
+.tedge.lan{stroke:#8b949e;opacity:.28}
+.tedge.flow{stroke-dasharray:7 7;animation:tflow 1.1s linear infinite}
+@keyframes tflow{to{stroke-dashoffset:-14}}
+.tlabel{font-size:11px;text-anchor:middle}
+.tsub{font-size:9px;fill:#8b949e;text-anchor:middle}
+#topomap svg{width:100%;height:auto;display:block}
+#topodetails{margin-top:.6em}
 .card.kpi-ok{border-color:#2d6a3f} .card.kpi-ok .v{color:#7ee787}
 .card.kpi-warn{border-color:#8a6d1f} .card.kpi-warn .v{color:#f0b429}
 .card.kpi-bad{background:#3d1113;border-color:#f85149} .card.kpi-bad .v{color:#f85149}
@@ -225,6 +240,9 @@ INDEX_HTML = """<html><head><title>netmon -- your network, explained</title>
 <a class="nl" href="#alerts">Alerts <span id="nav-alert-badge"></span></a>
 <a class="nl" href="#traffic">Traffic</a>
 <a class="nl" href="#devices">Devices</a>
+<a class="nl" href="#assets">Assets</a>
+<a class="nl" href="#map">Map</a>
+<a class="nl" href="#scan">Open doors</a>
 <a class="nl" href="#settings">Settings</a>
 </nav>
 <div id="stalebanner" class="banner-red" style="display:none"></div>
@@ -275,7 +293,10 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 <section class="block" id="traffic">
 <h2>&#128202; Biggest conversations (last 15 min)</h2>
 <div id="talkers"></div>
-<h2>&#128268; Internet drops</h2>
+<h2>&#128246; Who is using the internet (last hour)</h2>
+<p class="note">Per device, up = sent, down = received. Click a column to sort.</p>
+<div id="toptalkers"><p class="note">Loading...</p></div>
+<h2>&#128268; Internet uptime</h2>
 <div id="outages"><p class="note">Loading...</p></div>
 </section>
 
@@ -283,6 +304,26 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 <h2>&#128241; Your devices</h2>
 <p class="note">Name your devices so alerts read like English instead of hardware addresses.</p>
 <div id="devices"><p class="note">Loading...</p></div>
+</section>
+
+<section class="block" id="assets">
+<h2>&#128203; Asset inventory <button class="btn-sm ghost" onclick="loadAssets()">refresh</button></h2>
+<p class="note">Every device the monitor has seen, with what it could learn without touching it: hostname, maker, OS guess, and open doors from the self scan.</p>
+<div id="assets"><p class="note">Loading...</p></div>
+</section>
+
+<section class="block" id="map">
+<h2>&#128506;&#65039; Network map <button class="btn-sm ghost" onclick="loadTopology()">refresh</button></h2>
+<p class="note">Every device on your network and how they connect. Types are best guesses &mdash; click a device for details or to fix its type.</p>
+<div id="topomap"><p class="note">Loading...</p></div>
+<div id="topodetails"></div>
+</section>
+
+<section class="block" id="scan">
+<h2>&#128273; Open doors check <button class="btn-sm ghost" onclick="startScan()">Run scan now</button> <span class="note" id="scanmsg"></span></h2>
+<p class="note">A gentle knock on your own devices' doors -- the way an attacker would check them. Weekly scans run automatically; this button runs one on demand. Scans only ever touch your own network.</p>
+<div id="scanstatus"><p class="note">Loading...</p></div>
+<div id="scanfindings"></div>
 </section>
 
 <section class="block" id="settings">
@@ -336,6 +377,16 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 <details class="settings"><summary>Email digest</summary><div class="inner">
 <p><button class="btn-sm" onclick="sendDigest()">Send digest now</button> <span class="note" id="digestmsg"></span></p>
 <p class="note">A digest email goes out automatically once a day (Medium alerts and up, skipping anything you dismissed). Change the timing in config.yaml under alerts &rarr; digest_hours (0 turns it off).</p>
+</div></details>
+
+<details class="settings"><summary>Windows logs</summary><div class="inner">
+<p class="note">Exported Windows Event Log and firewall logs (see INGEST.md for the export steps). The monitor reads new entries every few minutes: failed logons, new services, USB drives, Defender detections.</p>
+<div id="hostevents"><p class="note">Loading...</p></div>
+</div></details>
+
+<details class="settings"><summary>This box (sensor health)</summary><div class="inner">
+<p class="note">Lightweight self-checks on the computer running brutedash: new listening ports, new services or autorun entries vs. baseline, and Defender real-time protection status. First run learns the baseline silently.</p>
+<div id="selfcheck"><p class="note">Loading...</p></div>
 </div></details>
 
 <details class="settings"><summary>What the numbers mean</summary><div class="inner">
@@ -524,10 +575,16 @@ async function refreshInner(){
     d.talkers.map(t=>`<tr><td>${esc(t.src)}${named(t.src)}</td><td>${esc(t.dst)}${named(t.dst)}</td><td>${t.port} (${esc(t.port_words)})</td><td>${(t.bytes/1e6).toFixed(2)}</td><td><div class="bar"><div style="width:${(100*t.bytes/maxB).toFixed(0)}%"></div></div></td></tr>`).join("") + `</table>`
     : '<p class="note">No conversations yet.</p>';
 
+  const wk = d.outage_week || {count: 0, total_s: 0, longest_s: 0, uptime_pct: 100, ongoing_s: 0};
+  const wkline = wk.count
+    ? `Down ${wk.count} time${wk.count === 1 ? "" : "s"} this week, ${fmtDur(wk.total_s)} total (${(wk.uptime_pct || 0).toFixed(1)}% up)`
+    : `No drops this week (${(wk.uptime_pct || 0).toFixed(1)}% up)`;
   document.getElementById("outages").innerHTML =
-    (d.ongoing.length ? d.ongoing.map(o=>`<p class="down">INTERNET DOWN: ${esc(o.target)} since ${esc(o.since)}</p>`).join("") : "")
-    + (d.outages.length ? `<table><tr><th>What dropped</th><th>Down for</th><th>When</th></tr>` +
-      d.outages.map(o=>`<tr><td>${esc(o.target)}</td><td>${o.gap_s.toFixed(0)}s</td><td class="note">${esc(o.when)}</td></tr>`).join("") + `</table>`
+    (wk.ongoing_s > 0 ? `<p class="down">INTERNET DOWN right now — out for ${fmtDur(wk.ongoing_s)}</p>` : "") +
+    (d.ongoing.length ? d.ongoing.map(o=>`<p class="down">INTERNET DOWN: ${esc(o.target)} since ${esc(o.since)}</p>`).join("") : "") +
+    `<p><b>${esc(wkline)}</b></p>` +
+    (d.outage_log && d.outage_log.length ? `<table><tr><th>What dropped</th><th>Down for</th><th>From</th><th>To</th></tr>` +
+      d.outage_log.map(o=>`<tr><td>${esc(o.target)}</td><td>${esc(o.dur)}</td><td class="note">${esc(o.start)}</td><td class="note">${esc(o.end)}</td></tr>`).join("") + `</table>`
       : '<p class="note">No drops recorded. Your connection has been steady.</p>');
 }
 // refresh() wraps refreshInner so a failed update can never leave the
@@ -770,8 +827,283 @@ async function reopenCase(iid){
   await fetch("/api/incidents/" + iid + "/reopen", {method:"POST"});
   loadCases();
 }
+function fmtDur(s){
+  s = Math.max(0, Math.round(s || 0));
+  if (s < 90) return s + "s";
+  const m = Math.round(s / 60);
+  if (m < 90) return m + " min";
+  return (s / 3600).toFixed(1) + " hr";
+}
+async function loadAssets(){
+  try {
+    const r = await fetch("/api/assets");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    document.getElementById("assets").innerHTML = d.assets.length ?
+      `<table><tr><th>Device</th><th>Address / hostname</th><th>Maker</th><th>OS guess</th><th>Open doors</th><th>First seen</th><th>Last seen</th></tr>` +
+      d.assets.map(a=>{
+        const doors = a.open_ports.length
+          ? a.open_ports.map(p=>`<span class="badge ${p.risk === "Medium" ? "warn" : "ok"}" title="${esc(p.service)} — ${esc(p.risk)} risk">${p.port}</span>`).join(" ")
+          : `<span class="note">none found</span>`;
+        const host = a.hostname ? `${esc(a.hostname)} <span class="note">(${esc(a.hostname_source)})</span><br>` : "";
+        return `<tr><td>${a.name ? `<b>${esc(a.name)}</b><br>` : ""}<span class="note">${esc(a.mac)}</span></td><td>${host}<span class="note">${esc(a.ip)}</span></td><td>${esc(a.vendor) || '<span class="note">?</span>'}</td><td>${esc(a.os_guess) || '<span class="note">?</span>'}</td><td>${doors}</td><td class="note">${esc(a.first_seen)}</td><td class="note">${esc(a.last_seen)}</td></tr>`;
+      }).join("") + `</table>`
+      : '<p class="note">No devices seen yet.</p>';
+  } catch(e) {
+    document.getElementById("assets").innerHTML =
+      '<p class="banner-red">Could not load assets: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+let TT_DATA = [], TT_SORT = "total_mb", TT_DIR = -1;
+async function loadTopTalkers(){
+  try {
+    const r = await fetch("/api/top_talkers");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    TT_DATA = d.talkers || [];
+    renderTopTalkers();
+  } catch(e) {
+    document.getElementById("toptalkers").innerHTML =
+      '<p class="banner-red">Could not load: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+function sortTopTalkers(col){
+  if (TT_SORT === col) { TT_DIR = -TT_DIR; } else { TT_SORT = col; TT_DIR = -1; }
+  renderTopTalkers();
+}
+function renderTopTalkers(){
+  const rows = TT_DATA.slice().sort((a,b)=> TT_DIR * ((a[TT_SORT] || 0) - (b[TT_SORT] || 0)));
+  const maxT = Math.max(1, ...rows.map(x=>x.total_mb || 0));
+  const arrow = c => TT_SORT === c ? (TT_DIR === -1 ? " &#9660;" : " &#9650;") : "";
+  document.getElementById("toptalkers").innerHTML = rows.length ?
+    `<table><tr><th>Device</th><th onclick="sortTopTalkers('up_mb')" style="cursor:pointer">Up MB${arrow("up_mb")}</th><th onclick="sortTopTalkers('down_mb')" style="cursor:pointer">Down MB${arrow("down_mb")}</th><th onclick="sortTopTalkers('total_mb')" style="cursor:pointer">Total MB${arrow("total_mb")}</th><th></th></tr>` +
+    rows.map(t=>`<tr><td>${t.name ? `<b>${esc(t.name)}</b><br>` : ""}<span class="note">${esc(t.ip)}</span></td><td>${(t.up_mb || 0).toFixed(1)}</td><td>${(t.down_mb || 0).toFixed(1)}</td><td>${(t.total_mb || 0).toFixed(1)}</td><td><div class="bar"><div style="width:${(100 * (t.total_mb || 0) / maxT).toFixed(0)}%"></div></div></td></tr>`).join("") + `</table>`
+    : '<p class="note">No traffic in the last hour.</p>';
+}
+async function loadScanStatus(){
+  try {
+    const r = await fetch("/api/scan");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    const lr = d.last_run;
+    document.getElementById("scanstatus").innerHTML =
+      (d.running ? `<p><span class="badge warn">Scanning your network&hellip;</span> <span class="note">this takes a minute or two</span></p>` : "") +
+      (lr ? `<p class="note">Last scan: ${esc(lr.when)} &mdash; ${lr.devices_scanned} devices, ${lr.findings} open doors, took ${lr.duration_s}s.</p>`
+          : `<p class="note">No scan yet. Weekly scans run automatically; you can run one now.</p>`);
+    const fs = d.findings || [];
+    document.getElementById("scanfindings").innerHTML = fs.length ?
+      `<table><tr><th>Device</th><th>Door</th><th>Risk</th><th>What it means</th></tr>` +
+      fs.map(f=>`<tr><td>${f.name ? `<b>${esc(f.name)}</b><br>` : ""}<span class="note">${esc(f.ip)}</span></td><td>${f.port} <span class="note">(${esc(f.service)})</span></td><td><span class="badge ${f.risk === "Medium" ? "warn" : "ok"}">${esc(f.risk)}</span></td><td>${esc(f.what_it_means)}</td></tr>`).join("") + `</table>`
+      : (lr ? `<p class="note">No open doors found. A quiet network is a healthy network.</p>` : "");
+    if (d.running) setTimeout(loadScanStatus, 5000);
+  } catch(e) {
+    document.getElementById("scanstatus").innerHTML =
+      '<p class="banner-red">Could not load scan status: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+async function startScan(){
+  const m = document.getElementById("scanmsg");
+  m.textContent = "starting...";
+  try {
+    const r = await fetch("/api/scan/run", {method:"POST"});
+    const d = await r.json();
+    m.textContent = d.started ? "scan running..." : (d.error || "already running");
+  } catch(e) { m.textContent = "could not start: " + String((e && e.message) || e); }
+  loadScanStatus();
+}
+async function loadHostEvents(){
+  try {
+    const r = await fetch("/api/host_events");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    const ing = d.ingest || {};
+    const head = ing.enabled
+      ? `<p class="note">Watching <code>${esc(ing.dir)}</code> &mdash; ${ing.events_stored || 0} events stored, last check ${esc(ing.last_run || "never")}.</p>`
+      : `<p class="note">Not configured. Set <code>ingest.watch_dir</code> in config.yaml (see INGEST.md) to start reading exported Windows logs.</p>`;
+    const evs = d.events || [];
+    document.getElementById("hostevents").innerHTML = head + (evs.length ?
+      `<table><tr><th>When</th><th>Event</th><th>Computer</th><th>What happened</th></tr>` +
+      evs.map(e=>`<tr><td class="note">${esc(e.when)}</td><td>${esc(e.source)} ${esc(e.event_id)}</td><td>${esc(e.computer)}</td><td>${esc(e.summary)}${e.matched_alert ? ` <span class="note">(linked to a network alert)</span>` : ""}</td></tr>`).join("") + `</table>`
+      : `<p class="note">No host events yet.</p>`);
+  } catch(e) {
+    document.getElementById("hostevents").innerHTML =
+      '<p class="banner-red">Could not load host events: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+async function loadSelfcheck(){
+  try {
+    const r = await fetch("/api/selfcheck");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    const s = d.summary || {};
+    const head = s.last_run_ts
+      ? `<p class="note">Last check: ${esc(new Date(s.last_run_ts * 1000).toLocaleString())} &mdash; status: <b>${esc(s.status)}</b> <span class="note">(${esc(s.platform)} / ${esc(s.hostname)})</span></p>`
+      : `<p class="note">Not run yet. The first check learns the baseline silently; it runs every 6 hours.</p>`;
+    const rows = d.checks || [];
+    document.getElementById("selfcheck").innerHTML = head + (rows.length ?
+      `<table><tr><th>Check</th><th>Status</th><th>Detail</th></tr>` +
+      rows.map(c=>`<tr><td>${esc(c.name)}</td><td><span class="badge ${c.status === "ok" ? "ok" : (c.status === "drift" ? "warn" : "")}">${esc(c.status)}</span></td><td>${esc(c.detail)}</td></tr>`).join("") + `</table>` : "");
+  } catch(e) {
+    document.getElementById("selfcheck").innerHTML =
+      '<p class="banner-red">Could not load self-check status: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+// --- network map ----------------------------------------------------------
+// SVG topology: gateway at top, devices on an arc below. Pure JS, no deps.
+// Edge width ~ traffic volume; animated dashes = traffic in the last 5 min.
+let TOPO_CACHE = null, TOPO_SEL = null;
+const TOPO_COLORS = {phone:"#f9a8d4",laptop:"#fcd34d",desktop:"#fdba74",
+  tv:"#c4b5fd",printer:"#9ca3af",iot:"#6ee7b7",ap:"#a5b4fc",
+  router:"#93c5fd",server:"#fca5a5",unknown:"#6b7280"};
+async function loadTopology(){
+  try {
+    const r = await fetch("/api/topology");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    TOPO_CACHE = await r.json();
+    if (TOPO_CACHE.ok === false) throw new Error(TOPO_CACHE.error || "map failed");
+    renderTopology();
+  } catch(e) {
+    document.getElementById("topomap").innerHTML =
+      '<p class="banner-red">Could not load network map: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+function renderTopology(){
+  const d = TOPO_CACHE;
+  const box = document.getElementById("topomap");
+  if (!d || !d.nodes || !d.nodes.length) {
+    box.innerHTML = '<p class="note">No devices seen yet. The map fills in as the monitor watches your network.</p>';
+    document.getElementById("topodetails").innerHTML = "";
+    return;
+  }
+  const W = 920, H = 560, CX = 460;
+  const gwKey = d.gateway && d.gateway.key;
+  const nodes = d.nodes.slice();
+  const pos = {};
+  const others = nodes.filter(n => n.key !== gwKey);
+  if (gwKey) {
+    pos[gwKey] = [CX, 92];
+    const n = others.length;
+    others.forEach((nd, i) => {
+      let x, y;
+      if (n === 1) { x = CX; y = 400; }
+      else {
+        const a = Math.PI * (0.12 + 0.76 * i / (n - 1)); // lower arc
+        x = CX + 370 * Math.cos(a);
+        y = 300 + 195 * Math.sin(a);
+      }
+      pos[nd.key] = [x, y];
+    });
+  } else {
+    nodes.forEach((nd, i) => {
+      const a = 2 * Math.PI * i / nodes.length - Math.PI / 2;
+      pos[nd.key] = [CX + 330 * Math.cos(a), 290 + 190 * Math.sin(a)];
+    });
+  }
+  const maxB = Math.max(1, ...d.edges.map(e => e.bytes || 0));
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Network map">';
+  svg += d.edges.map(e => {
+    const p1 = pos[e.a], p2 = pos[e.b];
+    if (!p1 || !p2) return "";
+    const w = (1 + 5 * Math.sqrt((e.bytes || 0) / maxB)).toFixed(1);
+    const cls = "tedge" + (e.kind === "lan" ? " lan" : "") + (e.active ? " flow" : "");
+    const mb = ((e.bytes || 0) / 1e6).toFixed(1);
+    return '<line x1="' + p1[0].toFixed(0) + '" y1="' + p1[1].toFixed(0)
+      + '" x2="' + p2[0].toFixed(0) + '" y2="' + p2[1].toFixed(0)
+      + '" class="' + cls + '" stroke-width="' + w + '"><title>'
+      + esc(e.a) + " \u2194 " + esc(e.b) + " \u2014 " + mb + " MB"
+      + (e.active ? " (active now)" : "") + "</title></line>";
+  }).join("");
+  svg += nodes.map(nd => {
+    const p = pos[nd.key] || [CX, 300];
+    const col = TOPO_COLORS[nd.dtype] || TOPO_COLORS.unknown;
+    const label = nd.name || nd.hostname || nd.vendor || nd.ip || "unknown";
+    const sub = [nd.vendor, nd.ip].filter(Boolean).join(" \u00B7 ");
+    const sel = TOPO_SEL === nd.key ? " sel" : "";
+    return '<g class="tnode' + sel + '" data-key="' + esc(nd.key) + '" onclick="selectTopoNode(this)">' +
+      + '<circle cx="' + p[0].toFixed(0) + '" cy="' + p[1].toFixed(0)
+      + '" r="26" fill="#161b22" stroke="' + col + '"/>'
+      + '<text x="' + p[0].toFixed(0) + '" y="' + (p[1] + 8).toFixed(0)
+      + '" text-anchor="middle" font-size="22">' + esc(nd.icon) + "</text>"
+      + '<text class="tlabel" x="' + p[0].toFixed(0) + '" y="' + (p[1] + 44).toFixed(0)
+      + '">' + esc(label) + "</text>"
+      + '<text class="tsub" x="' + p[0].toFixed(0) + '" y="' + (p[1] + 58).toFixed(0)
+      + '">' + esc(sub) + "</text>"
+      + "<title>" + esc(label) + " \u2014 " + esc(nd.type_label)
+      + " (" + esc(nd.ip) + ")</title></g>";
+  }).join("");
+  svg += "</svg>";
+  if (!gwKey) svg += '<p class="note">Gateway not identified yet \u2014 it appears once DHCP traffic is observed, otherwise the most-connected device stands in.</p>';
+  box.innerHTML = svg;
+  renderTopoDetails();
+}
+function selectTopoNode(el){
+  const key = el.getAttribute("data-key");
+  TOPO_SEL = (TOPO_SEL === key) ? null : key;
+  renderTopology();
+}
+function renderTopoDetails(){
+  const el = document.getElementById("topodetails");
+  const d = TOPO_CACHE;
+  if (!d || !TOPO_SEL) { el.innerHTML = ""; return; }
+  const n = (d.nodes || []).find(x => x.key === TOPO_SEL);
+  if (!n) { el.innerHTML = ""; return; }
+  const src = n.dtype_source === "manual" ? "set by you" : "auto-detected";
+  const doors = (n.open_ports || []).map(p =>
+    esc(String(p.port)) + " " + esc(p.service || "")).join(", ") || "none found";
+  const opts = (d.types || []).map(t =>
+    '<option value="' + esc(t.key) + '"' + (t.key === n.dtype ? " selected" : "")
+    + ">" + esc(t.icon) + " " + esc(t.label) + "</option>").join("");
+  el.innerHTML =
+    "<table><tr><th>Device</th><td>"
+    + (n.name ? "<b>" + esc(n.name) + "</b><br>" : "")
+    + (n.hostname ? esc(n.hostname) + "<br>" : "")
+    + '<span class="note">' + esc(n.mac) + " \u00B7 " + esc(n.ip) + "</span></td></tr>"
+    + "<tr><th>Type</th><td>" + esc(n.icon) + " " + esc(n.type_label)
+    + ' <span class="note">(' + esc(src) + ")</span><br>"
+    + (n.mac
+      ? '<label class="note">Wrong type? Fix it: </label>'
+        + '<select id="topo-relabel" data-mac="' + esc(n.mac)
+        + '" onchange="relabelTopo(this)">'
+        + '<option value="">auto-detect</option>' + opts + "</select>"
+      : '<span class="note">MAC unknown \u2014 type cannot be pinned for this node.</span>')
+    + "</td></tr>"
+    + "<tr><th>Traffic (last hour)</th><td>up " + esc(String(n.up_mb))
+    + " MB \u00B7 down " + esc(String(n.down_mb)) + " MB</td></tr>"
+    + "<tr><th>Maker / OS guess</th><td>" + (esc(n.vendor) || "?")
+    + " \u00B7 " + (esc(n.os_guess) || "?") + "</td></tr>"
+    + "<tr><th>Open doors</th><td>" + doors + "</td></tr>"
+    + "<tr><th>Alerts (24h)</th><td>" + (n.alerts_24h || 0) + "</td></tr>"
+    + '<tr><th>First seen</th><td class="note">'
+    + (n.first_seen ? esc(new Date(n.first_seen * 1000).toLocaleString()) : "?")
+    + "</td></tr></table>";
+}
+async function relabelTopo(sel){
+  const mac = sel.getAttribute("data-mac");
+  const dtype = sel.value;
+  try {
+    const r = await fetch("/api/device_type", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({mac: mac, dtype: dtype})});
+    const dd = await r.json();
+    if (!dd.ok) throw new Error(dd.error || "rejected");
+  } catch(e) {
+    document.getElementById("topodetails").innerHTML =
+      '<p class="banner-red">Could not save device type: '
+      + esc(String((e && e.message) || e)) + "</p>";
+    return;
+  }
+  loadTopology();
+}
 refresh(); setInterval(refresh, 5000);
-loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions(); loadCases();
+loadDevices(); loadQuietHours(); loadRuleHealth(); loadAllowlist(); loadSuggestions(); loadCases(); loadTopology();
+loadAssets(); loadTopTalkers(); setInterval(loadTopTalkers, 30000);
+loadScanStatus(); loadHostEvents(); loadSelfcheck();
 </script></body></html>
 """
 
@@ -813,6 +1145,17 @@ PCAP_RESULT_HTML = """<html><head><title>netmon -- pcap results</title>
 
 def _fmt_ts(ts):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def _fmt_dur(seconds):
+    """Plain-English duration: 45s, 12 min, 2.5 hr."""
+    s = max(0, int(seconds or 0))
+    if s < 90:
+        return f"{s}s"
+    minutes = round(s / 60)
+    if minutes < 90:
+        return f"{minutes} min"
+    return f"{s / 3600:.1f} hr"
 
 
 def _get_meta(key):
@@ -1050,6 +1393,187 @@ def api_device_name():
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True})
+
+
+# --- know the network: assets, top talkers, uptime, scans, host logs -------
+
+
+@app.route("/api/assets")
+def api_assets():
+    """Enriched device inventory (asset inventory, Phase 3.5)."""
+    from . import assets as assetsm
+    names = dbm.device_name_map()
+    out = []
+    for a in assetsm.get_assets():
+        out.append({
+            "mac": a["mac"], "ip": a["ip"],
+            "name": names.get(a["mac"], ""),
+            "hostname": a["hostname"],
+            "hostname_source": a["hostname_source"],
+            "vendor": a["vendor"], "os_guess": a["os_guess"],
+            "open_ports": a["open_ports"],
+            "first_seen": _fmt_ts(a["first_seen"]) if a.get("first_seen")
+            else "",
+            "last_seen": _fmt_ts(a["last_seen"]) if a.get("last_seen")
+            else "",
+        })
+    return jsonify({"assets": out})
+
+
+@app.route("/api/top_talkers")
+def api_top_talkers():
+    """Per-device up/down over the last hour, attributed by MAC."""
+    now = time.time()
+    ip2mac = dbm.ip_to_mac_map()
+    mac2ips = {}
+    for ip, mac in ip2mac.items():
+        mac2ips.setdefault(mac, []).append(ip)
+    names = dbm.device_name_map()
+    up, down = {}, {}
+    for src, dst, nbytes in dbm.query(
+            "SELECT src_ip, dst_ip, SUM(bytes) FROM flows WHERE ts > ?"
+            " GROUP BY src_ip, dst_ip", (now - 3600,)):
+        m1 = ip2mac.get(src)
+        m2 = ip2mac.get(dst)
+        if m1:
+            up[m1] = up.get(m1, 0) + (nbytes or 0)
+        if m2:
+            down[m2] = down.get(m2, 0) + (nbytes or 0)
+    out = []
+    for mac in set(up) | set(down):
+        u, d = up.get(mac, 0), down.get(mac, 0)
+        ips = mac2ips.get(mac, [])
+        out.append({
+            "mac": mac, "name": names.get(mac, ""),
+            "ip": ips[0] if ips else "",
+            "up_mb": round(u / 1e6, 2), "down_mb": round(d / 1e6, 2),
+            "total_mb": round((u + d) / 1e6, 2),
+        })
+    out.sort(key=lambda t: t["total_mb"], reverse=True)
+    return jsonify({"talkers": out[:25], "window_min": 60})
+
+
+@app.route("/api/scan")
+def api_scan():
+    """Self vulnerability scan status + current open findings."""
+    running = dbm.get_meta("vuln_scan_running") == "1"
+    lr = dbm.latest_scan_run()
+    findings = []
+    if lr:
+        names = dbm.device_name_map()
+        ip2mac = dbm.ip_to_mac_map()
+        for f in dbm.list_scan_findings(status="open"):
+            findings.append({
+                "ip": f["ip"],
+                "name": names.get(f["mac"] or ip2mac.get(f["ip"], ""), ""),
+                "port": f["port"], "service": f["service"],
+                "risk": f["risk"], "what_it_means": f["what_it_means"],
+            })
+    return jsonify({
+        "running": running,
+        "last_run": ({
+            "when": _fmt_ts(lr["ts"]),
+            "duration_s": round(lr["duration_s"] or 0, 1),
+            "devices_scanned": lr["devices_scanned"],
+            "findings": lr["findings"], "note": lr["note"],
+        } if lr else None),
+        "findings": findings,
+    })
+
+
+@app.route("/api/scan/run", methods=["POST"])
+def api_scan_run():
+    """Start an on-demand self scan in the background."""
+    from . import scan as scanm
+    if scanm.scan_already_running():
+        return jsonify({"started": False,
+                        "error": "a scan is already running"})
+    scanm.start_scan_async(note="manual")
+    return jsonify({"started": True})
+
+
+@app.route("/api/host_events")
+def api_host_events():
+    """Recent Windows host events + ingestion status."""
+    from . import ingest as ingm
+    events = []
+    for e in dbm.host_events_since(time.time() - 7 * 86400, limit=50):
+        try:
+            summary = (json.loads(e["detail"] or "{}")).get("summary", "")
+        except Exception:
+            summary = ""
+        events.append({
+            "when": _fmt_ts(e["ts"]), "source": e["source"],
+            "event_id": e["event_id"], "computer": e["computer"],
+            "summary": summary, "matched_alert": e["matched_alert"],
+        })
+    info = {"enabled": bool(ingm.watch_dir())}
+    if info["enabled"]:
+        last = dbm.get_meta("ingest_last_run_ts")
+        try:
+            last_txt = _fmt_ts(float(last)) if last else ""
+        except (TypeError, ValueError):
+            last_txt = ""
+        info.update({
+            "dir": ingm.watch_dir(),
+            "last_run": last_txt,
+            "events_stored": dbm.query(
+                "SELECT COUNT(*) FROM host_events")[0][0],
+        })
+    return jsonify({"ingest": info, "events": events})
+
+
+@app.route("/api/selfcheck")
+def api_selfcheck():
+    """Sensor-box self-health: last run + per-check status."""
+    from . import selfcheck as selfm
+    summary = selfm.status_summary()
+    results = []
+    try:
+        raw = dbm.get_meta("selfcheck_last_results")
+        data = json.loads(raw) if raw else {}
+        for name, r in data.items():
+            results.append({
+                "name": name, "status": r.get("status", ""),
+                "detail": r.get("detail", "")})
+    except Exception:
+        pass
+    return jsonify({"summary": summary, "checks": results})
+
+
+@app.route("/api/topology")
+def api_topology():
+    """Visual network map data: gateway, nodes, edges (Phase 3.5)."""
+    from . import topology as topom
+    try:
+        return jsonify(topom.build_topology())
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:200],
+                        "gateway": None, "nodes": [], "edges": [],
+                        "types": []})
+
+
+@app.route("/api/device_type", methods=["POST"])
+def api_device_type():
+    """Pin (or clear) a device's type by MAC -- the map's correction loop.
+
+    Body: {mac, dtype}. dtype must be a known type key; "" clears the
+    override back to auto-detection.
+    """
+    from . import topology as topom
+    data = request.get_json(silent=True) or {}
+    mac = (data.get("mac") or "").strip().lower()
+    dtype = (data.get("dtype") or "").strip().lower()
+    if not re.match(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$", mac):
+        return jsonify({"ok": False, "error": "mac is required"}), 400
+    if dtype and not topom.valid_dtype(dtype):
+        return jsonify({"ok": False,
+                        "error": "unknown device type: %s" % dtype[:16]}), 400
+    try:
+        dbm.set_device_type(mac, dtype)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True, "dtype": dtype or "auto"})
 
 
 # --- quiet hours ------------------------------------------------------------
@@ -1358,6 +1882,19 @@ def api_stats():
             "SELECT target, start_ts, end_ts, gap_seconds FROM outages"
             " WHERE end_ts IS NOT NULL ORDER BY start_ts DESC LIMIT 10")
     ]
+    # Productized uptime log: weekly "down N times, M total" summary plus
+    # the full recent log with timestamps and durations.
+    try:
+        outage_week = dbm.outage_stats(7)
+    except Exception:
+        outage_week = None
+    outage_log = [
+        {"target": o["target"],
+         "dur": _fmt_dur(o["gap_seconds"]) if o["gap_seconds"] else "ongoing",
+         "start": _fmt_ts(o["start_ts"]),
+         "end": _fmt_ts(o["end_ts"]) if o["end_ts"] else "now"}
+        for o in dbm.list_outages(30)
+    ]
     conn = {}
     if watchdog is not None:
         for label, st in watchdog.current().items():
@@ -1407,6 +1944,8 @@ def api_stats():
         },
         "ongoing": ongoing,
         "outages": outages,
+        "outage_week": outage_week,
+        "outage_log": outage_log,
         "stale": stale,
         "last_flow_ts": last_flow_ts,
         "auth_required": bool(NETMON_PASSWORD),
