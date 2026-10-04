@@ -354,6 +354,10 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 <p class="note">A gentle knock on your own devices' doors -- the way an attacker would check them. Weekly scans run automatically; this button runs one on demand. Scans only ever touch your own network.</p>
 <div id="scanstatus"><p class="note">Loading...</p></div>
 <div id="scanfindings"></div>
+<h3 style="margin-top:1em">Deeper check <span class="note">(Nuclei)</span> <button class="btn-sm ghost" onclick="startNucleiScan()">Run deeper scan</button> <span class="note" id="nucleimsg"></span></h3>
+<p class="note">Nuclei runs thousands of known vulnerability checks against your own devices -- deeper than the door-knock above, still your network only. Weekly when enabled; this button runs one on demand. <span id="nucleiinstall"></span></p>
+<div id="nucleistatus"><p class="note">Loading...</p></div>
+<div id="nucleifindings"></div>
 </section>
 
 <section class="block" id="settings">
@@ -417,6 +421,9 @@ the alerts above are empty, everything is fine -- <b>a quiet network is a health
 <details class="settings"><summary>This box (sensor health)</summary><div class="inner">
 <p class="note">Lightweight self-checks on the computer running brutedash: new listening ports, new services or autorun entries vs. baseline, and Defender real-time protection status. First run learns the baseline silently.</p>
 <div id="selfcheck"><p class="note">Loading...</p></div>
+<h4 style="margin-top:1em">Software on this box</h4>
+<p class="note">What is installed here, checked against the list of security flaws attackers are actively using right now. Local check only -- nothing leaves this box.</p>
+<div id="swaudit"><p class="note">Loading...</p></div>
 </div></details>
 
 <details class="settings"><summary>What the numbers mean</summary><div class="inner">
@@ -1262,19 +1269,52 @@ async function loadScanStatus(){
     const lr = d.last_run;
     document.getElementById("scanstatus").innerHTML =
       (d.running ? `<p><span class="badge warn">Scanning your network&hellip;</span> <span class="note">this takes a minute or two</span></p>` : "") +
-      (lr ? `<p class="note">Last scan: ${esc(lr.when)} &mdash; ${lr.devices_scanned} devices, ${lr.findings} open doors, took ${lr.duration_s}s.</p>`
+      (lr ? `<p class="note">Last door-knock scan: ${esc(lr.when)} &mdash; ${lr.devices_scanned} devices, ${lr.findings} open doors, took ${lr.duration_s}s.</p>`
           : `<p class="note">No scan yet. Weekly scans run automatically; you can run one now.</p>`);
     const fs = d.findings || [];
     document.getElementById("scanfindings").innerHTML = fs.length ?
       `<table><tr><th>Device</th><th>Door</th><th>Risk</th><th>What it means</th></tr>` +
-      fs.map(f=>`<tr><td>${f.name ? `<b>${esc(f.name)}</b><br>` : ""}<span class="note">${esc(f.ip)}</span></td><td>${f.port} <span class="note">(${esc(f.service)})</span></td><td><span class="badge ${f.risk === "Medium" ? "warn" : "ok"}">${esc(f.risk)}</span></td><td>${esc(f.what_it_means)}</td></tr>`).join("") + `</table>`
+      fs.map(f=>`<tr><td>${f.name ? `<b>${esc(f.name)}</b><br>` : ""}<span class="note">${esc(f.ip)}</span></td><td>${f.port} <span class="note">(${esc(f.service)})</span>${f.source === "template" ? ` <span class="note">[check file]</span>` : ""}</td><td><span class="badge ${f.risk === "Medium" ? "warn" : "ok"}">${esc(f.risk)}</span></td><td>${esc(f.what_it_means)}</td></tr>`).join("") + `</table>`
       : (lr ? `<p class="note">No open doors found. A quiet network is a healthy network.</p>` : "");
+    renderNuclei(d.nuclei || {});
     if (d.running) setTimeout(loadScanStatus, 5000);
   } catch(e) {
     document.getElementById("scanstatus").innerHTML =
       '<p class="banner-red">Could not load scan status: '
       + esc(String((e && e.message) || e)) + '</p>';
   }
+}
+function renderNuclei(n){
+  const lr = n.last_run;
+  const statusEl = document.getElementById("nucleistatus");
+  const installEl = document.getElementById("nucleiinstall");
+  if (!n.installed) {
+    statusEl.innerHTML = `<p class="note">${esc(n.install_note || "Nuclei is not installed.")}</p>`;
+    installEl.innerHTML = "";
+    document.getElementById("nucleifindings").innerHTML = "";
+    return;
+  }
+  installEl.innerHTML = "";
+  statusEl.innerHTML =
+    (n.running ? `<p><span class="badge warn">Deeper scan running&hellip;</span> <span class="note">this takes a while -- thousands of checks</span></p>` : "") +
+    (lr ? `<p class="note">Last deeper scan: ${esc(new Date(lr.when * 1000).toLocaleString())} &mdash; ${lr.targets} devices, ${lr.findings} findings (${lr.new_findings} new), took ${lr.duration_s}s.</p>`
+        : `<p class="note">No deeper scan yet. ${n.enabled ? "Weekly scans run automatically; you can run one now." : "Turn on <code>nuclei.enabled</code> in config.yaml for weekly scans, or run one now."}</p>`);
+  const fs = n.findings || [];
+  document.getElementById("nucleifindings").innerHTML = fs.length ?
+    `<table><tr><th>Device</th><th>Finding</th><th>Urgency</th><th>What it means</th></tr>` +
+    fs.map(f=>`<tr><td><span class="note">${esc(f.ip)}</span></td><td><b>${esc(f.name)}</b><br><span class="note">${esc(f.template_id)}${f.cves ? " &middot; " + esc(f.cves) : ""}</span></td><td><span class="badge ${f.severity === "High" ? "bad" : (f.severity === "Medium" ? "warn" : "ok")}">${esc(f.severity)}</span></td><td>${esc(f.description || "See the finding name above.")}${f.matched_at ? `<br><span class="note">${esc(f.matched_at)}</span>` : ""}</td></tr>`).join("") + `</table>`
+    : (lr ? `<p class="note">No findings. A quiet network is a healthy network.</p>` : "");
+  if (n.running) setTimeout(loadScanStatus, 10000);
+}
+async function startNucleiScan(){
+  const m = document.getElementById("nucleimsg");
+  m.textContent = "starting...";
+  try {
+    const r = await fetch("/api/nuclei/run", {method:"POST"});
+    const d = await r.json();
+    m.textContent = d.started ? "deeper scan running..." : (d.error || "could not start");
+  } catch(e) { m.textContent = "could not start: " + String((e && e.message) || e); }
+  loadScanStatus();
 }
 async function startScan(){
   const m = document.getElementById("scanmsg");
@@ -1319,11 +1359,28 @@ async function loadSelfcheck(){
     document.getElementById("selfcheck").innerHTML = head + (rows.length ?
       `<table><tr><th>Check</th><th>Status</th><th>Detail</th></tr>` +
       rows.map(c=>`<tr><td>${esc(c.name)}</td><td><span class="badge ${c.status === "ok" ? "ok" : (c.status === "drift" ? "warn" : "")}">${esc(c.status)}</span></td><td>${esc(c.detail)}</td></tr>`).join("") + `</table>` : "");
+    renderSwaudit(d.swaudit || {});
   } catch(e) {
     document.getElementById("selfcheck").innerHTML =
       '<p class="banner-red">Could not load self-check status: '
       + esc(String((e && e.message) || e)) + '</p>';
   }
+}
+function renderSwaudit(sw){
+  const el = document.getElementById("swaudit");
+  if (!el) return;
+  if (!sw.enabled) {
+    el.innerHTML = `<p class="note">Disabled. Turn on <code>swaudit.enabled</code> in config.yaml to check installed software against the known-exploited list.</p>`;
+    return;
+  }
+  const head = sw.last_run_ts
+    ? `<p class="note">Last check: ${esc(new Date(sw.last_run_ts * 1000).toLocaleString())} &mdash; ${sw.packages} programs inventoried, ${sw.kev_entries} known-exploited flaws on the list.</p>`
+    : `<p class="note">Not run yet. Runs daily; the first run is quiet.</p>`;
+  const ms = sw.matches || [];
+  el.innerHTML = head + (ms.length ?
+    `<table><tr><th>Program</th><th>Flaw</th><th>What it is</th></tr>` +
+    ms.map(m=>`<tr><td><b>${esc(m.package)}</b> <span class="note">${esc(m.version)} (${esc(m.source)})</span></td><td><span class="badge warn">Medium</span> ${esc(m.cve_id)}${m.due_date ? `<br><span class="note">fix-by ${esc(m.due_date)}</span>` : ""}</td><td>${esc(m.vuln_name || m.product)}<br><span class="note">${esc(m.description)}</span></td></tr>`).join("") + `</table>`
+    : (sw.last_run_ts ? `<p class="note">Nothing installed here matches the known-exploited list. A quiet box is a healthy box.</p>` : ""));
 }
 // --- network map ----------------------------------------------------------
 // SVG topology: gateway at top, devices on an arc below. Pure JS, no deps.
@@ -2038,7 +2095,12 @@ def api_top_talkers():
 
 @app.route("/api/scan")
 def api_scan():
-    """Self vulnerability scan status + current open findings."""
+    """Self vulnerability scan status + current open findings.
+
+    Covers the built-in TCP connect scan AND the Nuclei-powered deeper
+    scan: one status line per scanner, one findings list each.
+    """
+    from . import nuclei as nucleim
     running = dbm.get_meta("vuln_scan_running") == "1"
     lr = dbm.latest_scan_run()
     findings = []
@@ -2051,6 +2113,7 @@ def api_scan():
                 "name": names.get(f["mac"] or ip2mac.get(f["ip"], ""), ""),
                 "port": f["port"], "service": f["service"],
                 "risk": f["risk"], "what_it_means": f["what_it_means"],
+                "source": f["source"],
             })
     return jsonify({
         "running": running,
@@ -2061,6 +2124,7 @@ def api_scan():
             "findings": lr["findings"], "note": lr["note"],
         } if lr else None),
         "findings": findings,
+        "nuclei": nucleim.nuclei_status(),
     })
 
 
@@ -2072,6 +2136,24 @@ def api_scan_run():
         return jsonify({"started": False,
                         "error": "a scan is already running"})
     scanm.start_scan_async(note="manual")
+    return jsonify({"started": True})
+
+
+@app.route("/api/nuclei/run", methods=["POST"])
+def api_nuclei_run():
+    """Start an on-demand Nuclei scan in the background.
+
+    Targets are ALWAYS the LAN asset inventory -- this endpoint takes
+    no parameters and there is no way to supply a target through it.
+    """
+    from . import nuclei as nucleim
+    ok, note = nucleim.check_binary()
+    if not ok:
+        return jsonify({"started": False, "error": note})
+    if nucleim._nuclei_already_running():
+        return jsonify({"started": False,
+                        "error": "a scan is already running"})
+    nucleim.start_nuclei_async()
     return jsonify({"started": True})
 
 
@@ -2108,8 +2190,13 @@ def api_host_events():
 
 @app.route("/api/selfcheck")
 def api_selfcheck():
-    """Sensor-box self-health: last run + per-check status."""
+    """Sensor-box self-health: last run + per-check status.
+
+    Also carries the software-inventory/CVE check (swaudit) -- it audits
+    this same box, so it lives in the same section of the dashboard.
+    """
     from . import selfcheck as selfm
+    from . import swaudit as swam
     summary = selfm.status_summary()
     results = []
     try:
@@ -2121,7 +2208,8 @@ def api_selfcheck():
                 "detail": r.get("detail", "")})
     except Exception:
         pass
-    return jsonify({"summary": summary, "checks": results})
+    return jsonify({"summary": summary, "checks": results,
+                    "swaudit": swam.swaudit_status()})
 
 
 @app.route("/api/topology")

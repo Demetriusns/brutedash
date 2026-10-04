@@ -225,8 +225,10 @@ CREATE TABLE IF NOT EXISTS scan_runs(
     note TEXT
 );
 
--- Open ports found by self scans. (ip, port) is the identity: a port
--- seen open in the latest run is 'open'; one that vanished is 'resolved'.
+-- Open ports found by self scans. (source, ip, port) is the identity:
+-- a port seen open in the latest run is 'open'; one that vanished is
+-- 'resolved'. source is 'builtin' (the TCP connect scan) or 'template'
+-- (a check from a YAML template in templates/) -- see netmon/scan.py.
 CREATE TABLE IF NOT EXISTS scan_findings(
     id INTEGER PRIMARY KEY,
     run_ts REAL,               -- when the finding was recorded
@@ -236,8 +238,9 @@ CREATE TABLE IF NOT EXISTS scan_findings(
     service TEXT,
     risk TEXT,                 -- Low | Medium
     what_it_means TEXT,         -- plain-English explanation
+    source TEXT NOT NULL DEFAULT 'builtin',  -- builtin | template
     status TEXT NOT NULL DEFAULT 'open',  -- open | resolved
-    UNIQUE(ip, port)            -- current state: one row per door
+    UNIQUE(source, ip, port)   -- current state: one row per door+source
 );
 CREATE INDEX IF NOT EXISTS idx_findings_status ON scan_findings(status);
 
@@ -275,8 +278,8 @@ CREATE TABLE IF NOT EXISTS meta(
 -- Refreshed on a schedule by netmon/threatintel.py. Feed update
 -- timestamps live in meta as ti_feed_updated_<feed>.
 CREATE TABLE IF NOT EXISTS ti_entries(
-    key TEXT NOT NULL,         -- domain (lowercased) or IP string
-    kind TEXT NOT NULL,        -- 'domain' | 'ip'
+    key TEXT NOT NULL,         -- domain (lowercased), IP string, or CVE id
+    kind TEXT NOT NULL,        -- 'domain' | 'ip' | 'cve'
     feed TEXT NOT NULL,        -- which feed listed it
     detail TEXT,               -- reason/category from the feed
     first_seen REAL,           -- when we first saw it listed
@@ -353,6 +356,62 @@ CREATE TABLE IF NOT EXISTS escalations(
     FOREIGN KEY(incident_id) REFERENCES incidents(id)
 );
 CREATE INDEX IF NOT EXISTS idx_escalations_incident ON escalations(incident_id);
+
+-- Phase 3.5 batch 11: Nuclei-powered self vulnerability scan. nuclei_runs
+-- keeps the run history; nuclei_findings is the CURRENT state (one row
+-- per ip/template/matched-URL, upserted each run so diffing is a set
+-- comparison -- repeats stay quiet, first run is the silent baseline).
+CREATE TABLE IF NOT EXISTS nuclei_runs(
+    id INTEGER PRIMARY KEY,
+    ts REAL,
+    duration_s REAL,
+    targets INTEGER,            -- LAN targets scanned
+    findings INTEGER,           -- findings parsed from this run
+    new_findings INTEGER,       -- genuinely new vs the previous state
+    note TEXT
+);
+CREATE TABLE IF NOT EXISTS nuclei_findings(
+    id INTEGER PRIMARY KEY,
+    run_ts REAL,                -- when the finding was recorded
+    ip TEXT,                    -- the LAN target scanned
+    template_id TEXT,           -- e.g. http-missing-security-headers
+    name TEXT,                  -- template name (plain words)
+    severity TEXT,              -- our scale: High | Medium | Low
+    matched_at TEXT,            -- the URL/endpoint that matched
+    description TEXT,           -- template description (may be technical)
+    cves TEXT,                  -- comma-separated CVE ids, may be ""
+    status TEXT NOT NULL DEFAULT 'open',  -- open | resolved
+    UNIQUE(ip, template_id, matched_at)
+);
+CREATE INDEX IF NOT EXISTS idx_nuclei_findings_status
+    ON nuclei_findings(status);
+
+-- Phase 3.5 batch 11: software inventory + CVE correlation (Wazuh pattern:
+-- know what's installed, match it against the known-exploited list).
+-- sw_inventory is the CURRENT inventory of the sensor box itself;
+-- cve_matches records installed software with a KEV-listed flaw so we
+-- alert exactly once per (package, CVE) -- quiet afterwards.
+CREATE TABLE IF NOT EXISTS sw_inventory(
+    name TEXT,                  -- package/app name as reported
+    version TEXT,               -- installed version, may be ""
+    source TEXT,                -- 'python' (venv) | 'os' (system packages)
+    seen_ts REAL,
+    PRIMARY KEY(name, source)
+);
+CREATE TABLE IF NOT EXISTS cve_matches(
+    id INTEGER PRIMARY KEY,
+    ts REAL,                    -- when the match was first seen
+    package TEXT,               -- inventory name as seen
+    version TEXT,               -- installed version at match time
+    source TEXT,                -- 'python' | 'os'
+    cve_id TEXT,                -- e.g. CVE-2024-1234
+    vendor TEXT,
+    product TEXT,
+    vuln_name TEXT,
+    description TEXT,
+    due_date TEXT,              -- CISA's fix-by date, may be ""
+    UNIQUE(package, cve_id)
+);
 """
 
 
@@ -408,6 +467,47 @@ def _connect(path=None):
                      " idx_allowlist_kind_pattern ON allowlist(kind, pattern)")
     except Exception:
         pass  # belt and suspenders: allowlist dedupe is hygiene, not load-bearing
+    # Phase 3.5 batch 11: self-scan findings now carry their source
+    # ('builtin' = the built-in TCP connect scan, 'template' = a check
+    # from a YAML template in templates/). Old rows predate the column
+    # and are all built-in findings.
+    finding_cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(scan_findings)")}
+    if "source" not in finding_cols:
+        conn.execute("ALTER TABLE scan_findings"
+                     " ADD COLUMN source TEXT DEFAULT 'builtin'")
+    # The finding identity widened to (source, ip, port) in batch 11.
+    # One-time rebuild for databases created before this batch: copy
+    # rows out, recreate the table with the wider key, copy back. The
+    # meta flag makes it run exactly once (fresh DBs already have the
+    # new schema from _SCHEMA above -- the rebuild is a harmless no-op
+    # for them). All SQL here is parameterized -- PRAGMA index_info
+    # takes no placeholders, so introspection was deliberately avoided.
+    flag = conn.execute(
+        "SELECT value FROM meta WHERE key='schema_findings_v2'"
+    ).fetchone()
+    if not flag or flag[0] != "1":
+        rows = conn.execute(
+            "SELECT id, run_ts, ip, mac, port, service, risk,"
+            " what_it_means, COALESCE(source, 'builtin'), status"
+            " FROM scan_findings").fetchall()
+        conn.execute("DROP TABLE scan_findings")
+        conn.execute(
+            "CREATE TABLE scan_findings("
+            " id INTEGER PRIMARY KEY, run_ts REAL, ip TEXT, mac TEXT,"
+            " port INTEGER, service TEXT, risk TEXT, what_it_means TEXT,"
+            " source TEXT NOT NULL DEFAULT 'builtin',"
+            " status TEXT NOT NULL DEFAULT 'open',"
+            " UNIQUE(source, ip, port))")
+        conn.executemany(
+            "INSERT INTO scan_findings (id, run_ts, ip, mac, port,"
+            " service, risk, what_it_means, source, status)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_status"
+                     " ON scan_findings(status)")
+        conn.execute("INSERT INTO meta (key, value)"
+                     " VALUES ('schema_findings_v2', '1')"
+                     " ON CONFLICT(key) DO UPDATE SET value='1'")
     # B4 cleanup: older health checks created this table in prod on every
     # tick. The probe is rolled back now; drop the leftover if present.
     try:
@@ -1809,21 +1909,25 @@ def record_scan_run(ts, duration_s, devices_scanned, findings, note=""):
         return cur.lastrowid
 
 
-def record_scan_findings(run_ts, findings):
+def record_scan_findings(run_ts, findings, source="builtin"):
     """Store this run's open findings; mark vanished ones resolved.
 
     Current-state table (one row per ip/port; the scan_runs table keeps
     the run history). findings: list of (ip, mac, port, service, risk,
-    what_it_means). Returns (new_findings, resolved_findings,
-    changed_findings) as (ip, port) key lists -- the scan module alerts
-    only on genuinely new/changed doors.
+    what_it_means). source: 'builtin' (the TCP connect scan) or
+    'template' (a YAML-template check) -- new/changed/resolved are
+    computed per source so the two check families never cross-talk.
+    Returns (new_findings, resolved_findings, changed_findings) as
+    (ip, port) key lists -- the scan module alerts only on genuinely
+    new/changed doors.
     """
+    source = (source or "builtin")[:16]
     with _lock:
         conn = _db()
         prev_risk = {}
         for ip, port, risk in conn.execute(
                 "SELECT ip, port, risk FROM scan_findings"
-                " WHERE status='open'"):
+                " WHERE status='open' AND source=?", (source,)):
             prev_risk[(ip, int(port))] = risk
         new, changed, current = [], [], {}
         for ip, mac, port, _svc, risk, _what in findings:
@@ -1841,8 +1945,8 @@ def record_scan_findings(run_ts, findings):
         for ip, port in resolved:
             conn.execute(
                 "UPDATE scan_findings SET status='resolved'"
-                " WHERE ip=? AND port=? AND status='open'",
-                (ip, port))
+                " WHERE ip=? AND port=? AND status='open' AND source=?",
+                (ip, port, source))
         for ip, mac, port, service, risk, what in findings:
             try:
                 port = int(port)
@@ -1850,13 +1954,14 @@ def record_scan_findings(run_ts, findings):
                 continue
             conn.execute(
                 "INSERT INTO scan_findings (run_ts, ip, mac, port, service,"
-                " risk, what_it_means, status)"
-                " VALUES (?,?,?,?,?,?,?,'open')"
-                " ON CONFLICT(ip, port) DO UPDATE SET run_ts=excluded.run_ts,"
+                " risk, what_it_means, source, status)"
+                " VALUES (?,?,?,?,?,?,?,?,'open')"
+                " ON CONFLICT(source, ip, port) DO UPDATE SET"
+                " run_ts=excluded.run_ts,"
                 " mac=excluded.mac, service=excluded.service,"
                 " risk=excluded.risk, what_it_means=excluded.what_it_means,"
                 " status='open'",
-                (run_ts, ip, mac, port, service, risk, what))
+                (run_ts, ip, mac, port, service, risk, what, source))
         conn.commit()
         return new, resolved, changed
 
@@ -1879,10 +1984,11 @@ def list_scan_findings(status="open", limit=200):
         return [
             {"id": i, "run_ts": rt, "ip": ip, "mac": m or "",
              "port": p, "service": s or "", "risk": rk or "",
-             "what_it_means": w or "", "status": st}
-            for i, rt, ip, m, p, s, rk, w, st in conn.execute(
+             "what_it_means": w or "", "source": src or "builtin",
+             "status": st}
+            for i, rt, ip, m, p, s, rk, w, src, st in conn.execute(
                 "SELECT id, run_ts, ip, mac, port, service, risk,"
-                " what_it_means, status FROM scan_findings"
+                " what_it_means, source, status FROM scan_findings"
                 " WHERE status=? ORDER BY ip, port LIMIT ?",
                 (status, limit))]
 
@@ -1969,6 +2075,260 @@ def list_amass_assets(domain, limit=500):
                 "SELECT kind, value, detail, first_seen FROM amass_assets"
                 " WHERE domain=? ORDER BY kind, value LIMIT ?",
                 ((domain or "")[:253], limit))]
+
+
+# --- Nuclei-powered self vulnerability scan --------------------------------
+# Run history + current finding state for the scheduled Nuclei scans of
+# our OWN LAN (see netmon/nuclei.py). Diffing compares each run against
+# the stored state; the first run is the silent baseline.
+
+
+def record_nuclei_run(ts, duration_s, targets, findings, new_findings,
+                      note=""):
+    with _lock:
+        conn = _db()
+        cur = conn.execute(
+            "INSERT INTO nuclei_runs (ts, duration_s, targets, findings,"
+            " new_findings, note) VALUES (?,?,?,?,?,?)",
+            (ts, duration_s, targets, findings, new_findings,
+             (note or "")[:200]))
+        conn.commit()
+        return cur.lastrowid
+
+
+def record_nuclei_findings(run_ts, findings):
+    """Upsert this run's findings; resolve ones that vanished.
+
+    findings: list of dicts with ip, template_id, name, severity,
+    matched_at, description, cves. Identity is
+    (ip, template_id, matched_at). Returns (new, resolved, changed) as
+    (ip, template_id, matched_at) key lists.
+    """
+    with _lock:
+        conn = _db()
+        prev = {}
+        for ip, tid, ma, sev in conn.execute(
+                "SELECT ip, template_id, matched_at, severity"
+                " FROM nuclei_findings WHERE status='open'"):
+            prev[(ip, tid, ma)] = sev
+        new, changed, current = [], [], {}
+        for f in findings or []:
+            key = (f.get("ip") or "", f.get("template_id") or "",
+                   f.get("matched_at") or "")
+            if not key[0] or not key[1]:
+                continue
+            current[key] = True
+            if key not in prev:
+                new.append(key)
+            elif prev[key] != (f.get("severity") or ""):
+                changed.append(key)
+        resolved = [k for k in prev if k not in current]
+        for ip, tid, ma in resolved:
+            conn.execute(
+                "UPDATE nuclei_findings SET status='resolved'"
+                " WHERE ip=? AND template_id=? AND matched_at=?"
+                " AND status='open'", (ip, tid, ma))
+        for f in findings or []:
+            ip, tid = (f.get("ip") or ""), (f.get("template_id") or "")
+            if not ip or not tid:
+                continue
+            conn.execute(
+                "INSERT INTO nuclei_findings (run_ts, ip, template_id, name,"
+                " severity, matched_at, description, cves, status)"
+                " VALUES (?,?,?,?,?,?,?,?, 'open')"
+                " ON CONFLICT(ip, template_id, matched_at) DO UPDATE SET"
+                " run_ts=excluded.run_ts, name=excluded.name,"
+                " severity=excluded.severity,"
+                " description=excluded.description, cves=excluded.cves,"
+                " status='open'",
+                (run_ts, ip, tid, (f.get("name") or "")[:200],
+                 (f.get("severity") or "")[:16],
+                 (f.get("matched_at") or "")[:500],
+                 (f.get("description") or "")[:1000],
+                 (f.get("cves") or "")[:500]))
+        conn.commit()
+        return new, resolved, changed
+
+
+def latest_nuclei_run():
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT ts, duration_s, targets, findings, new_findings, note"
+            " FROM nuclei_runs ORDER BY ts DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    return {"ts": row[0], "duration_s": row[1], "targets": row[2],
+            "findings": row[3], "new_findings": row[4], "note": row[5] or ""}
+
+
+def list_nuclei_findings(status="open", limit=200, min_severity=None):
+    """Current Nuclei findings. min_severity filters to that level and
+    above on our scale (Low < Medium < High)."""
+    rank = {"Low": 1, "Medium": 2, "High": 3}
+    floor = rank.get((min_severity or "Low").capitalize(), 1)
+    try:
+        limit = max(1, min(2000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 200
+    with _lock:
+        conn = _db()
+        out = []
+        for row in conn.execute(
+                "SELECT id, run_ts, ip, template_id, name, severity,"
+                " matched_at, description, cves FROM nuclei_findings"
+                " WHERE status=? ORDER BY ip, template_id LIMIT ?",
+                (status, limit)):
+            sev = row[5] or "Low"
+            if rank.get(sev, 0) < floor:
+                continue
+            out.append({
+                "id": row[0], "run_ts": row[1], "ip": row[2],
+                "template_id": row[3], "name": row[4] or "",
+                "severity": sev, "matched_at": row[6] or "",
+                "description": row[7] or "", "cves": row[8] or ""})
+    return out
+
+
+def nuclei_open_counts_by_ip():
+    """{ip: count} of open Nuclei findings, for the attack-surface view."""
+    with _lock:
+        conn = _db()
+        return {ip: n for ip, n in conn.execute(
+            "SELECT ip, COUNT(*) FROM nuclei_findings"
+            " WHERE status='open' AND severity IN ('Medium','High')"
+            " GROUP BY ip")}
+
+
+# --- software inventory + CVE correlation ------------------------------------
+# The sensor box's own installed software, matched against CISA's
+# known-exploited-vulnerabilities list kept in ti_entries (kind='cve',
+# see netmon/swaudit.py + netmon/threatintel.py). Quiet by design: a
+# match alerts once, then stays silent until it is gone.
+
+
+def record_sw_inventory(rows, ts):
+    """Replace the current inventory snapshot.
+
+    rows: iterable of (name, version, source). Returns the row count.
+    """
+    clean = []
+    for name, version, source in rows or []:
+        name = (name or "").strip()[:200]
+        source = (source or "").strip()[:16]
+        if not name or not source:
+            continue
+        clean.append((name, (version or "").strip()[:64], source, ts))
+    with _lock:
+        conn = _db()
+        conn.execute("DELETE FROM sw_inventory")
+        conn.executemany(
+            "INSERT INTO sw_inventory (name, version, source, seen_ts)"
+            " VALUES (?,?,?,?)"
+            " ON CONFLICT(name, source) DO UPDATE SET"
+            " version=excluded.version, seen_ts=excluded.seen_ts",
+            clean)
+        conn.commit()
+    return len(clean)
+
+
+def list_sw_inventory(limit=2000):
+    try:
+        limit = max(1, min(5000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 2000
+    with _lock:
+        conn = _db()
+        return [{"name": n, "version": v or "", "source": s or ""}
+                for n, v, s in conn.execute(
+                    "SELECT name, version, source FROM sw_inventory"
+                    " ORDER BY source, name LIMIT ?", (limit,))]
+
+
+def list_kev_entries():
+    """The local CISA KEV list: [{cve_id, vendor, product, vuln_name,
+    description, due_date}]. Read from the ti_entries feed rows."""
+    import json as _json
+    out = []
+    with _lock:
+        conn = _db()
+        rows = conn.execute(
+            "SELECT key, detail FROM ti_entries WHERE kind='cve'").fetchall()
+    for cve_id, detail in rows:
+        try:
+            d = _json.loads(detail or "{}")
+        except Exception:
+            d = {}
+        out.append({
+            "cve_id": cve_id or "",
+            "vendor": d.get("v", "") or "",
+            "product": d.get("p", "") or "",
+            "vuln_name": d.get("n", "") or "",
+            "description": d.get("d", "") or "",
+            "due_date": d.get("due", "") or "",
+        })
+    return out
+
+
+def record_cve_matches(ts, matches):
+    """Store matches; return only the genuinely NEW (package, cve_id)
+    pairs so alerting fires once per match.
+
+    matches: iterable of dicts with package, version, source, cve_id,
+    vendor, product, vuln_name, description, due_date.
+    """
+    with _lock:
+        conn = _db()
+        known = {(p, c) for p, c in conn.execute(
+            "SELECT package, cve_id FROM cve_matches")}
+        new = []
+        for m in matches or []:
+            pkg, cve = (m.get("package") or "")[:200], \
+                       (m.get("cve_id") or "")[:32]
+            if not pkg or not cve or (pkg, cve) in known:
+                continue
+            known.add((pkg, cve))
+            new.append(m)
+            conn.execute(
+                "INSERT INTO cve_matches (ts, package, version, source,"
+                " cve_id, vendor, product, vuln_name, description, due_date)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(package, cve_id) DO NOTHING",
+                (ts, pkg, (m.get("version") or "")[:64],
+                 (m.get("source") or "")[:16], cve,
+                 (m.get("vendor") or "")[:120],
+                 (m.get("product") or "")[:200],
+                 (m.get("vuln_name") or "")[:200],
+                 (m.get("description") or "")[:1000],
+                 (m.get("due_date") or "")[:16]))
+        # Drop matches that no longer apply (package updated/removed or
+        # the CVE left the KEV list): quiet cleanup, no alerts.
+        current = {( (m.get("package") or "")[:200],
+                     (m.get("cve_id") or "")[:32]) for m in matches or []}
+        for pkg, cve in list(known):
+            if (pkg, cve) not in current:
+                conn.execute("DELETE FROM cve_matches"
+                             " WHERE package=? AND cve_id=?", (pkg, cve))
+        conn.commit()
+    return new
+
+
+def list_cve_matches(limit=200):
+    try:
+        limit = max(1, min(2000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 200
+    with _lock:
+        conn = _db()
+        return [
+            {"package": p, "version": v or "", "source": s or "",
+             "cve_id": c, "vendor": vd or "", "product": pr or "",
+             "vuln_name": n or "", "description": d or "",
+             "due_date": dd or "", "first_seen": ts or 0}
+            for p, v, s, c, vd, pr, n, d, dd, ts in conn.execute(
+                "SELECT package, version, source, cve_id, vendor, product,"
+                " vuln_name, description, due_date, ts FROM cve_matches"
+                " ORDER BY ts DESC LIMIT ?", (limit,))]
 
 
 # --- host events (Windows Event Log + firewall log ingestion) -------------

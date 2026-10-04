@@ -1,0 +1,15 @@
+# templates/elasticsearch.yaml -- a new self-scan check, as data not code.
+#
+# Elasticsearch listens on 9200 (HTTP API) and 9300 (cluster traffic)
+# with no password in its default setup. Exposed instances have leaked
+# whole databases to the internet for years; even on a LAN it should
+# need a password or be off.
+id: elasticsearch-open
+info:
+  name: "Elasticsearch is open"
+  service: "Elasticsearch"
+  severity: medium
+  description: "Elasticsearch's data ports are open. Out of the box it asks for no password, and open Elasticsearch servers are one of the most common ways whole databases end up on the internet. If you run it, put a password on it; if you don't know what it is, something installed it."
+  tags: [network, database, insecure-default]
+match:
+  ports_open: [9200, 9300]

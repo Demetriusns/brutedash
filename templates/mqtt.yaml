@@ -1,0 +1,15 @@
+# templates/mqtt.yaml -- a new self-scan check, as data not code.
+#
+# MQTT (port 1883) is the little messaging protocol smart-home gadgets
+# use to chat ("the thermostat told the hub it's 72 degrees"). Many
+# brokers ship with no password, so anyone on the network can listen in
+# on -- or impersonate -- your smart-home devices.
+id: mqtt-open
+info:
+  name: "MQTT broker is open"
+  service: "MQTT"
+  severity: medium
+  description: "An MQTT message broker is open on this device -- that is how many smart-home gadgets talk to each other. Many brokers ship with no password, so anyone on your network could listen in on your smart-home chatter or pretend to be one of your devices. Put a password on it."
+  tags: [network, iot, insecure-default]
+match:
+  port_open: 1883

@@ -83,6 +83,21 @@ def _monitor_loop(stop_event, digest_hours=24):
             amassm.maybe_weekly_amass()
         except Exception:
             pass
+        # Deeper vulnerability scan via Nuclei (nuclei.py decides if it's
+        # due, enabled, and installed; silent no-op otherwise). Targets
+        # are always our own LAN inventory -- never user-supplied.
+        try:
+            from . import nuclei as nucleim
+            nucleim.maybe_weekly_nuclei()
+        except Exception:
+            pass
+        # Software inventory + CVE correlation for the sensor box itself
+        # (swaudit.py decides if it's due; local reads only).
+        try:
+            from . import swaudit as swam
+            swam.maybe_daily_swaudit()
+        except Exception:
+            pass
         if digest_hours > 0 and now - last_digest >= digest_hours * 3600:
             last_digest = now
             try:

@@ -61,6 +61,17 @@ _FEEDS = {
                    " addresses observed in malicious activity."),
         "parser": "_parse_ip_list",
     },
+    "kev-cves": {
+        "kind": "cve",
+        "url": ("https://www.cisa.gov/sites/default/files/feeds/"
+                "known_exploited_vulnerabilities.json"),
+        "label": "CISA known-exploited vulnerabilities (KEV)",
+        "detail": ("Listed by CISA -- security flaws attackers are"
+                   " actively exploiting in the wild right now, with"
+                   " fix-by dates. Used by the software-inventory check"
+                   " (netmon/swaudit.py)."),
+        "parser": "_parse_kev_json",
+    },
 }
 
 # SSRF guard: feed downloads may only go to these hosts, full stop.
@@ -157,6 +168,44 @@ def _parse_ip_list(text):
         except ValueError:
             continue
         out.append(tok)
+    return out
+
+
+_CVE_ID_RE = re.compile(r"^CVE-\d{4}-\d{4,}$")
+
+
+def _parse_kev_json(text):
+    """CISA KEV catalog JSON: {"vulnerabilities": [{cveID, vendorProject,
+    product, vulnerabilityName, shortDescription, dueDate, ...}]}.
+
+    Emits (cve_id, compact-JSON-detail) pairs -- the detail is a small
+    JSON blob (kept under ti_replace_feed's 300-char cap) with vendor,
+    product, flaw name, short description, and the fix-by date. Garbage
+    entries are skipped; the parser never raises on bad input (a
+    malformed feed keeps the old rows).
+    """
+    out = []
+    try:
+        doc = json.loads(text)
+    except (ValueError, TypeError):
+        return out
+    vulns = doc.get("vulnerabilities") if isinstance(doc, dict) else None
+    if not isinstance(vulns, list):
+        return out
+    for v in vulns[:10000]:
+        if not isinstance(v, dict):
+            continue
+        cve_id = str(v.get("cveID") or "").strip().upper()
+        if not _CVE_ID_RE.match(cve_id):
+            continue
+        detail = json.dumps({
+            "v": str(v.get("vendorProject") or "")[:30],
+            "p": str(v.get("product") or "")[:50],
+            "n": str(v.get("vulnerabilityName") or "")[:50],
+            "d": str(v.get("shortDescription") or "")[:110],
+            "due": str(v.get("dueDate") or "")[:10],
+        })
+        out.append((cve_id, detail))
     return out
 
 

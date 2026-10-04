@@ -37,6 +37,8 @@ KIND_TO_SLUG = {
     "new_external_ip": "new-external-ip",
     "new_busy_domain": "new-busy-domain",
     "vuln_finding": "risky-service",
+    "nuclei_finding": "risky-service",
+    "cve_match": "known-exploited-software",
     "host_event": "brute-force",
     "usb_insert": "usb-drive",
     "defender_detection": "defender-detection",
@@ -813,6 +815,40 @@ GUIDES = {
         "escalate": ("DNS records you didn't create are an escalate-now --"
                      " they can mean a compromised registrar account, and"
                      " that's admin work."),
+    },
+    "known-exploited-software": {
+        "found": [
+            "Something installed on the computer running the monitor"
+            " matches CISA's known-exploited list -- security flaws that"
+            " attackers are actively using in the real world right now,"
+            " not just in theory.",
+            "This is not proof anything is hacked. The list names"
+            " products, not fixed versions -- you may already be patched."
+            " But it's the shortest list in security worth taking"
+            " seriously, so it's worth the ten minutes to check.",
+        ],
+        "do": [
+            ("Update the named program",
+             "The alert names the program. Update it however it was"
+             " installed: Windows Update, the app's own updater, or pip"
+             " for Python packages. 'Latest version' is the whole fix"
+             " for most of these."),
+            ("Restart it if the updater asks",
+             "Some updates only take effect after a restart. If the"
+             " updater suggests one, do it."),
+            ("Check the CVE if you want the details",
+             "The alert carries the CVE id (like CVE-2024-1234). Search"
+             " it to see exactly what the flaw does -- useful if you're"
+             " deciding how urgent the update is."),
+            ("Confirm the match is gone",
+             "The software check runs daily. Once you're patched, the"
+             " match clears on its own and stays quiet."),
+        ],
+        "escalate": ("If the program can't be updated -- old software the"
+                     " business depends on, a vendor that stopped patching"
+                     " -- that's the conversation to have with your admin:"
+                     " isolate it, replace it, or accept the risk on"
+                     " purpose."),
     },
 }
 

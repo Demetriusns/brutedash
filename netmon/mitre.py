@@ -118,6 +118,19 @@ _TECHNIQUES = {
         "A new public-facing subdomain or address is what an attacker's"
         " recon would find first.",
     ),
+    "nuclei_finding": (
+        "T1046", "Network Service Discovery",
+        "Discovery",
+        "A vulnerability scanner found a weakness on your own network --"
+        " the same thing an attacker's scan would turn up.",
+    ),
+    "cve_match": (
+        "T1190", "Exploit Public-Facing Application",
+        "Initial Access",
+        "Software on the monitor box has a flaw attackers are actively"
+        " exploiting in the wild (CISA's known-exploited list). Closest"
+        " fit: the box runs code with a known weaponized bug.",
+    ),
 }
 
 

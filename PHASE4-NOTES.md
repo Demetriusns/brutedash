@@ -220,6 +220,13 @@ North star: the automated analyst for a network with nobody watching it.
   (RFC1918/loopback enforced, ≤64 devices, 31 ports, 0.8s timeout),
   local risk knowledge base with plain-English explanations, alerts only
   on NEW/changed findings (Low/Medium), on-demand + weekly schedule.
+  EXTENDED 2026-10-04 (batch 11, repo-learning item 5 DONE): Nuclei-powered
+  deeper scan (netmon/nuclei.py) -- scheduled subprocess, own LAN only,
+  targets from the asset inventory (never UI-supplied), -dut always on,
+  JSONL parsed into the alerts pipeline with severity mapping + filter
+  (default medium+), first run the silent baseline; plus a YAML template
+  DSL (netmon/templates.py + templates/) so new checks are files, not
+  code changes (4 shipped: Docker API, Elasticsearch, Memcached, MQTT).
 - Windows Event Log + firewall log ingestion — failed logins, new services,
   USB drives. Network-only is half the picture. DONE 2026-10-03 (batch 6):
   watch-dir ingestion of pfirewall.log + Security/System/Defender XML
@@ -241,6 +248,17 @@ North star: the automated analyst for a network with nobody watching it.
   services/autorun entries vs. baseline, Defender real-time protection
   status. Alerts on drift. Python + OS APIs only, no kernel drivers.
   DONE 2026-10-03 (batch 6).
+- Software inventory + CVE correlation (repo-learning item 7b, Wazuh
+  PATTERN ONLY -- no Wazuh code, which is GPLv2 -- DONE 2026-10-04,
+  batch 11): the cheaper/safer complement to active scanning --
+  lightweight inventory of the sensor box itself (Python packages via
+  importlib.metadata + OS package/app list, local reads only, never
+  leaves the box) correlated against CISA's known-exploited-
+  vulnerabilities list kept as a local feed; known-vulnerable installed
+  software = Medium alert with the CVE id and a plain-English
+  explanation, once per (package, CVE), then quiet. (Item 7a,
+  agent→manager forwarding, stays parked as Phase 4 -- it belongs to
+  the Pi-sensor expansion.)
 
 ### Rap sheets (threat intel)
 - Threat intel lookups — check external IPs/domains against blocklists;

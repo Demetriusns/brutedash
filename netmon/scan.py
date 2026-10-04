@@ -242,28 +242,38 @@ def findings_from_results(results, ip2mac):
     return out
 
 
-def alert_new_findings(new, changed, ip2mac, names, ts=None):
+def alert_new_findings(new, changed, ip2mac, names, ts=None,
+                       detail_for=None):
     """Alert on genuinely new (or risk-changed) open doors only.
 
     One alert per device listing its new doors -- quieter than one per
     port, and a repeat weekly scan with no changes stays completely
     silent. Severity is the highest risk among the doors (Low/Medium).
+    `detail_for` is an optional {(ip, port): (risk, what, service)}
+    override for template-DSL findings (whose risk/explanation come from
+    the template, not the built-in knowledge base).
     """
     ts = ts if ts is not None else time.time()
     by_ip = {}
     for ip, port in list(new) + list(changed):
         by_ip.setdefault(ip, []).append(port)
+
+    def _door_detail(ip, port):
+        if detail_for and (ip, port) in detail_for:
+            return detail_for[(ip, port)]
+        risk, what = _risk_for(port)
+        services = dict(SCAN_PORTS)
+        return risk, what, services.get(port, "unknown")
+
     for ip in sorted(by_ip):
         label = names.get(ip2mac.get(ip, ""), "") or f"device {ip}"
         doors = []
         worst = "Low"
         for port in sorted(by_ip[ip]):
-            risk, what = _risk_for(port)
+            risk, what, service = _door_detail(ip, port)
             if risk == "Medium":
                 worst = "Medium"
-            services = dict(SCAN_PORTS)
-            doors.append(f"port {port} ({services.get(port, 'unknown')})"
-                         f" -- {what}")
+            doors.append(f"port {port} ({service}) -- {what}")
         dbm.add_alert(
             "vuln_finding", worst,
             f"Open doors on your network: {label}",
@@ -297,8 +307,10 @@ def _scan_enabled():
 def run_full_scan(note="scheduled"):
     """One full pass: scan, store, alert on new/changed findings.
 
-    Returns a summary dict. Never raises -- a failed scan is a missed
-    scan, not a crash (the next weekly run retries).
+    Runs the built-in port scan plus any YAML template checks (see
+    netmon/templates.py -- new checks are files in templates/, not code
+    changes). Returns a summary dict. Never raises -- a failed scan is
+    a missed scan, not a crash (the next weekly run retries).
     """
     import time as _t
     if not _claim_scan():
@@ -309,21 +321,51 @@ def run_full_scan(note="scheduled"):
         ip2mac = dbm.ip_to_mac_map()
         results = run_scan()
         findings = findings_from_results(results, ip2mac)
-        new, resolved, changed = dbm.record_scan_findings(started, findings)
+        new, resolved, changed = dbm.record_scan_findings(
+            started, findings, source="builtin")
+        # Template-DSL checks: probe their ports (a second bounded pass
+        # -- the built-in port list is untouched) and evaluate.
+        tmpl_new, tmpl_changed = [], []
+        tmpl_detail = {}
+        try:
+            from . import templates as tmplm
+            templates = tmplm.load_templates()
+            tports = tmplm.required_ports(templates)
+            if templates and tports:
+                tresults = run_scan(ports=tports)
+                tmpl_findings = []
+                for ip, port, tmpl in tmplm.evaluate(templates, tresults):
+                    info = tmpl["info"]
+                    risk = info["severity"].capitalize()
+                    tmpl_findings.append(
+                        (ip, ip2mac.get(ip, ""), port, info["service"],
+                         risk, info["description"]))
+                    tmpl_detail[(ip, port)] = (risk, info["description"],
+                                               info["service"])
+                tmpl_new, _t_res, tmpl_changed = \
+                    dbm.record_scan_findings(
+                        started, tmpl_findings, source="template")
+        except Exception:
+            pass  # template checks are a bonus; the built-in scan stands
         run_id = dbm.record_scan_run(
-            started, _t.time() - started, len(results), len(findings),
+            started, _t.time() - started, len(results),
+            len(findings) + len(tmpl_detail),
             note=note)
-        if new or changed:
+        if new or changed or tmpl_new or tmpl_changed:
             try:
                 names = dbm.device_name_map()
-                alert_new_findings(new, changed, ip2mac, names, ts=started)
+                alert_new_findings(new + tmpl_new, changed + tmpl_changed,
+                                   ip2mac, names, ts=started,
+                                   detail_for=tmpl_detail or None)
             except Exception:
                 pass  # alerting is a bonus; the findings are stored
         dbm.set_meta("vuln_scan_last_ts", str(started))
         return {"ok": True, "run_id": run_id,
-                "devices": len(results), "findings": len(findings),
-                "new": len(new), "resolved": len(resolved),
-                "changed": len(changed),
+                "devices": len(results),
+                "findings": len(findings) + len(tmpl_detail),
+                "new": len(new) + len(tmpl_new),
+                "resolved": len(resolved),
+                "changed": len(changed) + len(tmpl_changed),
                 "duration_s": round(_t.time() - started, 1)}
     except Exception as exc:
         try:

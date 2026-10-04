@@ -108,6 +108,13 @@ PLAYBOOK_SLUGS = {
                   " login protocol is switched on. This guide explains what"
                   " it is and how to turn it off if you don't need it."),
     },
+    "known-exploited-software": {
+        "title": "Software here has a flaw attackers are using",
+        "blurb": ("Something installed on this box matches CISA's list of"
+                  " security flaws attackers are actively exploiting. This"
+                  " guide walks through updating it and confirming the"
+                  " match is gone."),
+    },
     "malicious-contact": {
         "title": "A device talked to a known-bad address",
         "blurb": ("One of your devices contacted an address that security"
@@ -287,13 +294,24 @@ def _skip_domain(norm):
 
 def _risky_ports():
     """Scan ports whose knowledge-base risk is 'Medium' -- doors with a
-    known weakness (telnet, SMB, RDP, databases, UPnP, ...)."""
+    known weakness (telnet, SMB, RDP, databases, UPnP, ...).
+
+    Unions the built-in RISK_KB with the YAML template checks at Medium
+    (netmon/templates.py) so template-found doors count as risky too.
+    """
+    risky = set()
     try:
         from . import scan as scanm
-        return {p for p, (risk, _what) in scanm.RISK_KB.items()
-                if risk == "Medium"}
+        risky |= {p for p, (risk, _what) in scanm.RISK_KB.items()
+                  if risk == "Medium"}
     except Exception:
-        return set()
+        pass
+    try:
+        from . import templates as tmplm
+        risky |= set(tmplm.risk_ports())
+    except Exception:
+        pass
+    return risky
 
 
 def _service_ports():
@@ -818,6 +836,12 @@ def build_report(now=None):
         return {"ok": False, "error": "could not load device inventory"}
     service_ports = _service_ports()
     devices_by_ip = {d["ip"]: d for d in devices if d.get("ip")}
+    # Open Nuclei findings (Medium+) per device IP -- the deeper scan's
+    # results join the exposure picture as risky-service exposures.
+    try:
+        nuclei_counts = dbm.nuclei_open_counts_by_ip()
+    except Exception:
+        nuclei_counts = {}
 
     for dev in devices:
         ip = dev.get("ip") or ""
@@ -835,6 +859,23 @@ def build_report(now=None):
             exposures = device_exposures(dev, reachable, hits)
         except Exception:
             exposures = []
+        ncount = nuclei_counts.get(ip, 0)
+        if ncount:
+            label = _label_for(dev)
+            word = "finding" if ncount == 1 else "findings"
+            exposures.append({
+                "severity": "Medium",
+                "title": (f"The deeper vulnerability scan found {ncount}"
+                          f" {word} worth a look on {label}."),
+                "what_it_means": ("Nuclei ran thousands of known"
+                                  " vulnerability checks against this"
+                                  " device and some matched -- the same"
+                                  " checks an attacker would run."),
+                "why_it_matters": ("Medium: these are weaknesses with"
+                                    " known fixes or workarounds. See the"
+                                    " Open doors check section for the"
+                                    " full list."),
+                "playbook": "risky-service"})
         dev["reachable"] = reachable
         if reachable:
             dev["reachability_label"] = "Seen from outside"

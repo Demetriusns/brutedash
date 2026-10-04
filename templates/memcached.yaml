@@ -1,0 +1,15 @@
+# templates/memcached.yaml -- a new self-scan check, as data not code.
+#
+# Memcached (port 11211) is a speed-boost cache with no password and no
+# encryption, ever. It should only ever listen on the machine running
+# it. On a network it is a classic accidental exposure -- and the same
+# protocol has been abused to aim huge junk-traffic floods at others.
+id: memcached-open
+info:
+  name: "Memcached is open to the network"
+  service: "Memcached"
+  severity: medium
+  description: "Memcached's port is open to the network. It has no password and no encryption by design -- it is meant to listen only on its own machine. Open to the network, it leaks cached data and can be abused to flood other people with junk traffic."
+  tags: [network, insecure-default]
+match:
+  port_open: 11211

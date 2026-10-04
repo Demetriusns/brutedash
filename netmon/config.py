@@ -96,6 +96,31 @@ DEFAULTS = {
         # Per-run cap, minutes.
         "timeout_min": 20,
     },
+    "nuclei": {
+        # Deeper vulnerability scanning via Nuclei (optional tool you
+        # install; see netmon/nuclei.py). Opt-in: scheduled scans run only
+        # when enabled AND the binary is installed. Targets are ALWAYS
+        # your own LAN devices from the asset inventory -- the dashboard
+        # can never add targets. Nuclei is never a network service: it
+        # runs as a short-lived subprocess with -dut (signed templates
+        # only) always on.
+        "enabled": False,
+        # Weekly scheduled run of the deeper scan.
+        "weekly": True,
+        # Only this severity and above alerts (low|medium|high|critical).
+        # medium keeps the noise down; low/info findings are still stored.
+        "min_severity": "medium",
+        # Per-run cap, minutes.
+        "timeout_min": 30,
+    },
+    "swaudit": {
+        # Software inventory of THIS box matched against CISA's
+        # known-exploited-vulnerabilities list (see netmon/swaudit.py).
+        # Local reads only -- the software list never leaves the box.
+        "enabled": True,
+        # Daily run of the inventory + correlation check.
+        "daily": True,
+    },
 }
 
 ENV_PREFIX = "BRUTEDASH_"
@@ -161,6 +186,16 @@ amass:
   passive: true   # passive sources only; no direct contact with target infrastructure
   weekly: true    # weekly scheduled run
   timeout_min: 20 # per-run cap, minutes
+
+nuclei:
+  enabled: false   # deeper vulnerability scanning via Nuclei (optional; install the nuclei binary first)
+  weekly: true     # weekly scheduled run; targets are always your own LAN devices from the asset inventory
+  min_severity: medium  # only this severity and above alerts (low|medium|high|critical)
+  timeout_min: 30  # per-run cap, minutes
+
+swaudit:
+  enabled: true  # software inventory of THIS box vs CISA's known-exploited list (local reads only)
+  daily: true    # daily inventory + correlation check
 """
 
 

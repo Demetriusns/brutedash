@@ -1,0 +1,15 @@
+# templates/docker-api.yaml -- a new self-scan check, as data not code.
+#
+# Docker's remote control port answers with no password by default. On a
+# home or small-business network that usually means someone enabled
+# remote Docker access and forgot -- anyone on the network can start,
+# stop, and create containers on that machine.
+id: docker-api-open
+info:
+  name: "Docker remote API is open"
+  service: "Docker API"
+  severity: medium
+  description: "Docker's remote control port is open. By default it asks for no password, so anyone on your network could start and stop containers on this device -- like leaving the keys in a work truck."
+  tags: [network, insecure-default]
+match:
+  port_open: 2375
