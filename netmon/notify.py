@@ -37,6 +37,13 @@ _SENDABLE = {"High", "Critical"}
 # Used only when the db meta helpers (added by a teammate) are missing.
 _mem_cooldown = {}
 
+# Consecutive email-send failures, counted on the worker thread. When
+# SMTP is configured but sends keep failing, one self-alert fires (see
+# _send_failed) -- an email about broken email would be absurd, and a
+# silent failure means missed High/Critical pages.
+_fail_streak = 0
+NOTIFY_FAIL_STREAK_ALERT = 5
+
 
 # --- async delivery ---------------------------------------------------------
 # B1: SMTP used to run synchronously inside db.add_alert, i.e. on the
@@ -257,10 +264,78 @@ def _maybe_send_alert(alert):
         subject, body = build_email(alert)
     try:
         _send(cfg, subject, body)
-    except Exception:
+    except Exception as exc:
+        _send_failed(exc)
         return False
     record_cooldown(kind)
+    _send_ok()
     return True
+
+
+def _send_failed(exc):
+    """Record one failed email send.
+
+    Logs one stderr line (a fallback transition logs; it doesn't page),
+    counts the consecutive-failure streak, and -- when SMTP is configured
+    but sends keep failing -- fires ONE Medium self-alert so the owner
+    learns their pages aren't going out. Never raises.
+
+    This only runs after _send was attempted, i.e. SMTP is configured;
+    unconfigured mail stays a silent no-op. The self-alert is Medium, so
+    it never re-enters the email queue itself (no loop: only
+    High/Critical queue mail).
+    """
+    global _fail_streak
+    try:
+        print(f"netmon notify: email send failed: {exc!r}", file=sys.stderr)
+    except Exception:
+        pass
+    _fail_streak += 1
+    if _fail_streak < NOTIFY_FAIL_STREAK_ALERT:
+        return
+    try:
+        if _meta_get("notify_down_alerted"):
+            return  # already alerted for this episode; stay quiet
+        from . import db as dbm
+        dbm.add_alert(
+            "self_drift", "Medium",
+            "Alert emails aren't going out",
+            f"{_fail_streak} email sends in a row failed.",
+            meaning=("brutedash emails you about High and Critical"
+                     " findings. Right now those emails are failing to"
+                     " send, so anything urgent would only show on the"
+                     " dashboard."),
+            is_normal=("Not normal -- email worked before, or was never"
+                       " tested. The most common cause is a wrong SMTP"
+                       " password or a changed mail setting."),
+            what_to_do=("Check your email settings (SMTP host, user, and"
+                        " password in the environment) and your internet"
+                        " connection, then use the dashboard's digest"
+                        " button to send a test email."))
+        _meta_set("notify_down_alerted", str(time.time()))
+    except Exception as exc2:
+        try:
+            print(f"netmon notify: down-alert failed: {exc2!r}",
+                  file=sys.stderr)
+        except Exception:
+            pass
+
+
+def _send_ok():
+    """A send succeeded: reset the failure streak, clear any down-alert
+    flag (recovery), and stamp the notify watermark. Never raises."""
+    global _fail_streak
+    _fail_streak = 0
+    try:
+        if _meta_get("notify_down_alerted"):
+            _meta_set("notify_down_alerted", "")
+    except Exception:
+        pass
+    try:
+        from . import pipeline as pipelinem
+        pipelinem.mark("notify")
+    except Exception:
+        pass
 
 
 # --- quiet hours ---------------------------------------------------------
@@ -483,7 +558,9 @@ def _send_digest():
     subject, body = build_digest(rows)
     try:
         _send(cfg, subject, body)
-    except Exception:
+    except Exception as exc:
+        _send_failed(exc)
         return False
+    _send_ok()
     _meta_set("last_digest_ts", str(time.time()))
     return True

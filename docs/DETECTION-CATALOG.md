@@ -404,8 +404,8 @@ This is not normal -- treat it as a real incident until proven otherwise. The sh
 
 ### `self_drift` -- Monitor-box drift (self-health)
 
-- **What it detects:** Watches the box running brutedash itself: unexpected listening ports, new services or auto-start entries vs. baseline, and Defender's real-time guard. A blind monitor is worse than none.
-- **Fires when:** Four checks vs. learned baselines. New listening ports -> Medium. New Windows services or autorun entries -> Low. Defender real-time protection OFF -> High (no baseline needed, checked directly). One alert kind covers all four checks, so the MITRE tag is the closest single umbrella (T1547.001, the persistence shape). Per-check closest fits: new listening ports -> T1046 Network Service Discovery; new services/autoruns -> T1547.001; Defender RTP off -> T1562.001 Impair Defenses.
+- **What it detects:** Watches the box running brutedash itself: unexpected listening ports, new services or auto-start entries vs. baseline, and Defender's real-time guard -- plus the monitor's own pipeline: a nearly-full disk, or a pipeline stage (capture, detection, feeds, email) gone silent too long. A blind monitor is worse than none.
+- **Fires when:** Four checks vs. learned baselines. New listening ports -> Medium. New Windows services or autorun entries -> Low. Defender real-time protection OFF -> High (no baseline needed, checked directly). One alert kind covers all four checks, so the MITRE tag is the closest single umbrella (T1547.001, the persistence shape). Per-check closest fits: new listening ports -> T1046 Network Service Discovery; new services/autoruns -> T1547.001; Defender RTP off -> T1562.001 Impair Defenses. Pipeline self-alerts (netmon/pipeline.py) reuse this kind -- they all mean 'the monitor itself needs attention': disk nearly full -> Medium (one alert per episode, non-essential writes pause); capture silent 5+ min -> High; detection passes failing or silent -> Medium; feed refresh stale 36h+ -> Low; email sends failing or silent -> Medium. Closest fit for the pipeline variants: T1562.001 Impair Defenses (the monitor's own defenses degraded). When several stages go stale in the same check, one combined alert fires at the highest member severity instead of one per stage.
 - **Severity:** Low, Medium, High
 - **MITRE:** T1547.001 Boot or Logon Autostart Execution: Registry Run Keys (Persistence)
 - **Where it lives:** `netmon/selfcheck.py` -- run_selfcheck (every 6 hours)
@@ -422,7 +422,7 @@ Normal right after installing or updating something on this box. Not normal if n
 
 24-hour cooldown per drift key. Windows checks are skipped elsewhere ('unavailable', never an alert).
 
-**Proven by:** `tests/test_knownetwork.py::SelfcheckTests.test_drift_alerts`
+**Proven by:** `tests/test_knownetwork.py::SelfcheckTests.test_drift_alerts`; `tests/test_pipeline_robustness.py::PipelineSelfAlertTests.test_disk_full_alerts_once`
 
 ### `vuln_finding` -- Open doors on your network (self scan)
 

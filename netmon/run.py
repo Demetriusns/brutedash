@@ -28,102 +28,164 @@ from .watchdog import Watchdog
 DETECT_INTERVAL = 60  # seconds between periodic rule runs
 
 
-def _monitor_loop(stop_event, digest_hours=24):
+def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
     """Detection rules every minute; AI summary every SUMMARY_INTERVAL;
     email digest every digest_hours (0 disables). Also: the weekly self
     vulnerability scan, the Windows-log ingest poll, and the sensor-box
-    self-health check -- all best-effort, none can break the loop."""
+    self-health check -- all best-effort, none can break the loop.
+
+    Pipeline robustness (batch 14):
+      * the capture thread is watched and restarted (bounded -- see
+        netmon/pipeline.py);
+      * every step runs via pipeline.safe_step: a failure logs one
+        stderr line instead of dying silently or killing the loop;
+      * detection rules ALWAYS run, even with a full disk; a failed pass
+        is counted and 3 in a row raises one self-alert;
+      * a nearly-full disk pauses non-essential writes (summaries,
+        scans, digests, reports) with one self-alert -- the rewind
+        buffer pauses first via its own guard;
+      * per-stage watermarks (capture tick, rule pass, feed refresh,
+        notification) feed the dashboard's sensor-health view, and a
+        stage silent too long raises one self-alert.
+
+    loop_state: {"capture": {"state","is_alive","start"} or None,
+                 "capture_expected": bool, "disk_min_free_mb": float}.
+    """
+    from . import pipeline as pipelinem
+    loop_state = loop_state or {}
+    capture_ctl = loop_state.get("capture")
+    capture_expected = loop_state.get("capture_expected", True)
+    disk_min_free_mb = loop_state.get("disk_min_free_mb",
+                                      pipelinem.DISK_MIN_FREE_MB)
+
+    # Lazy step bodies: a broken optional import must not kill the loop;
+    # safe_step logs the failure and the loop continues.
+    def _feeds():
+        from . import threatintel as tim
+        tim.maybe_refresh_feeds()
+
+    def _summary():
+        expl.summarize(save=True)
+
+    def _weekly_scan():
+        from . import scan as scanm
+        scanm.maybe_weekly_scan()
+
+    def _ingest():
+        from . import ingest as ingm
+        ingm.run_ingest()
+
+    def _selfcheck():
+        from . import selfcheck as selfm
+        selfm.maybe_scheduled_selfcheck()
+
+    def _amass():
+        from . import amass as amassm
+        amassm.maybe_weekly_amass()
+
+    def _nuclei():
+        from . import nuclei as nucleim
+        nucleim.maybe_weekly_nuclei()
+
+    def _swaudit():
+        from . import swaudit as swam
+        swam.maybe_daily_swaudit()
+
+    def _reporting():
+        from . import reporting as repm
+        repm.maybe_daily_score()
+        repm.maybe_daily_briefing()
+
+    def _rewind():
+        from . import rewind as rwm
+        rwm.refresh()
+        rwm.enforce_caps()
+
+    def _digest():
+        from . import notify as notifm
+        # Async: the monitor thread must never stall on SMTP (B1).
+        notifm.send_digest_async()
+
     last_summary = 0
     last_digest = time.time()  # first digest waits a full interval
     last_ingest = 0
     while not stop_event.wait(DETECT_INTERVAL):
+        now = time.time()
+
+        # Front door: restart a dead capture thread (bounded; the
+        # stale-capture watermark raises the self-alert past that).
+        if capture_ctl is not None:
+            pipelinem.safe_step("capture-watchdog",
+                                pipelinem.ensure_capture,
+                                capture_ctl["state"],
+                                capture_ctl["is_alive"],
+                                capture_ctl["start"])
+
+        # Detection rules ALWAYS run -- even with a full disk. run_all
+        # isolates each rule; a whole-pass failure is counted here and
+        # 3 in a row raises one self-alert.
         try:
             detm.run_all()
-        except Exception:
-            pass
-        now = time.time()
+        except Exception as exc:  # shouldn't happen; belt and suspenders
+            pipelinem.note_rules_result(False, exc)
+        else:
+            pipelinem.note_rules_result(True)
+
+        # Disk-full: stop non-essential writes, alert once, keep
+        # detecting. disk_alert_once also clears the flag on recovery.
+        pressured = bool(pipelinem.safe_step(
+            "disk-guard", pipelinem.disk_pressure,
+            min_free_mb=disk_min_free_mb))
+        pipelinem.safe_step("disk-alert", pipelinem.disk_alert_once,
+                            min_free_mb=disk_min_free_mb)
+
+        # Threat-intel feeds: detection quality depends on them, so they
+        # keep refreshing even under disk pressure. A failed refresh
+        # keeps the old rows and backs off -- it never breaks the loop.
+        pipelinem.safe_step("feeds", _feeds)
+
+        # Stale-stage self-check: one self-alert per silent stage, quiet
+        # again once it recovers.
+        pipelinem.safe_step("staleness",
+                            pipelinem.check_and_alert_staleness,
+                            capture_expected=capture_expected)
+
+        if pressured:
+            continue  # detection + feeds ran; the rest waits for room
+
         if now - last_summary >= expl.SUMMARY_INTERVAL:
             last_summary = now
-            try:
-                expl.summarize(save=True)
-            except Exception:
-                pass
+            pipelinem.safe_step("summary", _summary)
         # Weekly self scan of our own LAN (scan.py decides if it's due).
-        try:
-            from . import scan as scanm
-            scanm.maybe_weekly_scan()
-        except Exception:
-            pass
+        pipelinem.safe_step("weekly-scan", _weekly_scan)
         # Windows Event Log / firewall log ingestion (ingest.py decides
         # if it's configured); every 5 minutes is plenty for log files.
         if now - last_ingest >= 300:
             last_ingest = now
-            try:
-                from . import ingest as ingm
-                ingm.run_ingest()
-            except Exception:
-                pass
+            pipelinem.safe_step("ingest", _ingest)
         # Sensor-box self-health (selfcheck.py decides if it's due).
-        try:
-            from . import selfcheck as selfm
-            selfm.maybe_scheduled_selfcheck()
-        except Exception:
-            pass
-        # Threat-intel feeds: refresh on their own cadence (12h);
-        # a failed refresh keeps the old data, never breaks the loop.
-        try:
-            from . import threatintel as tim
-            tim.maybe_refresh_feeds()
-        except Exception:
-            pass
+        pipelinem.safe_step("selfcheck", _selfcheck)
         # External attack-surface mapping (amass.py decides if it's due,
         # enabled, and configured; silent no-op otherwise).
-        try:
-            from . import amass as amassm
-            amassm.maybe_weekly_amass()
-        except Exception:
-            pass
+        pipelinem.safe_step("amass", _amass)
         # Deeper vulnerability scan via Nuclei (nuclei.py decides if it's
         # due, enabled, and installed; silent no-op otherwise). Targets
         # are always our own LAN inventory -- never user-supplied.
-        try:
-            from . import nuclei as nucleim
-            nucleim.maybe_weekly_nuclei()
-        except Exception:
-            pass
+        pipelinem.safe_step("nuclei", _nuclei)
         # Software inventory + CVE correlation for the sensor box itself
         # (swaudit.py decides if it's due; local reads only).
-        try:
-            from . import swaudit as swam
-            swam.maybe_daily_swaudit()
-        except Exception:
-            pass
+        pipelinem.safe_step("swaudit", _swaudit)
         # Prove it (reporting.py): the daily morning briefing (one email,
         # honoring quiet hours) and the daily security-score snapshot for
         # the trend. Best-effort; never breaks the loop.
-        try:
-            from . import reporting as repm
-            repm.maybe_daily_score()
-            repm.maybe_daily_briefing()
-        except Exception:
-            pass
+        pipelinem.safe_step("reporting", _reporting)
         # Forensic rewind (rewind.py): refresh the enabled flag from
         # config and enforce the storage caps so the buffer can never
         # grow past rewind_minutes / rewind_max_mb.
-        try:
-            from . import rewind as rwm
-            rwm.refresh()
-            rwm.enforce_caps()
-        except Exception:
-            pass
+        pipelinem.safe_step("rewind", _rewind)
         if digest_hours > 0 and now - last_digest >= digest_hours * 3600:
             last_digest = now
-            try:
-                from . import notify as notifm
-                # Async: the monitor thread must never stall on SMTP (B1).
-                notifm.send_digest_async()
-            except Exception:
-                pass
+            pipelinem.safe_step("digest", _digest)
 
 
 def _bind_allowed(host):
@@ -234,8 +296,47 @@ def main():
     watchdog.start()
     dash.watchdog = watchdog  # dashboard reads live status from here
 
+    # Pipeline robustness (batch 14): the monitor loop watches the
+    # capture thread (bounded restarts), tracks per-stage watermarks,
+    # and pauses non-essential writes when the disk is nearly full.
+    from . import pipeline as pipelinem
+    capture_wanted = not args.dashboard_only
+    pipelinem.set_capture_expected(capture_wanted)
+    try:
+        disk_min_free_mb = float(cfgm.get(cfg, "monitor.disk_min_free_mb",
+                                          pipelinem.DISK_MIN_FREE_MB))
+    except (TypeError, ValueError):
+        disk_min_free_mb = pipelinem.DISK_MIN_FREE_MB
+
+    capture_state = {"thread": None, "restarts": [], "gave_up": False}
+
+    def _start_capture():
+        from . import capture as capm
+        t = threading.Thread(
+            target=capm.run_live,
+            kwargs={"interface": args.iface, "stop_event": stop_event},
+            daemon=True)
+        t.start()
+        return t
+
+    if capture_wanted:
+        capture_state["thread"] = _start_capture()
+        print(f"Capturing on {args.iface or 'default interface'}..."
+              " (needs root for live sniff)")
+
+    loop_state = {
+        "disk_min_free_mb": disk_min_free_mb,
+        "capture_expected": capture_wanted,
+        "capture": ({
+            "state": capture_state,
+            "is_alive": lambda: (capture_state["thread"] is not None
+                                 and capture_state["thread"].is_alive()),
+            "start": _start_capture,
+        } if capture_wanted else None),
+    }
+
     monitor = threading.Thread(target=_monitor_loop,
-                               args=(stop_event, digest_hours),
+                               args=(stop_event, digest_hours, loop_state),
                                daemon=True)
     monitor.start()
 
@@ -247,17 +348,6 @@ def main():
         qm.ensure_worker()
     except Exception:
         pass
-
-    capture_thread = None
-    if not args.dashboard_only:
-        from . import capture as capm
-        capture_thread = threading.Thread(
-            target=capm.run_live,
-            kwargs={"interface": args.iface, "stop_event": stop_event},
-            daemon=True)
-        capture_thread.start()
-        print(f"Capturing on {args.iface or 'default interface'}..."
-              " (needs root for live sniff)")
 
     # first summary right away so the dashboard isn't empty
     try:
@@ -277,8 +367,9 @@ def main():
         hb_minutes = 5
 
     def _health():
-        if (capture_thread is not None and not args.dashboard_only
-                and not capture_thread.is_alive()):
+        thr = capture_state["thread"]
+        if (capture_wanted and thr is not None
+                and not thr.is_alive()):
             return False, "capture thread died"
         return healthm.local_health()
 

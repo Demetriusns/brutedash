@@ -376,6 +376,11 @@ North star: the automated analyst for a network with nobody watching it.
   otherwise.
 - Sensor-down alerting — a SOC that silently dies is worse than none.
   Watchdog exists (Phase 3); add "haven't heard from the sensor" pages.
+  GROUNDED 2026-10-04 (batch 14, repo-learning item 4 DONE): per-stage
+  watermarks (capture tick, rule pass, feed refresh, notification) in
+  the sensor-health "Pipeline health" view; a stage silent too long
+  raises one self-alert (capture High, rules/notify/disk Medium, feeds
+  Low). Full multi-sensor "pages" stay Phase 4/5 work.
 - Roles — owner vs. viewer logins. The IT guy sees everything; the business
   owner sees the briefing. (Dashboard login exists in Phase 3; extend it.)
 
@@ -578,7 +583,7 @@ already hinted at in Phase 4 — Phase 5 is where it becomes the product.
 - [x] local_health() under the DB lock — savepoint/rollback probe, no prod tables. (B4)
 - [x] debug=True removed; deps pinned; config.yaml chmod 600; /brief input validation; CR/LF stripped from email strings. (M1/M3/L6/L7/L3)
 - [ ] AI-question (/ask) rate limits.
-- [ ] Pipeline-liveness watermarks.
+- [x] Pipeline-liveness watermarks. DONE 2026-10-04 (batch 14, repo-learning item 4): per-stage watermarks + stale-stage self-alerts, sensor-health "Pipeline health" view.
 - [ ] Rolling database retention + bounded dashboard stats.
 - [ ] Windows restart-on-failure supervision (docs/run-as-service.md is the start).
 - [ ] SSH detector: log rotation resets accumulated counts — read across rotations.

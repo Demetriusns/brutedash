@@ -903,17 +903,39 @@ def check_threat_intel(now=None):
     return fired
 
 
+# Every periodic rule, in run order. run_all isolates each one: a rule
+# that crashes on poison input must not cancel the rest of the pass.
+_RULES = (
+    check_traffic_spike,
+    check_unusual_ports,
+    check_beaconing,
+    check_baseline_anomalies,
+    check_dns_anomalies,
+    check_new_devices,
+    check_arp_spoof,
+    check_behavior_deviation,
+    check_threat_intel,
+)
+
+
 def run_all(now=None):
     """Run every periodic rule once. Called on a schedule by run.py.
 
     `now` anchors the analysis window -- wall-clock for live capture,
-    newest-packet time for pcap analysis."""
-    check_traffic_spike(now=now)
-    check_unusual_ports(now=now)
-    check_beaconing(now=now)
-    check_baseline_anomalies(now=now)
-    check_dns_anomalies(now=now)
-    check_new_devices(now=now)
-    check_arp_spoof(now=now)
-    check_behavior_deviation(now=now)
-    check_threat_intel(now=now)
+    newest-packet time for pcap analysis.
+
+    Pipeline robustness (batch 14): each rule runs isolated. A rule that
+    raises (poison input, a transient DB hiccup) is logged with its name
+    and the pass continues with the next rule -- one bad rule no longer
+    blinds the other eight for the whole minute.
+    """
+    import sys
+    for rule in _RULES:
+        try:
+            rule(now=now)
+        except Exception as exc:
+            try:
+                print(f"netmon detect: {rule.__name__} failed: {exc!r}",
+                      file=sys.stderr)
+            except Exception:
+                pass

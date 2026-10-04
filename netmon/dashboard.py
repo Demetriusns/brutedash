@@ -458,6 +458,9 @@ history.</p>
 <h4 style="margin-top:1em">Software on this box</h4>
 <p class="note">What is installed here, checked against the list of security flaws attackers are actively using right now. Local check only -- nothing leaves this box.</p>
 <div id="swaudit"><p class="note">Loading...</p></div>
+<h4 style="margin-top:1em">Pipeline health</h4>
+<p class="note">When each part of the monitor last did its job. A part that's been silent too long raises one alert, then stays quiet until it's healthy again.</p>
+<div id="pipehealth"><p class="note">Loading...</p></div>
 </div></details>
 
 <details class="settings"><summary>What the numbers mean</summary><div class="inner">
@@ -588,6 +591,7 @@ async function refreshInner(){
     + (lead.what_to_do ? `<br><b>What to do:</b> ${esc(lead.what_to_do)}` : "")
     + (lead.note ? `<br><b>Your note:</b> ${esc(lead.note)}` : "")
     + `<br><span class="note">${esc(lead.ts)}${lead.detail ? " -- " + esc(lead.detail) : ""}</span>`
+    + (lead.trace_id ? `<br><span class="note">Follow-up ID: ${esc(lead.trace_id)}</span>` : "")
     + (n > 1 ? `<br><button class="btn-sm ghost" onclick="toggleGroup(${gi}, this)">show all ${n}</button>`
       + `<div id="group-${gi}" style="display:none">`
       + g.items.slice(1).map(a=>`<span class="note">${esc(a.ts)}${a.detail ? " -- " + esc(a.detail) : ""}</span><br>`).join("")
@@ -806,10 +810,13 @@ async function loadIntelStatus(){
     let html = "";
     if (d.feeds && d.feeds.length) {
       html += `<table><tr><th>Feed</th><th>Kind</th><th>Entries</th><th>Last updated</th></tr>` +
-        d.feeds.map(f=>`<tr><td>${esc(f.label)}</td><td>${esc(f.kind)}</td><td>${esc(String(f.entries))}</td><td class="note">${esc(f.last_updated)}</td></tr>`).join("") +
+        d.feeds.map(f=>`<tr><td>${esc(f.label)}</td><td>${esc(f.kind)}</td><td>${esc(String(f.entries))}</td><td class="note">${esc(f.last_updated)}${f.stale ? ' <span class="badge warn">stale</span>' : ""}</td></tr>`).join("") +
         `</table><p class="note">${esc(String(d.total_entries))} known-bad addresses and sites on file, checked locally.</p>`;
     } else {
       html += `<p class="note">No feeds loaded yet. They load automatically in the background, or <button class="btn-sm" onclick="refreshFeeds()">load them now</button>.</p>`;
+    }
+    if (d.feed_health && d.feed_health.failed_recently) {
+      html += `<p class="note">The last refresh didn't go through (network down?), so these are the saved lists from the last good refresh. Detection keeps working from the saved lists.</p>`;
     }
     if (d.abuseipdb) {
       html += `<p class="note">AbuseIPDB scores are on (API key configured).</p>`;
@@ -1033,6 +1040,7 @@ async function toggleCase(iid, btn){
         `<p><b>[${esc(a.severity)}]</b> ${esc(a.title)}`
         + (a.mitre_id ? ` <span class="badge mitre" title="${esc(a.mitre_name || "")} — tactic: ${esc(a.mitre_tactic || "")}">${esc(a.mitre_id)}</span>` : "")
         + `<br><span class="note">${esc(a.ts)}${a.detail ? " — " + esc(a.detail) : ""}</span>`
+        + (a.trace_id ? `<br><span class="note">Follow-up ID: ${esc(a.trace_id)}</span>` : "")
         + (a.meaning ? `<br><span class="note">${esc(a.meaning)}</span>` : "")
         + (a.what_to_do ? `<br><span class="note">Next step: ${esc(a.what_to_do)}</span>` : "")
         + (a.playbook ? `<br><a href="/playbook/${esc(a.playbook)}">fix-it guide &rarr;</a>` : "")
@@ -1474,9 +1482,34 @@ async function loadSelfcheck(){
       `<table><tr><th>Check</th><th>Status</th><th>Detail</th></tr>` +
       rows.map(c=>`<tr><td>${esc(c.name)}</td><td><span class="badge ${c.status === "ok" ? "ok" : (c.status === "drift" ? "warn" : "")}">${esc(c.status)}</span></td><td>${esc(c.detail)}</td></tr>`).join("") + `</table>` : "");
     renderSwaudit(d.swaudit || {});
+    loadPipelineHealth();
   } catch(e) {
     document.getElementById("selfcheck").innerHTML =
       '<p class="banner-red">Could not load self-check status: '
+      + esc(String((e && e.message) || e)) + '</p>';
+  }
+}
+async function loadPipelineHealth(){
+  const el = document.getElementById("pipehealth");
+  if (!el) return;
+  try {
+    const r = await fetch("/api/pipeline_health");
+    if (!r.ok) throw new Error("server returned " + r.status);
+    const d = await r.json();
+    const rows = d.stages || [];
+    if (!rows.length) {
+      el.innerHTML = '<p class="note">No pipeline data yet.</p>';
+      return;
+    }
+    el.innerHTML = `<table><tr><th>Part</th><th>Last did its job</th><th>Status</th></tr>` +
+      rows.map(s=>{
+        const cls = s.state === "ok" ? "ok" : (s.state === "stale" ? "warn" : "");
+        const when = (typeof s.last_ts === "number" && s.last_ts > 0)
+          ? esc(new Date(s.last_ts * 1000).toLocaleString()) : "&mdash;";
+        return `<tr><td>${esc(s.label)}</td><td class="note">${when}<br>${esc(s.note || "")}</td><td><span class="badge ${cls}">${esc(s.state)}</span></td></tr>`;
+      }).join("") + `</table>`;
+  } catch(e) {
+    el.innerHTML = '<p class="banner-red">Could not load pipeline health: '
       + esc(String((e && e.message) || e)) + '</p>';
   }
 }
@@ -1749,45 +1782,66 @@ _ALERT_COLS_MITRE = _ALERT_COLS_EXT + ", mitre_id, mitre_name, mitre_tactic"
 _VALID_STATUS = ("new", "acknowledged", "dismissed")
 
 
+_ALERT_COLS_TRACE = _ALERT_COLS_MITRE + ", trace_id"
+
+
 def _alerts(status_filter="all"):
     """Alert dicts for the last hour, newest first, with optional triage
     status filter."""
     try:
         rows = dbm.query(
-            f"SELECT {_ALERT_COLS_MITRE} FROM alerts WHERE ts > ?"
+            f"SELECT {_ALERT_COLS_TRACE} FROM alerts WHERE ts > ?"
             " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
+        with_trace = True
         with_mitre = True
         extended = True
     except Exception:
         try:
             rows = dbm.query(
-                f"SELECT {_ALERT_COLS_EXT} FROM alerts WHERE ts > ?"
+                f"SELECT {_ALERT_COLS_MITRE} FROM alerts WHERE ts > ?"
                 " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
+            with_trace = False
+            with_mitre = True
             extended = True
         except Exception:
-            rows = dbm.query(
-                f"SELECT {_ALERT_COLS} FROM alerts WHERE ts > ?"
-                " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
-            extended = False
-        with_mitre = False
+            try:
+                rows = dbm.query(
+                    f"SELECT {_ALERT_COLS_EXT} FROM alerts WHERE ts > ?"
+                    " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
+                with_trace = False
+                with_mitre = False
+                extended = True
+            except Exception:
+                rows = dbm.query(
+                    f"SELECT {_ALERT_COLS} FROM alerts WHERE ts > ?"
+                    " ORDER BY ts DESC LIMIT 20", (time.time() - 3600,))
+                with_trace = False
+                with_mitre = False
+                extended = False
     alerts = []
     for r in rows:
-        if with_mitre:
+        if with_trace:
+            (aid, sev, t, d, m, n, w, ts, st, note,
+             mitre_id, mitre_name, mitre_tactic, trace_id) = r
+        elif with_mitre:
             (aid, sev, t, d, m, n, w, ts, st, note,
              mitre_id, mitre_name, mitre_tactic) = r
+            trace_id = ""
         elif extended:
             aid, sev, t, d, m, n, w, ts, st, note = r
             mitre_id = mitre_name = mitre_tactic = None
+            trace_id = ""
         else:
             aid, sev, t, d, m, n, w, ts = r
             st, note = "new", ""
             mitre_id = mitre_name = mitre_tactic = None
+            trace_id = ""
         alerts.append({
             "id": aid, "severity": sev, "title": t, "detail": d,
             "meaning": m, "is_normal": n, "what_to_do": w,
             "ts": _fmt_ts(ts), "status": st or "new", "note": note or "",
             "mitre_id": mitre_id, "mitre_name": mitre_name,
-            "mitre_tactic": mitre_tactic,
+            "mitre_tactic": mitre_tactic, "trace_id": trace_id or "",
         })
     if status_filter in _VALID_STATUS:
         alerts = [a for a in alerts if a["status"] == status_filter]
@@ -2303,6 +2357,25 @@ def api_host_events():
     return jsonify({"ingest": info, "events": events})
 
 
+@app.route("/api/pipeline_health")
+def api_pipeline_health():
+    """Per-stage pipeline watermarks for the sensor-health view.
+
+    [{stage, label, last_ts, age_s, state, note}] where state is
+    ok | stale | unknown. "Haven't heard from the sensor" groundwork:
+    a stage silent too long shows stale here (and raises one self-alert
+    from the monitor loop).
+    """
+    try:
+        from . import pipeline as pipelinem
+        stages = pipelinem.health_snapshot(
+            capture_expected=pipelinem.get_capture_expected())
+        return jsonify({"ok": True, "stages": stages})
+    except Exception as exc:
+        return jsonify({"ok": False,
+                        "error": str(exc)[:120]}), 500
+
+
 @app.route("/api/selfcheck")
 def api_selfcheck():
     """Sensor-box self-health: last run + per-check status.
@@ -2448,18 +2521,27 @@ def _alerts_mentioning_domain(domain, limit=20):
 
 @app.route("/api/intel/status")
 def api_intel_status():
-    """Feed health for the dashboard: label, entries, last update."""
+    """Feed health for the dashboard: label, entries, last update.
+
+    Pipeline robustness (batch 14): when the last refresh failed, the
+    dashboard says so plainly ("showing the saved lists") instead of
+    silently serving stale data -- see dbm.ti_feed_health().
+    """
     from . import threatintel as tim
     try:
         feeds = dbm.ti_feed_status()
         total = dbm.ti_entry_count()
+        feed_health = dbm.ti_feed_health()
     except Exception:
         feeds, total = [], 0
+        feed_health = {"failed_recently": False, "last_attempt_ts": None,
+                       "last_success_ts": None}
     for f in feeds:
         f["last_updated"] = (_fmt_ts(f["last_updated"])
                              if f.get("last_updated") else "never")
     return jsonify({"feeds": feeds, "total_entries": total,
-                    "abuseipdb": tim.abuseipdb_configured()})
+                    "abuseipdb": tim.abuseipdb_configured(),
+                    "feed_health": feed_health})
 
 
 @app.route("/api/intel/refresh", methods=["POST"])
@@ -3106,7 +3188,8 @@ def api_stats():
          "is_normal": a["is_normal"], "what_to_do": a["what_to_do"],
          "ts": a["ts"], "status": a["status"], "note": a["note"],
          "mitre_id": a.get("mitre_id"), "mitre_name": a.get("mitre_name"),
-         "mitre_tactic": a.get("mitre_tactic")}
+         "mitre_tactic": a.get("mitre_tactic"),
+         "trace_id": a.get("trace_id") or ""}
         for a in _alerts(status_filter=request.args.get("status", "all"))
     ]
     last_flow_ts, stale = _flow_health()

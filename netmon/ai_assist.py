@@ -128,11 +128,15 @@ def triage_verdict(alert):
 
     alert: dict with keys severity/title/detail/meaning/is_normal/what_to_do.
     Returns {"verdict": ..., "reasoning": ...} or None. Never raises.
+
+    When the model is unavailable (no key, bad response, API error), the
+    deterministic rule-based take below answers instead of silence -- the
+    dashboard labels it as such.
     """
     try:
         client = _client()
         if client is None or not isinstance(alert, dict):
-            return None
+            return _rule_based_verdict(alert)
         lines = []
         for key in ("severity", "title", "detail", "meaning",
                     "is_normal", "what_to_do"):
@@ -147,9 +151,66 @@ def triage_verdict(alert):
                                  recent_block=recent_block),
             max_tokens=300,
         )
-        return _validate_verdict(data)
+        verdict = _validate_verdict(data)
+        return verdict if verdict is not None else _rule_based_verdict(alert)
     except Exception:
-        return None
+        return _rule_based_verdict(alert)
+
+
+def _rule_based_verdict(alert):
+    """Deterministic second opinion when the model is unavailable.
+
+    Built only from the alert's own plain-English fields and the static
+    detection catalog's false-positive notes -- it never invents facts,
+    devices, or events. Same {"verdict", "reasoning"} shape as the model
+    path, with the origin stated up front so the dashboard can tell it
+    apart. Never raises.
+    """
+    try:
+        alert = alert if isinstance(alert, dict) else {}
+        sev = (alert.get("severity") or "").strip()
+        kind = (alert.get("kind") or "").strip()
+        title = (alert.get("title") or "this alert").strip()
+        meaning = (alert.get("meaning") or "").strip()
+        what_to_do = (alert.get("what_to_do") or "").strip()
+        verdict = {"Critical": "real concern", "High": "real concern",
+                   "Medium": "uncertain",
+                   "Low": "likely benign"}.get(sev, "uncertain")
+        fp_note = ""
+        try:
+            from . import detection_catalog as catm
+            entry = next((r for r in catm.RULES if r.get("id") == kind),
+                         None)
+            if entry and entry.get("recognize_fp"):
+                fp_note = str(entry["recognize_fp"]).strip()
+        except Exception:
+            pass
+        parts = ["The AI second opinion is unavailable right now -- this"
+                 " is the rule-based take."]
+        if verdict == "real concern":
+            parts.append(f"{title} is {sev} urgency: treat it as worth"
+                         f" acting on, not just watching.")
+        elif verdict == "likely benign":
+            parts.append(f"{title} is low urgency: these usually turn out"
+                         f" to be routine.")
+        else:
+            parts.append(f"{title} is medium urgency: worth a look when"
+                         f" you have a minute.")
+        if meaning:
+            parts.append(meaning)
+        if fp_note:
+            parts.append(f"How to tell it's a false alarm: {fp_note}")
+        if what_to_do:
+            parts.append(f"Suggested next step: {what_to_do}")
+        reasoning = " ".join(parts)
+        if len(reasoning) > 900:
+            reasoning = reasoning[:897] + "..."
+        return {"verdict": verdict, "reasoning": reasoning}
+    except Exception:
+        return {"verdict": "uncertain",
+                "reasoning": ("The AI second opinion is unavailable right"
+                              " now. Not enough detail to judge -- treat"
+                              " it as worth a quick look.")}
 
 
 QA_PROMPT = """You are a friendly network analyst answering a question from
@@ -244,8 +305,15 @@ def answer_question(question):
     """
     try:
         client = _client()
-        if (client is None or not isinstance(question, str)
-                or not question.strip()):
+        if client is None:
+            # No model available: say so plainly instead of returning
+            # silence. The dashboard's summary and alert list still work.
+            return {"answer": ("The AI answering service is unavailable"
+                               " right now (no API key configured or the"
+                               " service didn't respond). The network"
+                               " summary and alert list on the dashboard"
+                               " still work -- start there.")}
+        if not isinstance(question, str) or not question.strip():
             return None
         context = _build_qa_context()
         data = _json_chat(

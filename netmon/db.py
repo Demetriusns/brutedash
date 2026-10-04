@@ -33,7 +33,9 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import contextlib
+import uuid
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "netmon.db")
@@ -430,7 +432,7 @@ def _connect(path=None):
     conn.executescript(_SCHEMA)
     # Migrate older databases that lack the plain-English alert columns.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
-    for col in ("meaning", "is_normal", "what_to_do"):
+    for col in ("meaning", "is_normal", "what_to_do", "trace_id"):
         if col not in cols:
             conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} TEXT")
     if "status" not in cols:
@@ -466,6 +468,35 @@ def _connect(path=None):
                     (tag["id"], tag["name"], tag["tactic"], kind))
     except Exception:
         pass  # tags are display metadata; never break startup over them
+    # Pipeline robustness (batch 14): trace ids. incident_alerts carries
+    # the member alert's trace id so one detection can be followed
+    # alert -> incident -> notification. Literal SQL (no f-string) so the
+    # pre-push audit stays quiet.
+    try:
+        ia_cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(incident_alerts)")}
+        if "trace_id" not in ia_cols:
+            conn.execute(
+                "ALTER TABLE incident_alerts ADD COLUMN trace_id TEXT")
+    except Exception:
+        pass  # tracing is observability; never break startup over it
+    # One-time backfill: rows that predate the trace_id column get one,
+    # so "every alert has a trace id" holds on old databases too.
+    # Guarded -- never break startup over observability.
+    try:
+        null_ids = conn.execute(
+            "SELECT id FROM alerts WHERE trace_id IS NULL").fetchall()
+        if null_ids:
+            conn.executemany(
+                "UPDATE alerts SET trace_id=? WHERE id=?",
+                [(uuid.uuid4().hex, r[0]) for r in null_ids])
+        conn.execute(
+            "UPDATE incident_alerts SET trace_id="
+            " (SELECT trace_id FROM alerts"
+            " WHERE alerts.id=incident_alerts.alert_id)"
+            " WHERE trace_id IS NULL")
+    except Exception:
+        pass
     try:
         # De-dupe any legacy rows first so the index always builds.
         conn.execute("DELETE FROM allowlist WHERE id NOT IN"
@@ -630,6 +661,47 @@ def _notify_hook(alert_dict):
         pass
 
 
+# --- bounded write retry ---------------------------------------------------
+# Pipeline robustness (batch 14): SQLite "database is locked" is
+# transient under WAL contention (dashboard read + capture write +
+# monitor write at once). Retrying a bounded number of times with
+# backoff lets the alert land instead of the write being lost -- but the
+# retry is STRICTLY bounded (no infinite retry storms): after
+# _DB_RETRY_MAX attempts the error propagates to the caller, and the
+# monitor loop logs it and keeps going. Anything that is not a lock
+# error raises immediately.
+
+_DB_RETRY_MAX = 5
+_DB_RETRY_FIRST_DELAY_S = 0.05
+
+
+def _is_locked_error(exc):
+    """True for sqlite3 'database is locked' / 'database is busy'."""
+    return (isinstance(exc, sqlite3.OperationalError)
+            and ("locked" in str(exc).lower()
+                 or "busy" in str(exc).lower()))
+
+
+def _write_with_retry(fn):
+    """Run a DB write fn(); retry transient lock contention with backoff.
+
+    At most _DB_RETRY_MAX attempts total. Non-lock errors raise on the
+    first attempt. The final lock failure propagates -- callers (the
+    alert path) let it bubble to the monitor loop's handler, which logs
+    it, rather than hanging the thread forever.
+    """
+    import time as _t
+    delay = _DB_RETRY_FIRST_DELAY_S
+    for attempt in range(_DB_RETRY_MAX):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt + 1 >= _DB_RETRY_MAX or not _is_locked_error(exc):
+                raise
+            _t.sleep(delay)
+            delay = min(delay * 2, 0.5)
+
+
 def insert_flows(rows):
     """rows: list of (ts, src_ip, dst_ip, src_port, dst_port, proto,
     packets, bytes, direction)."""
@@ -647,22 +719,34 @@ def insert_flows(rows):
 
 
 def add_alert(kind, severity, title, detail, meaning="", is_normal="",
-              what_to_do="", ts=None):
+              what_to_do="", ts=None, trace_id=None):
     """Store a detection finding.
 
     meaning / is_normal / what_to_do are plain-English fields written for
     non-technical readers: what this means, when it's fine vs not, and one
     concrete next step.
 
+    trace_id: one id for this detection, minted here at rule-fire time
+    (uuid4 hex) when the caller doesn't supply one. It is stored on the
+    alert row, carried into the incident, handed to the notify hook, and
+    shown on the dashboard as the "Follow-up ID" -- one id follows a
+    single detection end to end. It is deliberately NOT included in
+    emails: it is internal plumbing, not user content.
+
     Phase 3.5: the alert is MITRE-tagged from its kind and attached to an
     incident (a case bundling related alerts) -- both best-effort, and
     neither can ever break or delay alert storage.
+
+    The INSERT retries transient "database is locked" contention with
+    backoff (bounded -- see _write_with_retry); a lock that never clears
+    propagates to the caller instead of hanging.
 
     After the row is committed, a best-effort notification hook fires
     (outside the lock); it can never break or delay alert storage.
     """
     import time
     ts = ts if ts is not None else time.time()
+    trace_id = trace_id or uuid.uuid4().hex
     try:
         from . import mitre as _mitre_mod
         tag = _mitre_mod.tag_for(kind) or {}
@@ -670,35 +754,63 @@ def add_alert(kind, severity, title, detail, meaning="", is_normal="",
         tag = {}
     with _lock:
         conn = _db()
-        cur = conn.execute(
-            "INSERT INTO alerts (ts, kind, severity, title, detail,"
-            " meaning, is_normal, what_to_do, mitre_id, mitre_name,"
-            " mitre_tactic)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (ts, kind, severity, title, detail, meaning, is_normal,
-             what_to_do, tag.get("id"), tag.get("name"), tag.get("tactic")),
-        )
-        alert_id = cur.lastrowid
-        conn.commit()
+
+        def _do_insert():
+            cur = conn.execute(
+                "INSERT INTO alerts (ts, kind, severity, title, detail,"
+                " meaning, is_normal, what_to_do, mitre_id, mitre_name,"
+                " mitre_tactic, trace_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ts, kind, severity, title, detail, meaning, is_normal,
+                 what_to_do, tag.get("id"), tag.get("name"),
+                 tag.get("tactic"), trace_id),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+        alert_id = _write_with_retry(_do_insert)
     # Incident attach runs after the insert's lock is released (_lock is a
     # plain Lock, not re-entrant) and is best-effort: grouping must never
     # break alerting. Failures are logged so a broken pipeline is visible.
     try:
-        attach_to_incident(alert_id, kind, severity, title, detail, ts)
+        attach_to_incident(alert_id, kind, severity, title, detail, ts,
+                           trace_id=trace_id)
     except Exception as exc:
         import sys
         try:
             print(f"netmon db: attach_to_incident failed for alert"
-                  f" {alert_id}: {exc!r}", file=sys.stderr)
+                  f" {alert_id} (trace {trace_id}): {exc!r}",
+                  file=sys.stderr)
         except Exception:
             pass
     _notify_hook({
         "id": alert_id, "ts": ts, "kind": kind, "severity": severity,
         "title": title, "detail": detail, "meaning": meaning,
         "is_normal": is_normal, "what_to_do": what_to_do,
-        "status": "new", "note": None,
+        "status": "new", "note": None, "trace_id": trace_id,
     })
     return alert_id
+
+
+def get_alert(alert_id):
+    """One alert as a dict (including trace_id), or None. Never raises."""
+    try:
+        with _lock:
+            conn = _db()
+            r = conn.execute(
+                "SELECT id, ts, kind, severity, title, detail, meaning,"
+                " is_normal, what_to_do, status, note, mitre_id,"
+                " mitre_name, mitre_tactic, trace_id FROM alerts"
+                " WHERE id=?", (alert_id,)).fetchone()
+    except Exception:
+        return None
+    if not r:
+        return None
+    return {"id": r[0], "ts": r[1], "kind": r[2], "severity": r[3],
+            "title": r[4], "detail": r[5], "meaning": r[6],
+            "is_normal": r[7], "what_to_do": r[8], "status": r[9],
+            "note": r[10], "mitre_id": r[11], "mitre_name": r[12],
+            "mitre_tactic": r[13], "trace_id": r[14]}
 
 
 # --- Phase 3.5: incidents, not alerts --------------------------------------
@@ -746,8 +858,12 @@ def _extract_case_key(title, detail):
     return ips[0] if ips else None
 
 
-def attach_to_incident(alert_id, kind, severity, title, detail, ts):
+def attach_to_incident(alert_id, kind, severity, title, detail, ts,
+                       trace_id=None):
     """Attach an alert to its incident, creating the case if needed.
+
+    The alert's trace_id is carried onto the incident_alerts row so one
+    id follows the detection from rule-fire through the case.
 
     Returns the incident id. Takes the module lock; callers must not hold
     it (it is a plain Lock, not re-entrant). Never raises -- callers wrap
@@ -755,44 +871,49 @@ def attach_to_incident(alert_id, kind, severity, title, detail, ts):
     """
     import time
     ts = ts if ts is not None else time.time()
+    trace_id = trace_id or uuid.uuid4().hex
     key = _extract_case_key(title, detail)
     with _lock:
         conn = _db()
-        incident_id = None
-        if key:
-            row = conn.execute(
-                "SELECT id, severity FROM incidents"
-                " WHERE status IN ('open','escalated') AND device_key=?"
-                " AND updated_ts > ?"
-                " ORDER BY updated_ts DESC LIMIT 1",
-                (key, ts - INCIDENT_WINDOW_S),
-            ).fetchone()
-            if row:
-                incident_id = row[0]
-                if _SEV_RANK.get(severity, 0) > _SEV_RANK.get(row[1], 0):
-                    conn.execute(
-                        "UPDATE incidents SET severity=? WHERE id=?",
-                        (severity, incident_id))
-        if incident_id is None:
-            label = key or "your network"
-            cur = conn.execute(
-                "INSERT INTO incidents (created_ts, updated_ts, title,"
-                " severity, status, device_key, summary)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (ts, ts, f"Case: suspicious activity involving {label}",
-                 severity, "open", key, f"Opened by: {title}"),
-            )
-            incident_id = cur.lastrowid
-        else:
+
+        def _do_attach():
+            incident_id = None
+            if key:
+                row = conn.execute(
+                    "SELECT id, severity FROM incidents"
+                    " WHERE status IN ('open','escalated') AND device_key=?"
+                    " AND updated_ts > ?"
+                    " ORDER BY updated_ts DESC LIMIT 1",
+                    (key, ts - INCIDENT_WINDOW_S),
+                ).fetchone()
+                if row:
+                    incident_id = row[0]
+                    if _SEV_RANK.get(severity, 0) > _SEV_RANK.get(row[1], 0):
+                        conn.execute(
+                            "UPDATE incidents SET severity=? WHERE id=?",
+                            (severity, incident_id))
+            if incident_id is None:
+                label = key or "your network"
+                cur = conn.execute(
+                    "INSERT INTO incidents (created_ts, updated_ts, title,"
+                    " severity, status, device_key, summary)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (ts, ts, f"Case: suspicious activity involving {label}",
+                     severity, "open", key, f"Opened by: {title}"),
+                )
+                incident_id = cur.lastrowid
+            else:
+                conn.execute(
+                    "UPDATE incidents SET updated_ts=? WHERE id=?",
+                    (ts, incident_id))
             conn.execute(
-                "UPDATE incidents SET updated_ts=? WHERE id=?",
-                (ts, incident_id))
-        conn.execute(
-            "INSERT OR IGNORE INTO incident_alerts (incident_id, alert_id)"
-            " VALUES (?,?)",
-            (incident_id, alert_id))
-        conn.commit()
-        return incident_id
+                "INSERT OR IGNORE INTO incident_alerts"
+                " (incident_id, alert_id, trace_id) VALUES (?,?,?)",
+                (incident_id, alert_id, trace_id))
+            conn.commit()
+            return incident_id
+
+        return _write_with_retry(_do_attach)
 
 
 def list_incidents(status="open", limit=50):
@@ -828,7 +949,7 @@ def get_incident(incident_id):
         alerts = conn.execute(
             "SELECT al.id, al.ts, al.kind, al.severity, al.title, al.detail,"
             " al.meaning, al.what_to_do, al.mitre_id, al.mitre_name,"
-            " al.mitre_tactic, al.status"
+            " al.mitre_tactic, al.status, ia.trace_id"
             " FROM incident_alerts ia JOIN alerts al ON al.id=ia.alert_id"
             " WHERE ia.incident_id=? ORDER BY al.ts ASC",
             (incident_id,)).fetchall()
@@ -841,6 +962,7 @@ def get_incident(incident_id):
             "title": a[4], "detail": a[5], "meaning": a[6],
             "what_to_do": a[7], "mitre_id": a[8], "mitre_name": a[9],
             "mitre_tactic": a[10], "status": a[11],
+            "trace_id": a[12] or "",
         } for a in alerts],
     }
 
@@ -2548,13 +2670,27 @@ def ti_lookup(kind, keys):
 def ti_feed_status():
     """Per-feed status for the dashboard: [{feed, kind, entries,
     last_updated}] with the feed's human label looked up from
-    threatintel's registry when available."""
+    threatintel's registry when available.
+
+    Pipeline robustness (batch 14): each feed also carries "stale" --
+    True when the feed never loaded or its last successful refresh is
+    older than twice the refresh interval. A failed refresh keeps the
+    old rows (see refresh_feeds); "stale" tells the dashboard to say so
+    instead of silently serving old data. See also ti_feed_health() for
+    the global attempt state.
+    """
     labels = {}
     try:
         from . import threatintel as tim
         labels = {n: s.get("label", n) for n, s in tim._FEEDS.items()}
     except Exception:
         pass
+    now = time.time()
+    try:
+        _interval_h = float(tim.FEED_REFRESH_HOURS)
+    except Exception:
+        _interval_h = 12.0
+    stale_after_s = 2 * _interval_h * 3600
     with _lock:
         conn = _db()
         rows = conn.execute(
@@ -2570,10 +2706,38 @@ def ti_feed_status():
             updated = float(raw) if raw else 0
         except (TypeError, ValueError):
             updated = 0
+        stale = (not updated) or (now - updated > stale_after_s)
         out.append({"feed": feed, "label": labels.get(feed, feed),
                     "kind": kind, "entries": count,
-                    "last_updated": updated or None})
+                    "last_updated": updated or None,
+                    "stale": stale})
     return sorted(out, key=lambda r: r["feed"])
+
+
+def ti_feed_health():
+    """Global feed-refresh health: was the last attempt a failure?
+
+    Returns {"last_attempt_ts", "last_success_ts", "failed_recently"}.
+    failed_recently is True when an attempt happened after the last
+    success -- i.e. the network is down (or the feeds are) and the
+    dashboard is serving cached lists. Never raises.
+    """
+    def _f(key):
+        try:
+            return float(get_meta(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+        except Exception:
+            return 0
+    try:
+        attempted = _f("ti_feeds_attempted_ts")
+        succeeded = _f("ti_feeds_refreshed_ts")
+        return {"last_attempt_ts": attempted or None,
+                "last_success_ts": succeeded or None,
+                "failed_recently": bool(attempted and attempted > succeeded)}
+    except Exception:
+        return {"last_attempt_ts": None, "last_success_ts": None,
+                "failed_recently": False}
 
 
 def ti_entry_count():

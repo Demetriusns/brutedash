@@ -580,7 +580,10 @@ RULES = [
         "description": ("Watches the box running brutedash itself:"
                         " unexpected listening ports, new services or"
                         " auto-start entries vs. baseline, and Defender's"
-                        " real-time guard. A blind monitor is worse than"
+                        " real-time guard -- plus the monitor's own"
+                        " pipeline: a nearly-full disk, or a pipeline"
+                        " stage (capture, detection, feeds, email) gone"
+                        " silent too long. A blind monitor is worse than"
                         " none."),
         "trigger": ("Four checks vs. learned baselines. New listening"
                     " ports -> Medium. New Windows services or autorun"
@@ -591,7 +594,19 @@ RULES = [
                     " persistence shape). Per-check closest fits: new"
                     " listening ports -> T1046 Network Service Discovery;"
                     " new services/autoruns -> T1547.001; Defender RTP off"
-                    " -> T1562.001 Impair Defenses."),
+                    " -> T1562.001 Impair Defenses."
+                    " Pipeline self-alerts (netmon/pipeline.py) reuse this"
+                    " kind -- they all mean 'the monitor itself needs"
+                    " attention': disk nearly full -> Medium (one alert"
+                    " per episode, non-essential writes pause); capture"
+                    " silent 5+ min -> High; detection passes failing or"
+                    " silent -> Medium; feed refresh stale 36h+ -> Low;"
+                    " email sends failing or silent -> Medium. Closest"
+                    " fit for the pipeline variants: T1562.001 Impair"
+                    " Defenses (the monitor's own defenses degraded)."
+                    " When several stages go stale in the same check,"
+                    " one combined alert fires at the highest member"
+                    " severity instead of one per stage."),
         "severities": ["Low", "Medium", "High"],
         "mitre_id": "T1547.001",
         "mitre_name": ("Boot or Logon Autostart Execution: Registry Run"
@@ -607,7 +622,9 @@ RULES = [
         "tuning": ("24-hour cooldown per drift key. Windows checks are"
                    " skipped elsewhere ('unavailable', never an alert)."),
         "tests": ["tests/test_knownetwork.py::SelfcheckTests"
-                  ".test_drift_alerts"],
+                  ".test_drift_alerts",
+                  "tests/test_pipeline_robustness.py::PipelineSelfAlertTests"
+                  ".test_disk_full_alerts_once"],
     },
     {
         "id": "vuln_finding",
