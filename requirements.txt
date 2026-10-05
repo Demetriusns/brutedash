@@ -7,4 +7,4 @@ scapy==2.7.0
 # (rule-based fallbacks otherwise)
 openai==3.24.0
 
-PyYAML==6.0.1  # config.yaml parsing (netmon/config.py)
+PyYAML==6.0.3  # config.yaml parsing (netmon/config.py); 6.0.3 adds cp314 wheels (Win build tools not needed)
