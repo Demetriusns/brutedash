@@ -2,7 +2,7 @@
 # Regenerate with: pip freeze | grep -iE "^(flask|werkzeug|scapy|openai|pyyaml)=="
 Flask==3.1.3
 Werkzeug==3.1.9
-scapy==2.7.0
+scapy==2.8.0
 # optional — enables LLM-powered triage in app.py and AI summaries in netmon/
 # (rule-based fallbacks otherwise)
 openai==3.24.0
