@@ -563,7 +563,13 @@ class RewindTests(unittest.TestCase):
         self._rec(b"pkt-new", base + 100)
         rwm._reset_for_tests()
         rwm._ENABLED = True
-        blob, count = rwm.export_window(base - 200, base)
+        # Read the window end AFTER recording: segment files are named
+        # by rotation wall-clock second, and export_window() prunes any
+        # segment with start > end_ts. A whole-second boundary crossing
+        # between the `base` capture and the recording rotation would
+        # otherwise silently drop the segment and flake the count to 0.
+        end = time.time()
+        blob, count = rwm.export_window(base - 200, end)
         pkts = self._parse(blob)
         self.assertEqual(count, 1)
         self.assertEqual(len(pkts), 1)
@@ -638,16 +644,22 @@ class RewindIncidentTests(_DbTest):
         rwm._ENABLED = True
         rwm._disk_ok = lambda _d: True
         try:
+            # Record BEFORE capturing the reference clock: segment files
+            # are named by rotation wall-clock second, and export_window()
+            # prunes any segment with start > end_ts. Capturing `now`
+            # first meant a whole-second boundary crossing before the
+            # recording rotation silently dropped the segment and flaked
+            # the export count to 0 (seen 2026-10-05: 0 != 1).
+            rwm.record_packet(b"inside", time.time() - 500)
+            rwm.record_packet(b"outside", time.time() - 3600 * 5)
+            rwm._reset_for_tests()
+            rwm._ENABLED = True
             now = time.time()
             a1 = self._alert("High", now - 600, title="first")
             a2 = self._alert("High", now - 300, title="second")
             iid = self._incident("case", "High", "open", now - 600,
                                  alert_ids=(a1, a2))
             # packet inside the padded window, packet outside it
-            rwm.record_packet(b"inside", now - 500)
-            rwm.record_packet(b"outside", now - 3600 * 5)
-            rwm._reset_for_tests()
-            rwm._ENABLED = True
             window = rwm.incident_window(iid)
             self.assertIsNotNone(window)
             start, end = window
