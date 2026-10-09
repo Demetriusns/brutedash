@@ -1,0 +1,8 @@
+rules:
+  - id: brutedash.python.pickle-load
+    message: "pickle.loads() on untrusted data is RCE; use json."
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern: pickle.loads(...)
+    fix: "json.loads(blob)"

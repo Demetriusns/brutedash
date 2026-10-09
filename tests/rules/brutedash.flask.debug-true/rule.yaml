@@ -1,0 +1,8 @@
+rules:
+  - id: brutedash.flask.debug-true
+    message: "debug=True must never appear outside local dev."
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern: app.run(..., debug=True, ...)
+    fix: "app.run(host='0.0.0.0', port=5000)"

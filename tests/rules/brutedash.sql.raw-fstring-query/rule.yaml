@@ -1,0 +1,10 @@
+rules:
+  - id: brutedash.sql.raw-fstring-query
+    message: "F-string interpolated into SQL; use parameterized queries (cursor.execute(sql, params))."
+    languages: [python]
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: cursor.execute(f"...", ...)
+          - pattern: db.execute(f"...", ...)
+    fix: "cursor.execute('SELECT ... WHERE x = ?', (value,))"
