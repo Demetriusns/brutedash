@@ -29,7 +29,10 @@ Exit codes: 0 = no blockers, 1 = >=1 blocker, 2 = the audit itself failed
 Anti-bypass notes (reviewed):
   * Scans EVERY staged .py file, not just netmon/ -- a sink hidden in an
     unexpected directory is still a sink.
-  * Skips only its own file (by resolved realpath, not by name match).
+  * Skips only its own file (by resolved realpath, not by name match), plus
+    the tests/rules/ fixture tree (FIXTURE_TREE_PREFIXES): those bad.py
+    files are intentionally-bad scanner fixtures, gated by
+    tests/test_selfscan.py instead -- never shipped code.
   * String-literal contents are masked before scanning so docstrings and
     test fixtures cannot cause false positives -- but f-string {holes}
     are preserved, because that is exactly where injection lives.
@@ -45,6 +48,11 @@ import subprocess
 import sys
 
 TIERS = ("BLOCKER", "SUGGESTION", "NIT")
+
+# Scanner rule fixtures are intentionally-bad code: tests/rules/<rule>/bad.py
+# exists to be flagged by the YAML rule under test. They are never shipped
+# and are gated by tests/test_selfscan.py instead of this auditor.
+FIXTURE_TREE_PREFIXES = ("tests/rules/",)
 
 # Kwarg/field names that smell like untrusted, network- or alert-derived
 # content being fed into a prompt template.
@@ -528,6 +536,8 @@ def audit_diff(diff_text, repo_root, self_path=None):
                     continue  # never audit the auditor
             except OSError:
                 pass
+        if f["path"].startswith(FIXTURE_TREE_PREFIXES):
+            continue  # intentional scanner fixtures: gated by test_selfscan.py
         findings.extend(audit_file(f["path"], f["added"], f["is_new"]))
     findings.sort(key=lambda x: (TIERS.index(x.tier), x.path,
                                  x.lineno or 0))

@@ -118,6 +118,23 @@ class TestAuditBlockers(unittest.TestCase):
         self.assertIn("B-SQL", _rules(f))
         self.assertIn("BLOCKER", _tiers(f))
 
+    def test_b_sql_fstring_in_rule_fixture_tree_stays_silent(self):
+        # tests/rules/*/bad.py fixtures are intentionally-bad scanner
+        # fixtures (gated by tests/test_selfscan.py), never shipped code.
+        dirty = [
+            "def lookup(cursor, username):",
+            "    cursor.execute(f\"SELECT * FROM users WHERE name = "
+            "'{username}'\", ())",
+        ]
+        d = _diff("tests/rules/brutedash.sql.raw-fstring-query/bad.py",
+                  dirty, is_new=True)
+        self.assertEqual(_find(d), [])
+        # ...but the identical content anywhere else still fires.
+        d2 = _diff("netmon/detect.py", dirty)
+        f2 = _find(d2)
+        self.assertIn("BLOCKER", _tiers(f2))
+        self.assertIn("B-SQL", _rules(f2))
+
     def test_b_sql_percent_format(self):
         d = _diff("netmon/detect.py", [
             "def check(dbm, val):",
