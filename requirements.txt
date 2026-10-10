@@ -8,3 +8,6 @@ scapy==2.8.0
 openai==3.28.0
 
 PyYAML==6.0.3  # config.yaml parsing (netmon/config.py); 6.0.3 adds cp314 wheels (Win build tools not needed)
+
+# --- public demo deployment (Render free tier) ---
+gunicorn==23.0.0  # WSGI server for the Render web service; start: gunicorn app:app --bind 0.0.0.0:$PORT

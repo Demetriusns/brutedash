@@ -207,10 +207,12 @@ Recommended actions:
 
 
 def sample_log():
+    # Demo UX: pre-fill the whole sample file so a first-time visitor who
+    # just hits "Analyze" immediately sees real Critical findings.
     path = os.path.join(BASE_DIR, "auth.log")
     if os.path.exists(path):
         with open(path) as f:
-            return "".join(f.readlines()[:12])
+            return "".join(f.readlines())
     return ""
 
 

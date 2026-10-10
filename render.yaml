@@ -1,0 +1,14 @@
+# Render blueprint for the brutedash public demo.
+# Deploy with one click: https://render.com/deploy?repo=https://github.com/Demetriusns/brutedash
+# Demo runs WITHOUT an OpenAI API key on purpose: the rule-based brief
+# fallback handles every request, so visitors can never burn API credits.
+# SQLite lives on the ephemeral disk -- perfect for a demo, data resets on redeploy.
+services:
+  - type: web
+    name: brutedash-demo
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --workers 2"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
