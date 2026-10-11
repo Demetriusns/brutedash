@@ -119,3 +119,45 @@ class FindGatewayTests(unittest.TestCase):
     def test_nothing_found_falls_back(self):
         self.assertEqual(self._run("garbage", "more garbage"),
                          "192.168.1.1")
+
+
+class WatchdogDbResilienceTests(unittest.TestCase):
+    """Council review (robustness, 2026-10-11): a database hiccup inside
+    Watchdog.run() used to escape and kill the watchdog thread
+    permanently -- while the dashboard kept rendering the last
+    watchdog.current() status as if live. The outage bookkeeping calls
+    are now guarded: the thread logs one line, keeps pinging, and
+    retries the bookkeeping next pass."""
+
+    def test_start_outage_failure_keeps_thread_alive(self):
+        wd = wdm.Watchdog(targets=["t1|127.0.0.1"], interval=0.05)
+        with mock.patch.object(wdm, "ping_once", return_value=False), \
+             mock.patch.object(wdm.dbm, "start_outage",
+                               side_effect=RuntimeError("db locked")):
+            wd.start()
+            time.sleep(0.5)
+            alive = wd.is_alive()
+            wd.stop()
+            wd.join(timeout=5)
+        self.assertTrue(alive,
+                        "watchdog thread died on start_outage failure")
+
+    def test_end_outage_failure_keeps_thread_alive(self):
+        calls = {"n": 0}
+
+        def _ping(host):
+            calls["n"] += 1
+            return calls["n"] > 4  # fail twice (outage opens), then recover
+
+        wd = wdm.Watchdog(targets=["t1|127.0.0.1"], interval=0.05)
+        with mock.patch.object(wdm, "ping_once", side_effect=_ping), \
+             mock.patch.object(wdm.dbm, "start_outage", return_value=7), \
+             mock.patch.object(wdm.dbm, "end_outage",
+                               side_effect=RuntimeError("disk full")):
+            wd.start()
+            time.sleep(0.8)
+            alive = wd.is_alive()
+            wd.stop()
+            wd.join(timeout=5)
+        self.assertTrue(alive,
+                        "watchdog thread died on end_outage failure")

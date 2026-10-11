@@ -164,6 +164,40 @@ class TestRotation(unittest.TestCase):
         })
         self.assertEqual(out, [])
 
+    def test_primary_never_skipped_by_byte_cap(self):
+        # Council review (robustness, 2026-10-11): with siblings scanned
+        # first, a cap-consuming sibling left the primary unread and a
+        # live campaign in the primary scored silent. The primary is
+        # scanned first now -- the byte cap applies to siblings only.
+        import detector
+        filler = (["Oct  2 19:01:01 host sshd[1]: Connection closed by"
+                   " 203.0.113.9 port 1"] * 40)  # ~2.6KB, no "from " in them
+        orig = detector.MAX_TOTAL_BYTES
+        detector.MAX_TOTAL_BYTES = 1000
+        try:
+            out = self._run_dir({
+                "auth.log.1": (filler, False),
+                "auth.log": (_fail("203.0.113.7", 5), False),
+            })
+        finally:
+            detector.MAX_TOTAL_BYTES = orig
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["ip"], "203.0.113.7")
+        self.assertEqual(out[0]["count"], 5)
+
+    def test_truncated_from_line_no_crash(self):
+        # A wrapped/truncated line ending in "from " used to raise
+        # IndexError out of detect_brute_force (council review, robustness,
+        # 2026-10-11). It is skipped; real lines still count.
+        out = self._run_dir({
+            "auth.log": (
+                ["Oct  2 19:01:01 host sshd[1]: Failed password"
+                 " for root from "] + _fail("203.0.113.7", 3),
+                False),
+        })
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["count"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

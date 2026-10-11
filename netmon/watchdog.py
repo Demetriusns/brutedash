@@ -10,11 +10,19 @@ This answers "did my internet drop?" with timestamps instead of vibes.
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import db as dbm
+
+
+def _log(msg):
+    try:
+        print(f"netmon watchdog: {msg}", file=sys.stderr)
+    except Exception:
+        pass
 
 PING_INTERVAL = 5
 CONSECUTIVE_FAILS = 2  # missed pings before we call it an outage
@@ -139,16 +147,33 @@ class Watchdog(threading.Thread):
                     if ok:
                         self._fail_counts[label] = 0
                         if not self.status[label]["up"]:
-                            oid = self._outage_ids.pop(label, None)
+                            oid = self._outage_ids.get(label)
                             if oid:
-                                dbm.end_outage(oid, now)
+                                try:
+                                    dbm.end_outage(oid, now)
+                                except Exception as exc:
+                                    # Council review (robustness, 2026-10-11):
+                                    # a DB hiccup here used to escape run()
+                                    # and kill the watchdog thread forever.
+                                    # Keep pinging instead; the outage row
+                                    # is retried next pass (oid kept).
+                                    _log(f"end_outage({oid}) failed: {exc!r}")
+                                    continue
+                            self._outage_ids.pop(label, None)
                             self.status[label] = {"up": True, "since": now}
                     else:
                         self._fail_counts[label] += 1
                         if (self._fail_counts[label] >= CONSECUTIVE_FAILS
                                 and self.status[label]["up"]):
+                            try:
+                                oid = dbm.start_outage(label, now)
+                            except Exception as exc:
+                                # Same as above: log, keep pinging, retry
+                                # the bookkeeping next pass. Never let a
+                                # database write kill the watchdog thread.
+                                _log(f"start_outage({label}) failed: {exc!r}")
+                                continue
                             self.status[label] = {"up": False, "since": now}
-                            oid = dbm.start_outage(label, now)
                             self._outage_ids[label] = oid
         finally:
             pool.shutdown(wait=False, cancel_futures=True)

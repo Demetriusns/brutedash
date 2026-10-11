@@ -58,9 +58,11 @@ def detect_brute_force(log_path, threshold=3):
     """Flag IPs with repeated failed SSH logins -- and logins that succeeded
     after a brute-force run.
 
-    Reads log_path plus its rotated siblings (auth.log.1 .. auth.log.N,
-    oldest first) so a campaign spanning a logrotate boundary is scored as
-    one campaign, not several sub-threshold fragments.
+    Reads log_path plus its rotated siblings (auth.log.1 .. auth.log.N)
+    so a campaign spanning a logrotate boundary is scored as one campaign,
+    not several sub-threshold fragments. The primary is always scanned
+    first -- the byte cap applies to rotated siblings only, so the
+    freshest log is never skipped.
 
     Returns a list of dicts, worst first:
         [{"ip": ..., "count": ..., "severity": ..., "kind": ...}, ...]
@@ -77,8 +79,15 @@ def detect_brute_force(log_path, threshold=3):
         # Guard -- skip lines with no IP (the bug-bait line from session #1).
         if "from " not in line:
             return
-        # Move C -- the IP is the word right after "from".
-        ip = line.split("from ", 1)[1].split()[0]
+        # Move C -- the IP is the word right after "from". A truncated or
+        # wrapped log line can end right after "from " with nothing after
+        # it; the split then yields no words -- skip instead of letting
+        # IndexError escape and kill the whole detection pass (council
+        # review, robustness, 2026-10-11).
+        tail = line.split("from ", 1)[1].split()
+        if not tail:
+            return
+        ip = tail[0]
         # Move B -- keep failures...
         if "Failed password" in line:
             counts[ip] = counts.get(ip, 0) + 1
@@ -87,22 +96,28 @@ def detect_brute_force(log_path, threshold=3):
             accepted[ip] = accepted.get(ip, 0) + 1
 
     bytes_read = 0
-    # Primary first or oldest-first? Siblings are strictly older log lines
-    # than the primary file, so they must be counted first only to keep the
-    # mental model chronological; the aggregates are order-independent.
-    sources = _rotated_siblings(log_path) + [(log_path, False)]
+    # Council review (robustness, 2026-10-11): the primary is the freshest
+    # log and must always be scanned. Scanning siblings first meant the
+    # 64MB byte cap could be exhausted before the primary was ever read --
+    # a live campaign in auth.log then scored as silent, inverting the
+    # rotation fix. The primary goes first and is never pre-skipped by the
+    # getsize cap (that cap now applies to rotated siblings only); the
+    # streaming byte cap still bounds every source so one runaway file
+    # can't stall the run. Aggregates are order-independent, so
+    # primary-first changes nothing about merged counts.
+    sources = [(log_path, False)] + _rotated_siblings(log_path)
     for src, is_gz in sources:
-        try:
-            if os.path.getsize(src) > MAX_TOTAL_BYTES:
+        is_primary = (src == log_path)
+        if not is_primary:
+            try:
+                if os.path.getsize(src) > MAX_TOTAL_BYTES:
+                    continue
+            except OSError:
                 continue
-        except OSError:
-            if src == log_path:
-                raise
-            continue
         try:
             stream = _open_line_stream(src, is_gz)
         except OSError:
-            if src == log_path:
+            if is_primary:
                 raise
             continue
         try:

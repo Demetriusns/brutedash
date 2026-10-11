@@ -261,7 +261,10 @@ def clear_loop_pid():
 
 def note_loop_tick(now=None):
     """Stamp the loop's tick watermark. Called every monitor pass.
-    Never raises."""
+
+    Best-effort: on a full or broken disk the stamp silently fails and
+    the watermark reads "unknown" (never treated as stale). Never raises.
+    """
     now = now if now is not None else time.time()
     try:
         dbm.set_meta(_LOOP_TICK_KEY, str(now))

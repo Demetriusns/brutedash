@@ -620,7 +620,7 @@ lays out what it sees.</p>
 <p>On a normal day, almost everything your computer does online is one of a few
 things: loading websites and apps (encrypted, port 443), looking up website
 addresses (port 53), and quiet background chatter like checking the time. If
-the alerts above are empty, everything is fine -- <b>a quiet network is a healthy network.</b></p>
+the alerts above are empty, everything is fine -- <b>A quiet network is a good sign -- nothing suspicious is going on.</b></p>
 <div id="normalnow"><p class="note">Loading...</p></div>
 </section>
 
@@ -773,7 +773,7 @@ for <input id="maint_hours" type="number" min="1" max="72" value="4" style="widt
 <p class="note">What is installed here, checked against the list of security flaws attackers are actively using right now. Local check only -- nothing leaves this box.</p>
 <div id="swaudit"><p class="note">Loading...</p></div>
 <h4 style="margin-top:1em">Pipeline health</h4>
-<p class="note">When each part of the monitor last did its job. A part that's been silent too long raises one alert, then stays quiet until it's healthy again.</p>
+<p class="note">When each part of the monitor last did its job. A part that's been silent too long raises one alert, then stays quiet until it's working again.</p>
 <div id="pipehealth"><p class="note">Loading...</p></div>
 </div></details>
 
@@ -1150,9 +1150,9 @@ async function showDeviceDetails(mac){
     }
     if (d.alerts && d.alerts.length) {
       html += `<p><b>Alert history (${d.alerts.length}):</b></p>` +
-        d.alerts.map(a=>`<div class="alert ${esc(a.severity)}"><b>[${esc(a.severity)}]</b> ${esc(a.title)} <span class="note">${esc(a.ts)} &middot; ${esc(a.kind)}</span></div>`).join("");
+        d.alerts.map(a=>`<div class="alert ${esc(a.severity)}"><b>[${esc(a.severity)}]</b> ${esc(a.title)} <span class="note">${esc(a.ts)} &middot; ${kindLabel(esc(a.kind))}</span></div>`).join("");
     } else {
-      html += `<p class="note">No alerts ever involved this device. A quiet device is a healthy device.</p>`;
+      html += `<p class="note">No alerts ever involved this device. A quiet device is a good sign -- nothing suspicious recorded.</p>`;
     }
     html += `<p><button class="btn-sm ghost" onclick="document.getElementById('devicedetails').innerHTML=''">Close</button></p></div>`;
     box.innerHTML = html;
@@ -1260,7 +1260,7 @@ async function intelLookup(){
     html += `<p><b>Here is what to do:</b> ${esc(copy.todo)}</p>`;
     if (d.alerts && d.alerts.length) {
       html += `<p><b>Alerts involving it (${d.alerts.length}):</b></p>` +
-        d.alerts.map(a=>`<div class="alert ${esc(a.severity)}"><b>[${esc(a.severity)}]</b> ${esc(a.title)} <span class="note">${esc(a.ts)} &middot; ${esc(a.kind)}</span></div>`).join("");
+        d.alerts.map(a=>`<div class="alert ${esc(a.severity)}"><b>[${esc(a.severity)}]</b> ${esc(a.title)} <span class="note">${esc(a.ts)} &middot; ${kindLabel(esc(a.kind))}</span></div>`).join("");
     }
     html += `</div>`;
     box.innerHTML = html;
@@ -1515,7 +1515,7 @@ async function loadCases(){
               : ` <button class="btn-sm ghost" onclick="reopenCase(${c.id})">reopen</button>`))
         : "")
       + `<div id="case-${c.id}" style="display:none"></div></div>`
-    ).join("") : '<p class="note">No ' + esc(status) + ' cases. A quiet network is a healthy network.</p>';
+    ).join("") : '<p class="note">No ' + esc(status) + ' cases. A quiet network is a good sign -- nothing suspicious is going on.</p>';
   } catch(e) {
     el.innerHTML = '<p class="note">Could not load cases.</p>';
   }
@@ -1764,7 +1764,7 @@ function renderAttackSurface(d){
       + '<br><a href="/playbook/' + esc(e.playbook) + '">fix-it guide &rarr;</a>'
       + "</div>").join("");
   } else {
-    h += '<p class="note">No exposures found. A quiet network is a healthy network.</p>';
+    h += '<p class="note">No exposures found. A quiet network is a good sign -- nothing suspicious is going on.</p>';
   }
   const paths = d.lateral_paths || [];
   if (paths.length) {
@@ -1918,7 +1918,7 @@ async function loadScanStatus(){
     document.getElementById("scanfindings").innerHTML = fs.length ?
       `<table><tr><th>Device</th><th>Door</th><th>Risk</th><th>What it means</th></tr>` +
       fs.map(f=>`<tr><td>${f.name ? `<b>${esc(f.name)}</b><br>` : ""}<span class="note">${esc(f.ip)}</span></td><td>${f.port} <span class="note">(${esc(f.service)})</span>${f.source === "template" ? ` <span class="note">[check file]</span>` : ""}</td><td><span class="badge ${f.risk === "Medium" ? "warn" : "ok"}">${esc(f.risk)}</span></td><td>${esc(f.what_it_means)}</td></tr>`).join("") + `</table>`
-      : (lr ? `<p class="note">No open doors found. A quiet network is a healthy network.</p>` : "");
+      : (lr ? `<p class="note">No open doors found. A quiet network is a good sign -- nothing suspicious is going on.</p>` : "");
     renderNuclei(d.nuclei || {});
     if (d.running) setTimeout(loadScanStatus, 5000);
   } catch(e) {
@@ -1946,7 +1946,7 @@ function renderNuclei(n){
   document.getElementById("nucleifindings").innerHTML = fs.length ?
     `<table><tr><th>Device</th><th>Finding</th><th>Urgency</th><th>What it means</th></tr>` +
     fs.map(f=>`<tr><td><span class="note">${esc(f.ip)}</span></td><td><b>${esc(f.name)}</b><br><span class="note">${esc(f.template_id)}${f.cves ? " &middot; " + esc(f.cves) : ""}</span></td><td><span class="badge ${f.severity === "High" ? "bad" : (f.severity === "Medium" ? "warn" : "ok")}">${esc(f.severity)}</span></td><td>${esc(f.description || "See the finding name above.")}${f.matched_at ? `<br><span class="note">${esc(f.matched_at)}</span>` : ""}</td></tr>`).join("") + `</table>`
-    : (lr ? `<p class="note">No findings. A quiet network is a healthy network.</p>` : "");
+    : (lr ? `<p class="note">No findings. A quiet network is a good sign -- nothing suspicious is going on.</p>` : "");
   if (n.running) setTimeout(loadScanStatus, 10000);
 }
 async function startNucleiScan(){
@@ -2067,7 +2067,7 @@ function renderSwaudit(sw){
   el.innerHTML = head + (ms.length ?
     `<table><tr><th>Program</th><th>Flaw</th><th>What it is</th></tr>` +
     ms.map(m=>`<tr><td><b>${esc(m.package)}</b> <span class="note">${esc(m.version)} (${esc(m.source)})</span></td><td><span class="badge warn">Medium</span> ${esc(m.cve_id)}${m.due_date ? `<br><span class="note">fix-by ${esc(m.due_date)}</span>` : ""}</td><td>${esc(m.vuln_name || m.product)}<br><span class="note">${esc(m.description)}</span></td></tr>`).join("") + `</table>`
-    : (sw.last_run_ts ? `<p class="note">Nothing installed here matches the known-exploited list. A quiet box is a healthy box.</p>` : ""));
+    : (sw.last_run_ts ? `<p class="note">Nothing installed here matches the known-exploited list. A quiet box is a good sign -- nothing suspicious found.</p>` : ""));
 }
 // --- network map ----------------------------------------------------------
 // SVG topology: gateway at top, devices on an arc below. Pure JS, no deps.

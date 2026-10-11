@@ -22,6 +22,12 @@ from ipintel import lookup_ip, describe as describe_intel
 from netmon import config as cfgm
 
 app = Flask(__name__)
+# Council review (security, 2026-10-11): cap request bodies -- the / POST
+# handler writes the pasted log to a tempfile and appends every finding to
+# SQLite, so an unbounded body is a memory/disk DoS on the public demo.
+# Flask aborts oversized bodies with 413 before we ever touch them.
+# (Mirrors the dashboard's M4 cap; the mini-app needs far less.)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "detections.db")
 

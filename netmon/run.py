@@ -123,8 +123,11 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
     # Batch 16: the loop stamps its own tick watermark every pass. The
     # dashboard's loop-down watchdog (pipeline.check_loop_down) reads it:
     # pid file present + tick stale = the loop died without a clean
-    # shutdown. The tick is stamped even when the disk is full -- a dead
-    # loop must be distinguishable from a paused one.
+    # shutdown. The tick is best-effort, not guaranteed: on a full or
+    # broken disk the stamp silently fails and the watermark reads
+    # "unknown" (never stale), so check_loop_down cannot mistake a full
+    # disk for a dead loop. A dead loop must be distinguishable from a
+    # paused one.
     pipelinem.note_loop_tick()
     while not stop_event.wait(DETECT_INTERVAL):
         now = time.time()
