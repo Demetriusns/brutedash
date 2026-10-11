@@ -72,5 +72,98 @@ class TestDetector(unittest.TestCase):
         self.assertEqual(self._run([line]), [])
 
 
+class TestRotation(unittest.TestCase):
+    """Rotation-aware scanning: a campaign split across a logrotate
+    boundary must score as one campaign (hardening item, 2026-10-11)."""
+
+    def _sibling(self, dirpath, name, lines, gz=False):
+        path = os.path.join(dirpath, name)
+        if gz:
+            import gzip
+            with gzip.open(path, "wt") as f:
+                f.write("\n".join(lines) + "\n")
+        else:
+            with open(path, "w") as f:
+                f.write("\n".join(lines) + "\n")
+        return path
+
+    def _run_dir(self, files, primary="auth.log", **kw):
+        """files: {name: (lines, gz)} -> detect on dirpath/primary."""
+        with tempfile.TemporaryDirectory() as d:
+            for name, (lines, gz) in files.items():
+                self._sibling(d, name, lines, gz=gz)
+            return detect_brute_force(os.path.join(d, primary), **kw)
+
+    def test_split_campaign_scores_as_one(self):
+        # 7 fails in auth.log.1 + 5 fails in auth.log = 12 -> High.
+        # Without rotation merging this reads as two silent fragments.
+        out = self._run_dir({
+            "auth.log.1": (_fail("203.0.113.7", 7), False),
+            "auth.log": (_fail("203.0.113.7", 5), False),
+        })
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["count"], 12)
+        self.assertEqual(out[0]["severity"], "High")
+
+    def test_critical_spans_rotation(self):
+        # 11 fails in the rotated log, break-in in the current one.
+        out = self._run_dir({
+            "auth.log.1": (_fail("203.0.113.7", 11), False),
+            "auth.log": ([_accept("203.0.113.7")], False),
+        })
+        crit = [r for r in out if r["kind"] == "login_after_bruteforce"]
+        self.assertEqual(len(crit), 1)
+        self.assertEqual(crit[0]["count"], 11)
+
+    def test_gz_sibling_merges(self):
+        out = self._run_dir({
+            "auth.log.2.gz": (_fail("203.0.113.7", 6), True),
+            "auth.log": (_fail("203.0.113.7", 6), False),
+        })
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["count"], 12)
+
+    def test_no_siblings_unchanged_behavior(self):
+        out = self._run_dir({"auth.log": (_fail("203.0.113.7", 2), False)})
+        self.assertEqual(out, [])
+
+    def test_missing_primary_still_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(FileNotFoundError):
+                detect_brute_force(os.path.join(d, "auth.log"))
+
+    def test_unreadable_sibling_skipped(self):
+        # Simulate a sibling that errors on read (root bypasses chmod 0,
+        # so force the OSError path by patching os.path.getsize).
+        import detector
+        with tempfile.TemporaryDirectory() as d:
+            self._sibling(d, "auth.log", _fail("203.0.113.7", 4))
+            self._sibling(d, "auth.log.1", _fail("203.0.113.7", 9))
+            real_getsize = os.path.getsize
+
+            def _boom(path):
+                if path.endswith("auth.log.1"):
+                    raise OSError("simulated read failure")
+                return real_getsize(path)
+
+            orig = detector.os.path.getsize
+            detector.os.path.getsize = _boom
+            try:
+                out = detect_brute_force(os.path.join(d, "auth.log"))
+            finally:
+                detector.os.path.getsize = orig
+            # only the primary's 4 count (the 9 are unreadable), Medium
+            self.assertEqual(len(out), 1)
+            self.assertEqual(out[0]["count"], 4)
+
+    def test_high_suffix_beyond_cap_ignored(self):
+        # auth.log.99 is beyond MAX_ROTATED_SIBLINGS: never read.
+        out = self._run_dir({
+            "auth.log.99": (_fail("203.0.113.7", 50), False),
+            "auth.log": (_fail("203.0.113.7", 2), False),
+        })
+        self.assertEqual(out, [])
+
+
 if __name__ == "__main__":
     unittest.main()
