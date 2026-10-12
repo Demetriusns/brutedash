@@ -11,8 +11,11 @@ Run:  python app.py   (then open http://127.0.0.1:5000)
 import os
 import json
 import ipaddress
+import math
 import sqlite3
 import tempfile
+import threading
+import time
 from datetime import datetime
 
 from flask import Flask, request, render_template_string
@@ -149,6 +152,67 @@ def write_brief(ip, count, severity):
     return brief, "rule-based"
 
 
+# ------------------------------------------------- /brief rate limiting (S2)
+# Every /brief call with the LLM on is a paid API call, and the route is
+# unauthenticated. Per-IP sliding windows (ai.ask_per_min per 60s,
+# ai.ask_per_hour per 3600s in config.yaml) guard the AI budget from a
+# runaway script or a shared machine. Mirrors the dashboard's
+# _ai_ask_allowed pattern (netmon/dashboard.py): check-and-record in one
+# lock, no check-then-record race; the cheap rule-based fallback is never
+# limited -- only the spendy calls count. Breaches return 429 + Retry-After.
+
+_BRIEF_USAGE = {}
+_BRIEF_LOCK = threading.Lock()
+
+
+def _brief_limits():
+    """(per_min, per_hour) caps from config.yaml; floor 1, never raises."""
+    cfg = cfgm.load_cached()
+
+    def _int(key, default):
+        try:
+            return max(1, int(cfgm.get(cfg, key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    return _int("ai.ask_per_min", 10), _int("ai.ask_per_hour", 100)
+
+
+def _brief_llm_on():
+    """Would this /brief call spend an LLM call? Key AND provider != off."""
+    return bool(os.environ.get("OPENAI_API_KEY")) and cfgm.ai_enabled()
+
+
+def _brief_allowed(ip, now=None, limits=None):
+    """Check AND record in one lock hold -- no check-then-record race.
+
+    Returns (allowed, retry_after_s). On allowed the call is recorded
+    immediately; on denied nothing is recorded. Window logic is pure
+    (injectable `now` and `limits`) so the unit tests never have to
+    sleep. Stale IP keys (last call over an hour old) are pruned here,
+    so the dict cannot grow without bound from one-shot visitors.
+    """
+    now = time.time() if now is None else now
+    per_min, per_hour = limits if limits is not None else _brief_limits()
+    with _BRIEF_LOCK:
+        for key in [k for k, v in _BRIEF_USAGE.items()
+                    if not v or max(v) < now - 3600]:
+            del _BRIEF_USAGE[key]
+        stamps = [t for t in _BRIEF_USAGE.get(ip, []) if now - t < 3600]
+        retry = 0
+        recent_min = [t for t in stamps if now - t < 60]
+        if len(recent_min) >= per_min:
+            retry = max(retry, math.ceil(60 - (now - min(recent_min))))
+        if len(stamps) >= per_hour:
+            retry = max(retry, math.ceil(3600 - (now - min(stamps))))
+        if retry > 0:
+            _BRIEF_USAGE[ip] = stamps
+            return False, retry
+        stamps.append(now)
+        _BRIEF_USAGE[ip] = stamps
+        return True, 0
+
+
 # ---------------------------------------------------------------------- pages
 STYLE = """
 body{background:#0d1117;color:#c9d1d9;font-family:monospace;max-width:900px;margin:2em auto;padding:0 1em}
@@ -268,6 +332,16 @@ def brief():
     severity = request.form.get("severity", "")
     if severity not in VALID_SEVERITIES:
         return "Invalid severity", 400
+    if _brief_llm_on():
+        # X-Forwarded-For is deliberately NOT honored: trusting it on a
+        # direct-bind demo would let anyone spoof the limiter key (same
+        # reasoning as the dashboard's _ai_rate_limited).
+        requester = request.remote_addr or "unknown"
+        allowed, retry_after = _brief_allowed(requester)
+        if not allowed:
+            return ("Too many brief requests -- the AI budget needs a "
+                    "breather. Try again shortly.",
+                    429, {"Retry-After": str(retry_after)})
     brief, source = write_brief(ip, count, severity)
     return render_template_string(BRIEF_HTML, ip=ip, brief=brief, origin=source)
 

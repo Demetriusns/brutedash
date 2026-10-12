@@ -800,7 +800,7 @@ function kindLabel(k){
 }
 function canWrite(){ return ORION_ROLE === "owner"; }
 const SEV_WORDS = {Critical:"Act now", High:"Needs attention", Medium:"Worth a look", Low:"Heads up"};
-function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
 // Live traffic graph: MB and packets per 5s tick from cumulative counters, last ~6 min.
 let TR_HIST = [];
 let TR_LAST_B = null, TR_LAST_P = null;
@@ -3748,7 +3748,7 @@ network and get an AI answer based on what the monitor has seen.</p>
 <div id="ans" style="margin-top:1em"></div>
 <p><a href="/">Back to live dashboard</a></p>
 <script>
-function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
 async function ask(){
   const q = document.getElementById("q").value;
   const ans = document.getElementById("ans");
