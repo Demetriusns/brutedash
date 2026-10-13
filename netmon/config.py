@@ -47,8 +47,9 @@ DEFAULTS = {
         # "openai" or "off". The API key always comes from OPENAI_API_KEY.
         "provider": "openai",
         "model": "gpt-4o-mini",
-        # Rate limits guard the AI budget: every /api/ask and /api/triage
-        # call with the LLM on is a paid API call. Per-IP sliding windows.
+        # Rate limits guard the AI budget: every /api/ask, /api/triage
+        # and /explain call with the LLM on is a paid API call.
+        # Per-IP sliding windows.
         # The cheap fallback paths (no API key configured) are never
         # limited -- only the spendy calls count.
         "ask_per_min": 10,

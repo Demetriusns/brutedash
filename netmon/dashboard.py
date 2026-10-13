@@ -429,7 +429,8 @@ def _clear_login_failures(ip):
 
 
 # --- AI-question rate limiting (hardening checklist, stdlib only) ------------
-# Every /api/ask and /api/triage call with the LLM on is a paid API call.
+# Every /api/ask, /api/triage and /explain call with the LLM on is a
+# paid API call (/explain spends via explainer.summarize()).
 # Per-IP sliding windows (ai.ask_per_min per 60s, ai.ask_per_hour per
 # 3600s, both in config.yaml) guard the AI budget from runaway scripts
 # or shared-password machines. The cheap fallback paths (no API key
@@ -1069,8 +1070,12 @@ async function explain(){
   try {
     const r = await fetch("/explain", {method:"POST"});
     const d = await r.json();
-    if (!d.ok) throw new Error(d.error || "server refused");
-    sdiv.innerHTML = '<p class="note">Summary updated (' + esc(d.origin) + ').</p>';
+    if (r.status === 429) {
+      sdiv.innerHTML = '<p class="note">Slow down -- too many AI summaries'
+        + ' too fast. Try again in a minute; a fresh one also arrives on'
+        + ' its own every 15 minutes.</p>';
+    } else if (!d.ok) throw new Error(d.error || "server refused");
+    else sdiv.innerHTML = '<p class="note">Summary updated (' + esc(d.origin) + ').</p>';
   } catch(e) {
     sdiv.innerHTML = '<p class="note">Could not regenerate the summary: '
       + esc(e.message) + '. It retries on its own every 15 minutes.</p>';
@@ -4029,7 +4034,12 @@ def api_stats():
 
 @app.route("/explain", methods=["POST"])
 @_owner_required
+@_ai_rate_limited
 def explain_now():
+    # Rate-limited like /api/ask and /api/triage (2026-10-13): with the
+    # LLM on, every click here is a paid explainer.summarize() call, so
+    # it draws on the same per-IP AI budget. The rule-based fallback
+    # (no API key) stays unlimited -- the decorator handles that.
     from . import explainer as expl
     summary, origin = expl.summarize(save=True)
     return jsonify({"ok": True, "headline": summary["headline"],
