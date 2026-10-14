@@ -429,13 +429,15 @@ def _clear_login_failures(ip):
 
 
 # --- AI-question rate limiting (hardening checklist, stdlib only) ------------
-# Every /api/ask, /api/triage and /explain call with the LLM on is a
-# paid API call (/explain spends via explainer.summarize()).
+# Every /api/ask, /api/triage, /explain and /pcap-upload call with the
+# LLM on is a paid API call (/explain and /pcap spend via
+# explainer.summarize()).
 # Per-IP sliding windows (ai.ask_per_min per 60s, ai.ask_per_hour per
 # 3600s, both in config.yaml) guard the AI budget from runaway scripts
 # or shared-password machines. The cheap fallback paths (no API key
 # configured) are never limited -- only the spendy calls count.
-# Breaches return 429 JSON with a Retry-After header.
+# Breaches return 429 with a Retry-After header -- JSON for the API
+# routes, an HTML slow-down page for the /pcap page route.
 
 _AI_ASK_USAGE = {}
 _AI_ASK_LOCK = threading.Lock()
@@ -485,6 +487,30 @@ def _ai_ask_allowed(ip, now=None, limits=None):
         return True, 0
 
 
+def _ai_spend_check():
+    """(blocked, retry_after) for one paid-LLM call from this request's IP.
+
+    Shared by @_ai_rate_limited (the JSON routes) and the /pcap page
+    route, so every paid route draws on the SAME per-IP budget and the
+    budget cannot be bypassed by switching routes. When the LLM is off
+    the fallback paths are free: nothing is recorded, nothing blocked.
+    When it is on, _ai_ask_allowed check-and-records in one lock hold.
+    """
+    mod = _ai_assist()
+    llm_on = (mod is not None and
+              (not hasattr(mod, "llm_available") or
+               mod.llm_available()))
+    if not llm_on:
+        return False, 0
+    # remote_addr is the true TCP peer on this direct-bind server.
+    # X-Forwarded-For is deliberately NOT honored: trusting it on a
+    # box with no configured reverse proxy would let anyone spoof
+    # the limiter key (see Phase 5: prod server + TLS).
+    ip = request.remote_addr or "unknown"
+    allowed, retry_after = _ai_ask_allowed(ip)
+    return (not allowed), retry_after
+
+
 def _ai_rate_limited(fn):
     """Rate-limit the paid LLM calls on an AI route.
 
@@ -494,31 +520,20 @@ def _ai_rate_limited(fn):
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        mod = _ai_assist()
-        llm_on = (mod is not None and
-                  (not hasattr(mod, "llm_available") or
-                   mod.llm_available()))
-        if llm_on:
-            # remote_addr is the true TCP peer on this direct-bind server.
-            # X-Forwarded-For is deliberately NOT honored: trusting it on a
-            # box with no configured reverse proxy would let anyone spoof
-            # the limiter key (see Phase 5: prod server + TLS).
-            ip = request.remote_addr or "unknown"
-            allowed, retry_after = _ai_ask_allowed(ip)
-            if not allowed:
-                resp = jsonify({
-                    "ok": False,
-                    "error": "slow_down",
-                    "message": ("Too many AI questions too fast -- the AI"
-                                " budget needs a breather. Try again"
-                                " shortly."),
-                    "retry_after": retry_after,
-                })
-                resp.status_code = 429
-                resp.headers["Retry-After"] = str(retry_after)
-                return resp
-            # _ai_ask_allowed already recorded this call in the same lock.
-            return fn(*args, **kwargs)
+        blocked, retry_after = _ai_spend_check()
+        if blocked:
+            resp = jsonify({
+                "ok": False,
+                "error": "slow_down",
+                "message": ("Too many AI questions too fast -- the AI"
+                            " budget needs a breather. Try again"
+                            " shortly."),
+                "retry_after": retry_after,
+            })
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(retry_after)
+            return resp
+        # _ai_ask_allowed already recorded this call in the same lock.
         return fn(*args, **kwargs)
     return wrapper
 
@@ -2267,6 +2282,14 @@ PCAP_RESULT_HTML = """<html><head><title>netmon -- pcap results</title>
 <span class="note">{{ a.detail }}</span></div>
 {% endfor %}{% else %}<p class="note">No alerts fired on this capture.</p>{% endif %}
 <p><a href="/pcap">Analyze another</a> | <a href="/">Live dashboard</a></p>
+</body></html>"""
+
+PCAP_SLOWDOWN_HTML = """<html><head><title>netmon -- slow down</title>
+<style>""" + STYLE + """</style></head><body>
+<h1>Slow down a moment</h1>
+<p>Too many AI analyses too fast -- the AI budget needs a breather.
+Wait about {{ retry_after }} seconds, then try the upload again.</p>
+<p><a href="/pcap">Back to the pcap form</a> | <a href="/">Live dashboard</a></p>
 </body></html>"""
 
 
@@ -4054,6 +4077,21 @@ def pcap():
     f = request.files.get("pcap")
     if not f or not f.filename:
         return redirect("/pcap")
+    # Rate-limited like /api/ask, /api/triage and /explain (2026-10-14):
+    # every upload ends in a paid explainer.summarize() call when the
+    # LLM is on, so it draws on the same per-IP AI budget via
+    # _ai_spend_check. This route renders HTML pages, so a breach gets
+    # the HTML slow-down page (429 + Retry-After) instead of the JSON
+    # shape @_ai_rate_limited returns. The check runs after the file
+    # check: a bare redirect spends nothing and must not eat budget.
+    # GET (the upload form) never reaches here and is never limited.
+    blocked, retry_after = _ai_spend_check()
+    if blocked:
+        resp = app.make_response(render_template_string(
+            PCAP_SLOWDOWN_HTML, retry_after=retry_after))
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
     from . import capture as capm
     from . import explainer as expl
     with tempfile.NamedTemporaryFile(suffix=".pcap", delete=False) as tmp:
