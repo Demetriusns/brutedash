@@ -31,6 +31,21 @@ app = Flask(__name__)
 # Flask aborts oversized bodies with 413 before we ever touch them.
 # (Mirrors the dashboard's M4 cap; the mini-app needs far less.)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
+
+@app.after_request
+def _security_headers(resp):
+    # Browser security headers on EVERY response (2026-10-15, mirrors
+    # the dashboard): stop MIME sniffing, refuse framing outright (the
+    # public demo is never embedded anywhere by design), and leak no
+    # referrer. This app sets no session cookie, so there is no cookie
+    # hardening to mirror.
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "detections.db")
 

@@ -33,9 +33,27 @@ app.secret_key = os.environ.get("NETMON_SECRET_KEY", "") or os.urandom(24)
 # oversized bodies with 413 before we ever touch them.
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 
+# Session-cookie hardening (2026-10-15): HttpOnly keeps the role cookie
+# away from page scripts, and SameSite=Lax keeps it off cross-site POSTs
+# entirely -- every mutating route is a POST behind this cookie, so a
+# page the owner visits cannot ride their session into one (top-level
+# GET navigation still carries it, so links to the dashboard work).
+# Secure is deliberately NOT set: the dashboard binds LAN/localhost
+# over plain HTTP, and a Secure cookie would never be sent there,
+# breaking sign-in.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
 
 @app.after_request
-def _no_cache_html(resp):
+def _response_hardening(resp):
+    # Browser security headers on EVERY response (2026-10-15): stop
+    # MIME sniffing, refuse framing outright (the dashboard is never
+    # embedded anywhere by design, and a framed owner session is the
+    # clickjacking path to the mutating routes), and leak no referrer.
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
     # The dashboard is a live view. A stale cached copy after an update
     # looks exactly like a broken monitor, so browsers must never cache
     # the HTML pages (API JSON is fetched fresh every 5s anyway).
