@@ -18,6 +18,7 @@ import tempfile
 import math
 import threading
 import time
+from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify, render_template_string, redirect, \
     session, Response
@@ -95,6 +96,48 @@ def _role():
 def _auth_enabled():
     owner_pw, _viewer_pw = _auth()
     return bool(owner_pw)
+
+
+# --- cross-site mutation check (2026-10-16) ---------------------------------
+# Server-side companion to the SameSite=Lax session cookie (2026-10-15).
+# Lax is a browser policy, not a server verdict: same-site subdomain
+# requests still carry the cookie, and any future cookie regression
+# would reopen the cross-site path to the mutating routes. So for
+# state-changing methods the server itself rejects a request when the
+# browser supplies POSITIVE cross-site evidence -- a Sec-Fetch-Site of
+# "cross-site", or an Origin whose host:port is not this dashboard's
+# Host (an opaque "null" or unparseable Origin counts as positive
+# evidence: a real dashboard page always sends a matching Origin).
+# Requests with NEITHER header are allowed: curl scripts, health
+# probes, and the test client send neither, and a non-browser client
+# cannot ride the owner's browser session, which is the threat here.
+# Registered before the password gate so a cross-site POST is refused
+# outright instead of bouncing through the login redirect.
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _cross_site_blocked():
+    msg = ("Cross-site request blocked -- changes to the monitor can "
+           "only be made from the dashboard itself.")
+    return jsonify({"ok": False, "error": msg}), 403
+
+
+@app.before_request
+def _cross_site_mutation_check():
+    if request.method not in _MUTATING_METHODS:
+        return None
+    fetch_site = (request.headers.get("Sec-Fetch-Site")
+                  or "").strip().lower()
+    if fetch_site == "cross-site":
+        return _cross_site_blocked()
+    origin = request.headers.get("Origin")
+    if origin is not None:
+        origin = origin.strip()
+        netloc = (urlparse(origin).netloc.lower()
+                  if origin and origin.lower() != "null" else "")
+        if not netloc or netloc != (request.host or "").lower():
+            return _cross_site_blocked()
+    return None
 
 
 @app.before_request
