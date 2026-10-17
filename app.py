@@ -33,6 +33,24 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 
+# Content-Security-Policy (2026-10-17, mirrors the dashboard's CSP batch):
+# this app has no scripts and no external resources at all -- templates
+# are inline <style> plus same-origin forms -- so scripts are refused
+# outright and the rest is locked to 'self'.
+DEMO_CSP = (
+    "default-src 'self'; "
+    "script-src 'none'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "font-src 'self'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
 @app.after_request
 def _security_headers(resp):
     # Browser security headers on EVERY response (2026-10-15, mirrors
@@ -43,6 +61,7 @@ def _security_headers(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Content-Security-Policy"] = DEMO_CSP
     return resp
 
 

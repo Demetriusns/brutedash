@@ -46,6 +46,30 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 
+# Content-Security-Policy (2026-10-17, the batch the 2026-10-15 headers
+# work explicitly deferred): the dashboard's only external resources are
+# the Fontshare stylesheet (api.fontshare.com) and its font files
+# (cdn.fontshare.com, per Fontshare's own CSS); everything else is
+# same-origin. Every page uses large inline <script>/<style> blocks and
+# inline onclick handlers, so script/style keep 'unsafe-inline' -- the
+# honest current posture. The gains are the cross-origin walls: no
+# foreign script, connect, object, form, or frame target can be loaded
+# or posted to, which is where an injected payload would reach out.
+# frame-ancestors 'none' is the modern twin of X-Frame-Options: DENY.
+DASHBOARD_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline' https://api.fontshare.com; "
+    "font-src 'self' https://cdn.fontshare.com; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
 @app.after_request
 def _response_hardening(resp):
     # Browser security headers on EVERY response (2026-10-15): stop
@@ -55,6 +79,7 @@ def _response_hardening(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Content-Security-Policy"] = DASHBOARD_CSP
     # The dashboard is a live view. A stale cached copy after an update
     # looks exactly like a broken monitor, so browsers must never cache
     # the HTML pages (API JSON is fetched fresh every 5s anyway).
