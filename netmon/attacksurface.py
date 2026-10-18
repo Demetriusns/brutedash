@@ -829,7 +829,8 @@ def _summary_line(counts, top_exposures):
     if not n:
         return ("All quiet on the exposure front -- no internet-reachable"
                 " doors, no known-bad contacts, no risky paths. A quiet"
-                " network is a healthy network.")
+                " network is a good sign -- nothing suspicious is"
+                " going on.")
     bits = top_exposures[:3]
     word = "thing" if n == 1 else "things"
     head = f"{n} {word} worth a look"

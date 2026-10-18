@@ -15,7 +15,12 @@ Three pieces, kept separate so each can be tested alone:
       Sends the report by email when SMTP is configured. Never raises.
 
 The report degrades gracefully: an empty database still produces a
-readable "quiet week" report instead of an error.
+readable "quiet week" report instead of an error, and a database that
+cannot be read at all (locked, corrupt, missing table) produces the
+same readable report with a "degraded" flag and a plain note in the
+text -- never a traceback (council review 2026-10-18: the first query
+used to be unguarded, so one DB hiccup killed the whole report and
+the --weekly-report CLI with it).
 """
 import os
 import smtplib
@@ -43,25 +48,41 @@ def _day_label(ts):
 
 
 def generate_weekly_report(now=None):
-    """Roll up the last 7 days of SQLite data into a plain dict."""
+    """Roll up the last 7 days of SQLite data into a plain dict.
+
+    Never raises on a database problem: each query falls back to an
+    empty result and the report is flagged "degraded", so callers
+    (the --weekly-report CLI, the weekly PDF) always get a readable
+    report instead of a traceback.
+    """
     now = now or time.time()
     since = now - WEEK_SECONDS
+    degraded = False
 
-    tot = dbm.query(
+    def _q(sql, params=(), default=None):
+        nonlocal degraded
+        try:
+            return dbm.query(sql, params)
+        except Exception:
+            degraded = True
+            return [] if default is None else default
+
+    tot = _q(
         "SELECT COALESCE(SUM(bytes),0), COALESCE(SUM(packets),0),"
-        " COUNT(*) FROM flows WHERE ts > ?", (since,))[0]
+        " COUNT(*) FROM flows WHERE ts > ?", (since,),
+        default=[(0, 0, 0)])[0]
     total_mb = (tot[0] or 0) / 1e6
     total_packets = tot[1] or 0
     nflows = tot[2] or 0
 
-    # Top 5 external talkers, with their main port described in plain words.
+    # Top 5 external talkers, with their main activity in plain words.
     top_talkers = []
-    talkers = dbm.query(
+    talkers = _q(
         "SELECT dst_ip, SUM(bytes), SUM(packets) FROM flows"
         " WHERE ts > ? AND direction='outbound' GROUP BY dst_ip"
         " ORDER BY SUM(bytes) DESC LIMIT 5", (since,))
     for ip, b, p in talkers:
-        main = dbm.query(
+        main = _q(
             "SELECT dst_port, proto, SUM(bytes) FROM flows"
             " WHERE ts > ? AND direction='outbound' AND dst_ip=?"
             " GROUP BY dst_port, proto ORDER BY SUM(bytes) DESC LIMIT 1",
@@ -70,20 +91,20 @@ def generate_weekly_report(now=None):
             port, proto, pb = main[0]
             desc = _port_words(port)
             top_talkers.append(
-                f"{ip} -- {_fmt_size(b/1e6)} across {p or 0} packets."
-                f" Mainly port {port} ({proto or 'unknown'}): {desc}.")
+                f"{ip} -- {_fmt_size(b/1e6)} of traffic."
+                f" Mostly {desc}.")
         else:
             top_talkers.append(
-                f"{ip} -- {_fmt_size(b/1e6)} across {p or 0} packets.")
+                f"{ip} -- {_fmt_size(b/1e6)} of traffic.")
 
     # Alerts by severity, plus the High/Critical ones spelled out.
-    sev_rows = dbm.query(
+    sev_rows = _q(
         "SELECT severity, COUNT(*) FROM alerts WHERE ts > ?"
         " GROUP BY severity", (since,))
     alerts_by_severity = {sev: n for sev, n in sev_rows}
 
     notable_alerts = []
-    for sev, title, meaning, what_to_do in dbm.query(
+    for sev, title, meaning, what_to_do in _q(
             "SELECT severity, title, meaning, what_to_do FROM alerts"
             " WHERE ts > ? AND severity IN ('High','Critical')"
             " ORDER BY ts DESC", (since,)):
@@ -95,10 +116,11 @@ def generate_weekly_report(now=None):
         notable_alerts.append(line)
 
     # Outages: ended ones inside the window, plus anything still down.
-    ended = dbm.query(
+    ended = _q(
         "SELECT COUNT(*), COALESCE(SUM(gap_seconds),0) FROM outages"
-        " WHERE start_ts > ? AND end_ts IS NOT NULL", (since,))[0]
-    ongoing = dbm.query(
+        " WHERE start_ts > ? AND end_ts IS NOT NULL", (since,),
+        default=[(0, 0)])[0]
+    ongoing = _q(
         "SELECT target, start_ts FROM outages WHERE end_ts IS NULL")
     n_out, down_seconds = ended[0] or 0, ended[1] or 0
     if n_out or ongoing:
@@ -132,19 +154,26 @@ def generate_weekly_report(now=None):
                   " count of first-seen devices for this week.")
 
     # Busiest day of the week.
-    busy = dbm.query(
+    busy = _q(
         "SELECT date(ts, 'unixepoch', 'localtime'), SUM(bytes) FROM flows"
         " WHERE ts > ? GROUP BY 1 ORDER BY SUM(bytes) DESC LIMIT 1",
         (since,))
+    busiest_day = None
     if busy and busy[0][1]:
-        busiest = datetime.strptime(busy[0][0], "%Y-%m-%d").strftime("%A, %b %d")
-        busiest_day = (f"{busiest}"
-                       f" ({_fmt_size(busy[0][1]/1e6)} moved)")
-    else:
-        busiest_day = None
+        try:
+            busiest = datetime.strptime(
+                busy[0][0], "%Y-%m-%d").strftime("%A, %b %d")
+            busiest_day = (f"{busiest}"
+                           f" ({_fmt_size(busy[0][1]/1e6)} moved)")
+        except (TypeError, ValueError):
+            busiest_day = None
 
     issues = len(notable_alerts) + n_out + len(ongoing)
-    if issues:
+    if degraded:
+        headline = ("We couldn't read all of the monitor's records"
+                    " this week, so this summary may be missing"
+                    " things")
+    elif issues:
         headline = (f"An eventful week: {len(notable_alerts)} high-priority"
                     f" alert{'s' if len(notable_alerts) != 1 else ''} and"
                     f" {n_out + len(ongoing)} connection drop{'s' if n_out + len(ongoing) != 1 else ''}")
@@ -168,6 +197,7 @@ def generate_weekly_report(now=None):
         "outages": outages,
         "firsts": firsts,
         "busiest_day": busiest_day,
+        "degraded": degraded,
     }
 
 
@@ -182,8 +212,7 @@ def format_plaintext(report):
          "How much went through",
          "---------------------",
          (f"This week your network moved about {_fmt_size(t['mb'])}"
-          f" across {t['packets']:,} packets"
-          f" ({t['flows']:,} separate connections)."),
+          f" in {t['flows']:,} separate connections."),
          "",
          "Where it went",
          "-------------"]
@@ -217,6 +246,15 @@ def format_plaintext(report):
     elif sev:
         L.append("Nothing in the bunch looks serious --"
                  " they were all low or medium priority.")
+
+    if report.get("degraded"):
+        L += ["",
+              "A note about this report",
+              "------------------------",
+              "Some of the monitor's records couldn't be read this"
+              " week, so the numbers above may not tell the whole"
+              " story. Nothing you need to do -- if it keeps"
+              " happening, the monitor needs a look."]
 
     L += ["",
           "Connection",

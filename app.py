@@ -166,7 +166,11 @@ def write_brief(ip, count, severity):
     if api_key and cfgm.ai_enabled():
         try:
             from openai import OpenAI  # optional dependency
-            client = OpenAI(api_key=api_key)
+            # Council review 2026-10-18 (security + robustness, quorum):
+            # timeout=30, matching ai_assist.py/explainer.py -- a hung
+            # API call must never wedge a demo worker for the SDK's
+            # ~10-minute default.
+            client = OpenAI(api_key=api_key, timeout=30)
             resp = client.chat.completions.create(
                 model=cfgm.ai_model(),
                 messages=[{"role": "user",

@@ -289,9 +289,18 @@ def main():
         digest_hours = 24
 
     if args.weekly_report:
+        # Council review 2026-10-18: this one-shot CLI used to die with
+        # a raw traceback when the database hiccuped, so the owner got
+        # no report at all. generate_weekly_report now degrades on its
+        # own; this guard covers anything else in formatting/polish.
         from . import weekly as weekm
-        report = weekm.generate_weekly_report()
-        text = weekm.maybe_polish(weekm.format_plaintext(report))
+        try:
+            report = weekm.generate_weekly_report()
+            text = weekm.maybe_polish(weekm.format_plaintext(report))
+        except Exception as exc:
+            print(f"Could not build the weekly report: {exc}",
+                  file=sys.stderr)
+            return
         print(text)
         sent = weekm.email_report(text)
         print("\nEmail: " + ("sent" if sent

@@ -337,7 +337,7 @@ def explain_score(data):
         return (f"Your network scored {score} out of 100. Nothing pulled"
                 " points off -- no alerts worth worrying about, no open"
                 " cases, no exposed doors found. A quiet network is a"
-                " healthy network.")
+                " good sign -- nothing suspicious is going on.")
     top = factors[:2]
     reasons = "; ".join(f["label"] for f in top)
     text = (f"Your network scored {score} out of 100. Here's what pulled"
@@ -521,7 +521,8 @@ def _build_briefing(now, since):
              f" 24 hours ({day_label}).", ""]
     if quiet:
         lines.append("Nothing needed your eyes overnight. "
-                     "A quiet network is a healthy network.")
+                     "A quiet network is a good sign -- nothing"
+                     " suspicious is going on.")
         lines.append("")
     # Score first: the grade, then the detail.
     if score is None:
@@ -1064,8 +1065,10 @@ def _weekly_pdf(report):
         moved = f"{mb / 1024:.1f} GB"
     else:
         moved = f"{mb:.1f} MB"
-    doc.bullet(f"Data moved: {moved} "
-               f"({totals.get('packets') or 0} packets)")
+    doc.bullet(f"Data moved: {moved}")
+    if report.get("degraded"):
+        doc.bullet("Some records couldn't be read this week, so this"
+                   " summary may be missing things.")
     sev = report.get("alerts_by_severity") or {}
     sev_bit = ", ".join(
         f"{sev.get(s, 0)} {s.lower()}"
