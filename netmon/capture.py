@@ -23,6 +23,7 @@ LAN subnet (default: the /24 containing this machine's primary IP).
 import ipaddress
 import os
 import socket
+import sys
 import threading
 import time
 
@@ -45,6 +46,15 @@ FLUSH_INTERVAL = 15      # seconds between DB flushes
 SCAN_WINDOW = 120        # seconds of SYN history kept per source
 SCAN_PORT_THRESHOLD = 20  # distinct ports in window -> port scan alert
 SCAN_COOLDOWN = 3600     # don't re-alert the same scanner for an hour
+SNIFF_TIMEOUT = 5        # seconds per sniff() call in run_live's loop
+
+
+def _log(msg):
+    """One stderr line (watchdog.py/pipeline.py pattern). Never raises."""
+    try:
+        print(f"netmon capture: {msg}", file=sys.stderr)
+    except Exception:
+        pass
 
 
 def get_local_ips():
@@ -106,6 +116,15 @@ class ScanTracker:
     def observe(self, src_ip, dst_port, ts, is_syn):
         if not is_syn:
             return
+        # Decide under the lock; fire the DB calls AFTER releasing it.
+        # The DB calls used to sit inside the lock on the packet path:
+        # a DB hiccup stalled every packet behind the lock, and the
+        # exception escaped handle() -> _prn -> sniff(), killing live
+        # capture (council review 2026-10-18, robustness R1). The burst
+        # is consumed (history reset) when the decision is made, so a
+        # failed alert write is bounded to one DB attempt per burst --
+        # it is logged, not retried on every later SYN of the same scan.
+        pending = None
         with self.lock:
             hist = self.history.setdefault(src_ip, [])
             hist.append((ts, dst_port))
@@ -113,31 +132,37 @@ class ScanTracker:
             hist[:] = [(t, p) for t, p in hist if t >= cutoff]
             distinct_ports = {p for _, p in hist}
             if len(distinct_ports) >= SCAN_PORT_THRESHOLD:
-                if not dbm.recent_alert_kind("port_scan", src_ip,
-                                             SCAN_COOLDOWN):
-                    dbm.add_alert(
-                        "port_scan", "High",
-                        f"Possible port scan from {src_ip}",
-                        f"{src_ip} tried {len(distinct_ports)} different"
-                        f" ports within {SCAN_WINDOW} seconds.",
-                        meaning=("Another computer rapidly knocked on many"
-                                 " different 'doors' (ports) of this machine"
-                                 " -- like someone walking down a hallway"
-                                 " trying every doorknob. That's how"
-                                 " attackers look for a way in."),
-                        is_normal=("On a home network this is rarely normal."
-                                   " It can occasionally be your router or a"
-                                   " security tool doing a health check, but"
-                                   " treat it as suspicious until you know"
-                                   " which device it was."),
-                        what_to_do=("Find the device behind that address"
-                                    " (your router's device list shows"
-                                    " what's connected). If you don't"
-                                    " recognize it, block it there and"
-                                    " change your Wi-Fi password."),
-                        ts=ts,
-                    )
+                pending = len(distinct_ports)
                 self.history[src_ip] = []  # reset after alerting
+        if pending is None:
+            return
+        try:
+            if not dbm.recent_alert_kind("port_scan", src_ip,
+                                         SCAN_COOLDOWN):
+                dbm.add_alert(
+                    "port_scan", "High",
+                    f"Possible port scan from {src_ip}",
+                    f"{src_ip} tried {pending} different"
+                    f" ports within {SCAN_WINDOW} seconds.",
+                    meaning=("Another computer rapidly knocked on many"
+                             " different 'doors' (ports) of this machine"
+                             " -- like someone walking down a hallway"
+                             " trying every doorknob. That's how"
+                             " attackers look for a way in."),
+                    is_normal=("On a home network this is rarely normal."
+                               " It can occasionally be your router or a"
+                               " security tool doing a health check, but"
+                               " treat it as suspicious until you know"
+                               " which device it was."),
+                    what_to_do=("Find the device behind that address"
+                                " (your router's device list shows"
+                                " what's connected). If you don't"
+                                " recognize it, block it there and"
+                                " change your Wi-Fi password."),
+                    ts=ts,
+                )
+        except Exception as exc:
+            _log(f"port-scan alert for {src_ip} failed, dropped: {exc!r}")
 
 
 class FlowAggregator:
@@ -391,7 +416,14 @@ class FlowAggregator:
         self.packets_seen += 1
         if ts > self.max_ts:
             self.max_ts = ts
-        self.scans.observe(src, dport, ts, is_syn)
+        # Scan tracking must never kill the packet path: observe()
+        # already guards its own DB calls, and this is the belt to its
+        # braces -- any surprise there drops this packet's scan
+        # tracking, not the capture (2026-10-18 robustness R1).
+        try:
+            self.scans.observe(src, dport, ts, is_syn)
+        except Exception as exc:
+            _log(f"scan tracking dropped for one packet: {exc!r}")
 
         key = (src, dst, sport, dport, proto)
         with self.lock:
@@ -443,17 +475,37 @@ class FlowAggregator:
             ttl_rows = [(ip, ttl, ts) for ip, (ttl, ts) in self.ttl_map.items()]
             self.ttl_map = {}
             gateway_ip = self.gateway_ip
+        # Each buffer writes in its own guard (2026-10-18 robustness
+        # R3): the buffers are already detached above, so one failed
+        # insert used to discard every later buffer silently. Now a
+        # failure logs the dropped row count and the rest still write.
         if dns_rows:
-            dbm.insert_dns_queries(dns_rows)
+            try:
+                dbm.insert_dns_queries(dns_rows)
+            except Exception as exc:
+                _log(f"flush: dropped {len(dns_rows)} DNS rows: {exc!r}")
         if gateway_ip:
             # Default gateway seen in DHCP -- the topology map reads this.
-            dbm.set_meta("dhcp_gateway_ip", gateway_ip)
+            try:
+                dbm.set_meta("dhcp_gateway_ip", gateway_ip)
+            except Exception as exc:
+                _log(f"flush: dropped gateway update: {exc!r}")
         if arp_rows:
-            dbm.insert_arp_observations(arp_rows)
+            try:
+                dbm.insert_arp_observations(arp_rows)
+            except Exception as exc:
+                _log(f"flush: dropped {len(arp_rows)} ARP rows: {exc!r}")
         if hostname_rows:
-            dbm.insert_hostname_observations(hostname_rows)
+            try:
+                dbm.insert_hostname_observations(hostname_rows)
+            except Exception as exc:
+                _log(f"flush: dropped {len(hostname_rows)} hostname"
+                     f" rows: {exc!r}")
         if ttl_rows:
-            dbm.record_ttls(ttl_rows)
+            try:
+                dbm.record_ttls(ttl_rows)
+            except Exception as exc:
+                _log(f"flush: dropped {len(ttl_rows)} TTL rows: {exc!r}")
         if not items:
             return 0
         rows = [
@@ -462,8 +514,15 @@ class FlowAggregator:
             for (src, dst, sport, dport, proto), (pkts, nbytes, _f, last)
             in items
         ]
-        dbm.insert_flows(rows)
-        dbm.set_meta("last_flow_ts", str(time.time()))
+        try:
+            dbm.insert_flows(rows)
+        except Exception as exc:
+            _log(f"flush: dropped {len(rows)} flow rows: {exc!r}")
+            return 0
+        try:
+            dbm.set_meta("last_flow_ts", str(time.time()))
+        except Exception as exc:
+            _log(f"flush: flow heartbeat write failed: {exc!r}")
         return len(rows)
 
 
@@ -471,9 +530,15 @@ def _flush_loop(agg, stop_event):
     while not stop_event.wait(FLUSH_INTERVAL):
         try:
             agg.flush()
-        except Exception:
-            pass
-    agg.flush()  # final flush on shutdown
+        except Exception as exc:
+            _log(f"periodic flush failed: {exc!r}")
+    # Final flush on shutdown gets the same guard as the periodic one:
+    # a failing last flush must log, not raise out of the flusher
+    # thread (2026-10-18 robustness R3).
+    try:
+        agg.flush()
+    except Exception as exc:
+        _log(f"final flush failed: {exc!r}")
 
 
 def run_live(interface=None, stop_event=None):
@@ -503,11 +568,29 @@ def run_live(interface=None, stop_event=None):
                 rwm.maybe_record(pkt)
             except Exception:
                 pass
-        return agg.handle(pkt)
+        # A single bad packet (or a DB hiccup under it) must not kill
+        # capture: scapy propagates a prn exception out of sniff()
+        # (2026-10-18 robustness R1).
+        try:
+            return agg.handle(pkt)
+        except Exception as exc:
+            _log(f"dropped one packet: {exc!r}")
+            return None
 
     try:
-        sniff(iface=interface, prn=_prn, store=False,
-              stop_filter=lambda _p: stop_event.is_set())
+        # Loop short sniff() calls (2026-10-18 robustness R2):
+        # stop_filter is only checked when a packet arrives, so one
+        # unbounded sniff() on an idle or stalled interface never
+        # observes stop_event and shutdown hangs while the thread
+        # still reports alive. Scapy's timeout is TOTAL elapsed time
+        # from the call (verified in scapy/sendrecv.py: stoptime =
+        # monotonic() + timeout, and its select wakes at expiry), so
+        # each call returns within SNIFF_TIMEOUT seconds even with
+        # zero traffic, and the loop re-checks stop_event.
+        while not stop_event.is_set():
+            sniff(iface=interface, prn=_prn, store=False,
+                  timeout=SNIFF_TIMEOUT,
+                  stop_filter=lambda _p: stop_event.is_set())
     finally:
         stop_event.set()
         flusher.join(timeout=FLUSH_INTERVAL + 5)
