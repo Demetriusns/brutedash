@@ -18,12 +18,28 @@ import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "detections.db")
+# Plain HTTP is a known, accepted-for-now constraint, not an oversight:
+# the free ip-api endpoint refuses HTTPS ("SSL unavailable for this
+# endpoint, order a key" -- verified live 2026-10-20), so a scheme swap
+# silently kills enrichment. Moving to a keyed/HTTPS provider is staged
+# as a Tier 2 proposal (warden/state/proposals/, 2026-10-20). Until
+# then the response is size-capped below and treated as untrusted
+# context only (the brief shape is validated in app.py).
 API_URL = "http://ip-api.com/json/{ip}?fields=status,country,org,proxy,hosting,query"
 CACHE_TTL = 24 * 3600  # seconds
+MAX_RESPONSE_BYTES = 64 * 1024  # a legit reply is a few hundred bytes
 
 
 def _db():
     conn = sqlite3.connect(DB_PATH)
+    # L1 (security, 2026-10-20): same file, same self-heal as app.get_db
+    # -- this module also opens detections.db and must not leave a
+    # fresh copy world-readable.
+    try:
+        if os.stat(DB_PATH).st_mode & 0o077:
+            os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ip_intel ("
         "ip TEXT PRIMARY KEY, country TEXT, org TEXT, "
@@ -36,7 +52,13 @@ def _fetch(ip):
     req = urllib.request.Request(API_URL.format(ip=ip),
                                  headers={"User-Agent": "brutedash/1.0"})
     with urllib.request.urlopen(req, timeout=5) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+        # M3 (security, 2026-10-20): never read an unbounded body into
+        # memory -- read one byte past the cap so an over-cap reply is
+        # detected and dropped instead of parsed.
+        raw = resp.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        return {}
+    data = json.loads(raw.decode("utf-8"))
     if data.get("status") != "success":
         return {}
     return {"country": data.get("country") or "unknown",

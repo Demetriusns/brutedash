@@ -365,6 +365,15 @@ def load(path: Path | None = None) -> dict:
     path = path or config_path()
     cfg = {section: dict(keys) for section, keys in DEFAULTS.items()}
     if path.exists():
+        # L2 (security, 2026-10-20): an existing config.yaml may hold
+        # the dashboard passwords (the template invites it) but only
+        # ensure_bootstrap() chmods -- and only the file it creates.
+        # Self-heal a loose file on load, mirroring netmon/db.py.
+        try:
+            if path.stat().st_mode & 0o077:
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
         if yaml is None:
             _warn_no_yaml(path)
         else:

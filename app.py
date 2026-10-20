@@ -16,7 +16,7 @@ import sqlite3
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Flask, request, render_template_string
 
@@ -72,6 +72,15 @@ DB_PATH = os.path.join(BASE_DIR, "detections.db")
 # ---------------------------------------------------------------- persistence
 def get_db():
     conn = sqlite3.connect(DB_PATH)
+    # L1 (security, 2026-10-20): detections.db holds scan history (which
+    # IPs were investigated, when) -- not world-readable. Same self-heal
+    # as netmon/db.py: covers fresh files and pre-existing ones whose
+    # permissions predate this guard.
+    try:
+        if os.stat(DB_PATH).st_mode & 0o077:
+            os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
     conn.execute(
         "CREATE TABLE IF NOT EXISTS detections ("
         "id INTEGER PRIMARY KEY, ip TEXT, count INTEGER, "
@@ -96,6 +105,12 @@ def save_detections(findings):
             " VALUES (?,?,?,?)",
             (f["ip"], f["count"], f["severity"], now),
         )
+    # M2 retention (security, 2026-10-20): the demo table used to grow
+    # without bound. scanned_at is "%Y-%m-%d %H:%M:%S" text, so the
+    # 30-day cutoff compares correctly as a string.
+    cutoff = (datetime.now() - timedelta(days=30)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    conn.execute("DELETE FROM detections WHERE scanned_at < ?", (cutoff,))
     conn.commit()
     conn.close()
     return now
@@ -221,22 +236,23 @@ def _brief_llm_on():
     return bool(os.environ.get("OPENAI_API_KEY")) and cfgm.ai_enabled()
 
 
-def _brief_allowed(ip, now=None, limits=None):
-    """Check AND record in one lock hold -- no check-then-record race.
+def _sliding_allowed(usage, ip, now, limits):
+    """Sliding-window core shared by the /brief and POST / limiters.
 
+    Check AND record in one lock hold -- no check-then-record race.
     Returns (allowed, retry_after_s). On allowed the call is recorded
-    immediately; on denied nothing is recorded. Window logic is pure
-    (injectable `now` and `limits`) so the unit tests never have to
-    sleep. Stale IP keys (last call over an hour old) are pruned here,
-    so the dict cannot grow without bound from one-shot visitors.
+    immediately; on denied nothing is recorded. Stale IP keys (last call
+    over an hour old) are pruned here, so the dict cannot grow without
+    bound from one-shot visitors. `now` must come from ONE clock per
+    usage dict (wall for briefs, monotonic for scans); mixing clocks
+    inside a dict would corrupt its windows.
     """
-    now = time.time() if now is None else now
-    per_min, per_hour = limits if limits is not None else _brief_limits()
+    per_min, per_hour = limits
     with _BRIEF_LOCK:
-        for key in [k for k, v in _BRIEF_USAGE.items()
+        for key in [k for k, v in usage.items()
                     if not v or max(v) < now - 3600]:
-            del _BRIEF_USAGE[key]
-        stamps = [t for t in _BRIEF_USAGE.get(ip, []) if now - t < 3600]
+            del usage[key]
+        stamps = [t for t in usage.get(ip, []) if now - t < 3600]
         retry = 0
         recent_min = [t for t in stamps if now - t < 60]
         if len(recent_min) >= per_min:
@@ -244,11 +260,43 @@ def _brief_allowed(ip, now=None, limits=None):
         if len(stamps) >= per_hour:
             retry = max(retry, math.ceil(3600 - (now - min(stamps))))
         if retry > 0:
-            _BRIEF_USAGE[ip] = stamps
+            usage[ip] = stamps
             return False, retry
         stamps.append(now)
-        _BRIEF_USAGE[ip] = stamps
+        usage[ip] = stamps
         return True, 0
+
+
+def _brief_allowed(ip, now=None, limits=None):
+    """Per-IP limiter for /brief (LLM spend). Window logic is pure
+    (injectable `now` and `limits`) so the unit tests never have to
+    sleep."""
+    now = time.time() if now is None else now
+    return _sliding_allowed(
+        _BRIEF_USAGE, ip, now,
+        limits if limits is not None else _brief_limits())
+
+
+_SCAN_USAGE = {}
+# M2 (security, 2026-10-20): POST / caps -- a person pasting logs scans a
+# handful of times a minute at most; these sit far above that and far
+# below a scripted write loop. Fixed values, not config: the cost being
+# capped is disk/CPU on the demo box, not a budget the owner tunes.
+SCAN_LIMITS = (30, 600)
+
+
+def _scan_allowed(ip, now=None, limits=None):
+    """Per-IP limiter for the POST / write path (security M2).
+
+    Deliberately NOT gated on the LLM being on (unlike /brief): every
+    scan runs detection and appends to detections.db whether or not a
+    brief is ever requested. Uses a monotonic clock (council ADAPT,
+    2026-10-20) so a wall-clock reset cannot reopen the window.
+    """
+    now = time.monotonic() if now is None else now
+    return _sliding_allowed(
+        _SCAN_USAGE, ip, now,
+        limits if limits is not None else SCAN_LIMITS)
 
 
 # ---------------------------------------------------------------------- pages
@@ -328,6 +376,16 @@ def sample_log():
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
+        # M2 (security, 2026-10-20): the write path is unauthenticated
+        # and grows detections.db on every call -- rate-limit per IP,
+        # unconditionally. X-Forwarded-For is deliberately NOT honored
+        # (same reasoning as /brief: spoofable on a direct bind).
+        requester = request.remote_addr or "unknown"
+        allowed, retry_after = _scan_allowed(requester)
+        if not allowed:
+            return ("Too many scans -- give it a short breather and "
+                    "try again shortly.",
+                    429, {"Retry-After": str(retry_after)})
         log_text = request.form.get("log", "")
         with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as tmp:
             tmp.write(log_text)
@@ -350,7 +408,7 @@ def history():
     conn = get_db()
     rows = conn.execute(
         "SELECT ip, count, severity, scanned_at FROM detections "
-        "ORDER BY scanned_at DESC, count DESC").fetchall()
+        "ORDER BY scanned_at DESC, count DESC LIMIT 500").fetchall()
     conn.close()
     return render_template_string(HISTORY_HTML, rows=rows)
 
