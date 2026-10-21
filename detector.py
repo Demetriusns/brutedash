@@ -19,6 +19,7 @@ reads as one.
 
 import gzip
 import os
+import zlib
 
 SEVERITY_HIGH_CUTOFF = 10  # from the session #3 SPL stretch: count > 10 -> High
 
@@ -130,7 +131,14 @@ def detect_brute_force(log_path, threshold=3):
                 else:
                     continue
                 break  # byte cap hit: stop merging further sources
-        except OSError:
+        except (OSError, EOFError, zlib.error):
+            # Robustness R5 (council review, 2026-10-18): a truncated
+            # .gz sibling raises EOFError and a corrupt deflate stream
+            # raises zlib.error -- neither is an OSError subclass, and
+            # both used to escape here and kill the whole detection
+            # pass, healthy primary log included. The primary is always
+            # opened as plain text, so these can only originate from a
+            # sibling; the re-raise split below is unchanged.
             if src == log_path:
                 raise
             # best-effort for siblings: keep whatever was counted so far
