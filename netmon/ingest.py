@@ -293,15 +293,50 @@ def _event_summary(event_id, fields):
     return f"Event {event_id}: {bits}"[:300]
 
 
+_ENTITY_MARKER = b"<!entity"
+_SCAN_CHUNK = 64 * 1024
+
+
+def _declares_entities(path):
+    """True when the raw file text declares XML entities (<!ENTITY ...).
+
+    Council L5 (2026-10-18): stdlib ElementTree has no entity-expansion
+    (billion-laughs) protection, so a crafted export in the watch dir
+    could expand to GBs in memory and kill the monitor. Windows Event
+    Viewer exports never declare entities, so rejecting them outright
+    costs nothing legitimate. Chunked case-insensitive scan; the tail
+    of each chunk is carried into the next so a marker split across a
+    chunk boundary is still seen. Never raises: an OSError here returns
+    False and ET.parse surfaces the read failure itself.
+    """
+    tail = b""
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(_SCAN_CHUNK)
+                if not chunk:
+                    return False
+                data = tail + chunk
+                if _ENTITY_MARKER in data.lower():
+                    return True
+                tail = data[-(len(_ENTITY_MARKER) - 1):]
+    except OSError:
+        return False
+
+
 def parse_security_xml(path, since_ts=0):
     """Parse a Windows event XML export.
 
     Returns (events, skipped): events are
     (ts, "eventlog", event_id, computer, user, detail_json) tuples;
     only events newer than `since_ts` are returned (incremental).
+    Files that declare XML entities are rejected unparsed (see
+    _declares_entities) with the same ([], 1) shape as a parse error.
     """
     events = []
     skipped = 0
+    if _declares_entities(path):
+        return [], 1
     try:
         tree = ET.parse(path)
     except (ET.ParseError, OSError):

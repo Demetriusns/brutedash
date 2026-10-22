@@ -489,6 +489,10 @@ def answer_question(question):
         if not isinstance(question, str) or not question.strip():
             return None
         question = question.strip()
+        # Council L4 (2026-10-18): defensive cap -- the dashboard route
+        # rejects >2000 chars with 400, but no caller of this function
+        # should be able to put an unbounded question into the prompt.
+        question = question[:2000]
         context = _build_qa_context()
         tools_block = _tools_block()
         for _round in range(MAX_TOOL_ROUNDS):

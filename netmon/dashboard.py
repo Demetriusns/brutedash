@@ -3907,6 +3907,11 @@ def api_ask():
     q = (q or "").strip()
     if not q:
         return jsonify({"ok": False, "error": "ask a question first"}), 400
+    # Council L4 (2026-10-18): the question is interpolated verbatim into
+    # the LLM prompt; without a cap the only ceiling was the 100MB body
+    # limit. ai_assist.answer_question truncates defensively as well.
+    if len(q) > 2000:
+        return jsonify({"ok": False, "error": "question too long"}), 400
     mod = _ai_assist()
     try:
         answer = (mod.answer_question(q)

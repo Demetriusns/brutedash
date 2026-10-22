@@ -8,7 +8,11 @@ services:
     name: brutedash-demo
     runtime: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --workers 2"
+    # One worker on purpose: app.py's rate limiters (_BRIEF_USAGE,
+    # _SCAN_USAGE) are per-process dicts, so a second worker would
+    # silently double every configured cap (council L3, 2026-10-18).
+    # The demo is I/O-bound; threads keep the concurrency.
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4"
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
