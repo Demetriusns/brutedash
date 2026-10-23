@@ -36,6 +36,7 @@ import json
 import os
 import re
 import socket
+import sys
 import time
 import xml.etree.ElementTree as ET
 
@@ -797,41 +798,60 @@ def run_ingest():
     if not os.path.isdir(directory):
         return {"enabled": False, "error": "watch dir missing"}
     summary = {"enabled": True, "dir": directory, "files": 0,
-               "events": 0, "skipped": 0, "alerts": 0}
+               "events": 0, "skipped": 0, "alerts": 0, "files_skipped": 0}
     try:
         for path in _safe_files(directory):
             summary["files"] += 1
-            state = dbm.ingest_state_get(path) or {}
-            mtime = os.path.getmtime(path)
+            # Robustness R7 (2026-10-18 council review): one file
+            # vanishing or rotating between the _safe_files listing and
+            # the stat/parse below (routine on Windows, where the
+            # firewall log rotates) must skip only that file. Before this
+            # guard, the OSError reached the outer try: the whole pass
+            # aborted, every later file was skipped, and
+            # ingest_last_run_ts was never stamped, so the same failure
+            # repeated identically every cycle. Non-OSError failures
+            # (e.g. sqlite errors) still propagate to the outer handler.
             try:
-                ino = os.stat(path).st_ino
-            except OSError:
-                ino = None
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".xml":
-                if state.get("mtime") == mtime:
-                    continue  # unchanged export
-                events, skipped = parse_security_xml(
-                    path, since_ts=_xml_max_ts(os.path.basename(path)))
-                new_offset = 0
-            else:  # .log / .txt: append-style firewall logs
-                offset = state.get("offset") or 0
-                if os.path.getsize(path) < offset:
-                    offset = 0  # rotated/truncated: start over
-                elif (ino is not None and state.get("inode") is not None
-                        and state["inode"] != ino):
-                    # Council review: the file was replaced wholesale under
-                    # the same name (new export/log copy) with a size >= the
-                    # old one. The stale offset would silently skip the new
-                    # file's head mid-line, so start over. Plain appends keep
-                    # the same inode, so the fast path is unaffected.
-                    offset = 0
-                events, new_offset, skipped = parse_pfirewall(path, offset)
-            summary["skipped"] += skipped
-            if events:
-                dbm.insert_host_events(events)
-                summary["events"] += len(events)
-            dbm.ingest_state_set(path, mtime, new_offset, ino)
+                state = dbm.ingest_state_get(path) or {}
+                mtime = os.path.getmtime(path)
+                try:
+                    ino = os.stat(path).st_ino
+                except OSError:
+                    ino = None
+                ext = os.path.splitext(path)[1].lower()
+                if ext == ".xml":
+                    if state.get("mtime") == mtime:
+                        continue  # unchanged export
+                    events, skipped = parse_security_xml(
+                        path, since_ts=_xml_max_ts(os.path.basename(path)))
+                    new_offset = 0
+                else:  # .log / .txt: append-style firewall logs
+                    offset = state.get("offset") or 0
+                    if os.path.getsize(path) < offset:
+                        offset = 0  # rotated/truncated: start over
+                    elif (ino is not None and state.get("inode") is not None
+                            and state["inode"] != ino):
+                        # Council review: the file was replaced wholesale
+                        # under the same name (new export/log copy) with a
+                        # size >= the old one. The stale offset would
+                        # silently skip the new file's head mid-line, so
+                        # start over. Plain appends keep the same inode,
+                        # so the fast path is unaffected.
+                        offset = 0
+                    events, new_offset, skipped = parse_pfirewall(
+                        path, offset)
+                summary["skipped"] += skipped
+                if events:
+                    dbm.insert_host_events(events)
+                    summary["events"] += len(events)
+                dbm.ingest_state_set(path, mtime, new_offset, ino)
+            except OSError as exc:
+                summary["files_skipped"] += 1
+                try:
+                    print(f"netmon ingest: skipping {path}: {exc!r}",
+                          file=sys.stderr)
+                except Exception:
+                    pass
         try:
             summary["alerts"] = run_detection_rules()
         except Exception:

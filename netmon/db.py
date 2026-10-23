@@ -682,6 +682,13 @@ def _connect(path=None):
 
 
 _conn = None
+# Dedicated lock for the lazy init in _db() (robustness R6, 2026-10-18
+# council review). The module _lock cannot guard the init: most callers
+# already hold it when they call _db() and it is a plain non-reentrant
+# Lock, so acquiring it inside _db() would deadlock. _connect_raw runs
+# only raw-connection DDL/migrations and takes neither lock, so holding
+# this one across _connect() is safe.
+_conn_init_lock = threading.Lock()
 
 # Thread-local overrides. The pcap-analysis path runs on a dashboard
 # worker thread and must not touch production state: isolated_db() gives
@@ -698,7 +705,15 @@ def _db():
         return conn
     global _conn
     if _conn is None:
-        _conn = _connect()
+        # Double-checked locking (R6): without it, two threads taking
+        # their first _db() concurrently both run the full schema +
+        # migration sequence in _connect() on separate connections --
+        # one is leaked (never closed, holds WAL handles for the
+        # process lifetime) and the concurrent DDL can surface as
+        # "database is locked" during startup.
+        with _conn_init_lock:
+            if _conn is None:
+                _conn = _connect()
     return _conn
 
 
