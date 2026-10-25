@@ -47,6 +47,17 @@ SCAN_WINDOW = 120        # seconds of SYN history kept per source
 SCAN_PORT_THRESHOLD = 20  # distinct ports in window -> port scan alert
 SCAN_COOLDOWN = 3600     # don't re-alert the same scanner for an hour
 SNIFF_TIMEOUT = 5        # seconds per sniff() call in run_live's loop
+# Memory bounds (council review 2026-10-25, robustness C1): the buffers
+# below accumulate between 15s flushes / for the capture's lifetime, and
+# an attacker controls their growth -- a port scan or spoofed-source
+# flood mints distinct flow keys and scan sources at line rate. Every
+# buffer gets a hard cap like the existing hostname_buf (1000) and
+# ttl_map (2048) bounds; past a cap, NEW entries are dropped and counted
+# (existing aggregates/history are never evicted mid-window, so
+# detection on traffic already tracked is unaffected).
+MAX_FLOWS = 100_000        # distinct 5-tuples buffered between flushes
+MAX_DNS_BUF = 10_000       # DNS observations buffered between flushes
+SCAN_MAX_SOURCES = 10_000  # distinct SYN sources tracked at once
 
 
 def _log(msg):
@@ -112,6 +123,8 @@ class ScanTracker:
     def __init__(self):
         self.history = {}  # src_ip -> list of (ts, dst_port)
         self.lock = threading.Lock()
+        self._last_sweep = 0.0  # last global stale-source sweep (C1)
+        self.sources_dropped = 0  # sources evicted by the source cap
 
     def observe(self, src_ip, dst_port, ts, is_syn):
         if not is_syn:
@@ -126,10 +139,37 @@ class ScanTracker:
         # it is logged, not retried on every later SYN of the same scan.
         pending = None
         with self.lock:
+            # C1: a source's list is pruned only when THAT source is
+            # seen again, so one-shot spoofed sources accumulated for
+            # the capture's lifetime. Sweep globally at most once per
+            # SCAN_WINDOW: prune every list, drop emptied sources.
+            if ts - self._last_sweep >= SCAN_WINDOW:
+                self._last_sweep = ts
+                sweep_cutoff = ts - SCAN_WINDOW
+                for src in list(self.history):
+                    kept = [(t, p) for t, p in self.history[src]
+                            if t >= sweep_cutoff]
+                    if kept:
+                        self.history[src] = kept
+                    else:
+                        del self.history[src]
             hist = self.history.setdefault(src_ip, [])
             hist.append((ts, dst_port))
             cutoff = ts - SCAN_WINDOW
             hist[:] = [(t, p) for t, p in hist if t >= cutoff]
+            # C1: hard cap on distinct sources. Past it, evict the
+            # sources whose newest SYN is oldest (never the current
+            # one) so a spoofed-source flood cannot grow this dict
+            # without bound; evictions are counted, not silent.
+            if len(self.history) > SCAN_MAX_SOURCES:
+                by_age = sorted(
+                    (max(t for t, _p in h), src)
+                    for src, h in self.history.items()
+                    if src != src_ip and h)
+                excess = len(self.history) - SCAN_MAX_SOURCES
+                for _newest, src in by_age[:excess]:
+                    del self.history[src]
+                    self.sources_dropped += 1
             distinct_ports = {p for _, p in hist}
             if len(distinct_ports) >= SCAN_PORT_THRESHOLD:
                 pending = len(distinct_ports)
@@ -179,7 +219,9 @@ class FlowAggregator:
         self.whole_network = whole_network_mode()
         self.lan = lan_subnet() if self.whole_network else None
         self.flows = {}  # (src, dst, sport, dport, proto) -> [pkts, bytes, first, last]
+        self.flows_dropped = 0  # new flows dropped at MAX_FLOWS (C1)
         self.dns_buf = []   # [(ts, src_ip, name, qtype)]
+        self.dns_dropped = 0  # DNS rows dropped at MAX_DNS_BUF (C1)
         self.arp_buf = []   # [(ts, ip, mac)]
         self.hostname_buf = []  # [(ts, mac, ip, hostname, source)]
         self.ttl_map = {}   # ip -> (ttl, ts); bounded below
@@ -429,13 +471,22 @@ class FlowAggregator:
         with self.lock:
             f = self.flows.get(key)
             if f is None:
-                self.flows[key] = [1, size, ts, ts]
+                if len(self.flows) >= MAX_FLOWS:
+                    # C1: at the cap, drop NEW flows (counted) rather
+                    # than growing without bound between flushes;
+                    # flows already tracked keep aggregating below.
+                    self.flows_dropped += 1
+                else:
+                    self.flows[key] = [1, size, ts, ts]
             else:
                 f[0] += 1
                 f[1] += size
                 f[3] = ts
             if dns_row is not None:
-                self.dns_buf.append(dns_row)
+                if len(self.dns_buf) < MAX_DNS_BUF:
+                    self.dns_buf.append(dns_row)
+                else:
+                    self.dns_dropped += 1
             if dhcp_gateway:
                 self.gateway_ip = dhcp_gateway  # latest wins; DHCP is chatty
             if dhcp_row is not None and len(self.hostname_buf) < 1000:
@@ -475,6 +526,15 @@ class FlowAggregator:
             ttl_rows = [(ip, ttl, ts) for ip, (ttl, ts) in self.ttl_map.items()]
             self.ttl_map = {}
             gateway_ip = self.gateway_ip
+            flows_dropped, self.flows_dropped = self.flows_dropped, 0
+            dns_dropped, self.dns_dropped = self.dns_dropped, 0
+        if flows_dropped or dns_dropped:
+            # C1 caps bit since the last flush: say so once per flush,
+            # never silently (the sensor is under exactly the flood
+            # these caps exist for, and the owner should know detail
+            # was shed to keep the monitor alive).
+            _log(f"flush: memory caps shed {flows_dropped} new flows"
+                 f" and {dns_dropped} DNS rows since the last flush")
         # Each buffer writes in its own guard (2026-10-18 robustness
         # R3): the buffers are already detached above, so one failed
         # insert used to discard every later buffer silently. Now a

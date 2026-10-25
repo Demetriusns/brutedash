@@ -3756,6 +3756,7 @@ def reports_compliance_csv():
 
 
 @app.route("/reports/weekly.pdf")
+@_owner_required
 def reports_weekly_pdf():
     from . import reporting as repm
     blob = repm.weekly_pdf_bytes()
@@ -3768,6 +3769,7 @@ def reports_weekly_pdf():
 
 
 @app.route("/reports/incident/<int:iid>.pdf")
+@_owner_required
 def reports_incident_pdf(iid):
     from . import reporting as repm
     blob = repm.incident_pdf_bytes(iid)
@@ -3785,8 +3787,14 @@ def api_rewind_status():
 
 
 @app.route("/api/rewind/export")
+@_owner_required
 def api_rewind_export():
     """Download a .pcap slice of the forensic buffer.
+
+    Owner-only (council review 2026-10-25, security H2): a .pcap is
+    raw payloads -- cleartext credentials/cookies from LAN traffic --
+    not a dashboard summary, so the read-only viewer role may not
+    download it (same for the weekly/incident PDF reports).
 
     One of: ?incident_id=N (the case's window), ?hours=H (the last H
     hours, 0 < H <= 24), or ?start=<epoch>&end=<epoch> (at most 24h).

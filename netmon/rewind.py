@@ -85,6 +85,15 @@ def rewind_dir():
     d = Path(override) if override else (cfgm.config_dir() / "rewind")
     try:
         d.mkdir(parents=True, exist_ok=True)
+        # Council review 2026-10-25 (security H2): segments hold RAW
+        # packets (cleartext credentials/cookies ride along) -- the
+        # directory must not be world-readable. Best-effort: on
+        # Windows chmod is largely a no-op, elsewhere this self-heals
+        # like db.py/config.py do for their files.
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
     except OSError:
         pass
     return d
@@ -158,6 +167,10 @@ def _rotate(now):
         path = directory / f"{base}_{n}.pcap"
     try:
         _seg_file = open(path, "ab")
+        try:
+            os.chmod(path, 0o600)  # raw packets: owner-only (see above)
+        except OSError:
+            pass
         _seg_file.write(_GLOBAL_HDR)
         _seg_bytes = len(_GLOBAL_HDR)
     except OSError:
@@ -279,23 +292,33 @@ def enforce_caps(now=None):
 
 def _iter_segment_packets(path):
     """Yield (ts, data) for each record in a segment file. Defensive:
-    a truncated tail (crash mid-write) stops iteration, never raises."""
+    a truncated tail (crash mid-write) stops iteration, never raises.
+
+    Council review 2026-10-25 (robustness H1): records are read
+    incrementally -- one packet (<= SNAPLEN) in memory at a time. The
+    old version read the whole segment (up to 64 MB) into RAM for
+    every file in the export window."""
     try:
-        with open(path, "rb") as f:
-            blob = f.read()
+        f = open(path, "rb")
     except OSError:
         return
-    off = len(_GLOBAL_HDR)
-    if blob[:off] != _GLOBAL_HDR:
-        return  # not a segment we wrote
-    n = len(blob)
-    while off + _REC_HDR.size <= n:
-        sec, usec, incl, _orig = _REC_HDR.unpack_from(blob, off)
-        off += _REC_HDR.size
-        if incl > SNAPLEN or off + incl > n:
-            break  # corrupt or truncated tail: stop, don't raise
-        yield sec + usec / 1_000_000, blob[off:off + incl]
-        off += incl
+    with f:
+        try:
+            if f.read(len(_GLOBAL_HDR)) != _GLOBAL_HDR:
+                return  # not a segment we wrote
+            while True:
+                hdr = f.read(_REC_HDR.size)
+                if len(hdr) < _REC_HDR.size:
+                    break  # clean end, or truncated tail: stop
+                sec, usec, incl, _orig = _REC_HDR.unpack(hdr)
+                if incl > SNAPLEN:
+                    break  # corrupt record: stop, don't raise
+                data = f.read(incl)
+                if len(data) < incl:
+                    break  # truncated tail (crash/concurrent rotation)
+                yield sec + usec / 1_000_000, data
+        except OSError:
+            return
 
 
 def export_window(start_ts, end_ts):
@@ -312,25 +335,33 @@ def export_window(start_ts, end_ts):
         start_ts, end_ts = end_ts, start_ts
     out = bytearray(_GLOBAL_HDR)
     count = 0
+    # Council review 2026-10-25 (robustness H1): snapshot the segment
+    # list under _lock, then build WITHOUT it. The old version held
+    # _lock for the whole scan, so a dashboard export stalled
+    # record_packet() -- the capture hot path -- for seconds on a busy
+    # box. A segment evicted mid-export simply yields nothing (the
+    # iterator swallows OSError); the live segment may gain packets
+    # while it is read, and the per-record truncation guard stops
+    # cleanly at a partial tail.
     with _lock:
         segs = _segments(rewind_dir())
-        for start, path in segs:
-            # A segment covers at most SEGMENT_SECONDS after its start;
-            # include it if that span can overlap the window (per-packet
-            # timestamps do the exact filtering below).
-            if start > end_ts or start + SEGMENT_SECONDS < start_ts:
+    for start, path in segs:
+        # A segment covers at most SEGMENT_SECONDS after its start;
+        # include it if that span can overlap the window (per-packet
+        # timestamps do the exact filtering below).
+        if start > end_ts or start + SEGMENT_SECONDS < start_ts:
+            continue
+        for ts, data in _iter_segment_packets(path):
+            if not (start_ts <= ts <= end_ts):
                 continue
-            for ts, data in _iter_segment_packets(path):
-                if not (start_ts <= ts <= end_ts):
-                    continue
-                need = _REC_HDR.size + len(data)
-                if len(out) + need > EXPORT_MAX_BYTES:
-                    break
-                sec = int(ts)
-                usec = int((ts - sec) * 1_000_000)
-                out += _REC_HDR.pack(sec, usec, len(data), len(data))
-                out += data
-                count += 1
+            need = _REC_HDR.size + len(data)
+            if len(out) + need > EXPORT_MAX_BYTES:
+                break
+            sec = int(ts)
+            usec = int((ts - sec) * 1_000_000)
+            out += _REC_HDR.pack(sec, usec, len(data), len(data))
+            out += data
+            count += 1
     return bytes(out), count
 
 
