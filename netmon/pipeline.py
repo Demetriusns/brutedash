@@ -33,6 +33,7 @@ Stdlib only. Nothing here raises out of its public helpers.
 """
 import os
 import sys
+import threading
 import time
 import uuid
 
@@ -761,15 +762,83 @@ def ensure_capture(state, is_alive, start, now=None,
 # One pipeline step that must never kill the monitor loop. Replaces the
 # bare `except: pass` blocks: the failure is logged (one line), the loop
 # continues, the user is not paged.
+#
+# R8 (2026-10-18 review): safe_step bounds exceptions, not hangs — one
+# long step (nuclei's subprocess can run for hours) wedged the whole
+# monitor loop. A caller may now pass timeout=<seconds>: fn then runs
+# on a daemon worker thread and the caller waits at most that long.
+# The deadline DETACHES, it does not kill — Python threads cannot be
+# killed safely, so the worker finishes in the background under the
+# step's own internal timeouts, and its return value is discarded.
+# A registry of in-flight timed steps (guarded by _timed_lock) stops a
+# later pass from spawning a duplicate of a step still running.
+
+_timed_lock = threading.Lock()
+_timed_inflight = {}  # step name -> holder dict for the running worker
+
 
 def safe_step(name, fn, *args, **kwargs):
     """Run fn(); on failure log one stderr line and return None.
-    Never raises."""
-    try:
-        return fn(*args, **kwargs)
-    except Exception as exc:
-        _log(f"step {name} failed: {exc!r}")
-        return None
+    Never raises.
+
+    Optional keyword-only `timeout` (seconds): run fn on a worker
+    thread and wait at most that long; on overrun log one line and
+    return None while the worker continues in the background. Without
+    it, fn runs synchronously exactly as before."""
+    timeout = kwargs.pop("timeout", None)
+    if timeout is None:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            _log(f"step {name} failed: {exc!r}")
+            return None
+    return _safe_step_timed(name, fn, args, kwargs, float(timeout))
+
+
+def _safe_step_timed(name, fn, args, kwargs, timeout):
+    holder = {"result": None, "exc": None, "detached": False,
+              "logged": False, "lock": threading.Lock(),
+              "done": threading.Event()}
+    with _timed_lock:
+        if name in _timed_inflight:
+            _log(f"step {name} still running from an earlier pass; "
+                 "skipping")
+            return None
+        _timed_inflight[name] = holder
+
+    def _run():
+        try:
+            holder["result"] = fn(*args, **kwargs)
+        except Exception as exc:
+            # Whoever holds the holder lock first claims the log line:
+            # the worker if the caller already detached, else the
+            # caller below — never both, never neither.
+            with holder["lock"]:
+                holder["exc"] = exc
+                if holder["detached"]:
+                    holder["logged"] = True
+                    _log(f"step {name} failed: {exc!r}")
+        finally:
+            with _timed_lock:
+                if _timed_inflight.get(name) is holder:
+                    del _timed_inflight[name]
+            holder["done"].set()
+
+    worker = threading.Thread(target=_run, name=f"safe-step-{name}",
+                              daemon=True)
+    worker.start()
+    worker.join(timeout)
+    with holder["lock"]:
+        if holder["done"].is_set():
+            if holder["exc"] is not None and not holder["logged"]:
+                holder["logged"] = True
+                _log(f"step {name} failed: {holder['exc']!r}")
+                return None
+            return holder["result"]
+        holder["detached"] = True
+    _log(f"step {name} overran {timeout:g}s deadline; "
+         "continuing without it")
+    return None
 
 
 # --- run-mode flags ----------------------------------------------------------------------

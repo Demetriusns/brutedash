@@ -182,7 +182,11 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
             last_summary = now
             pipelinem.safe_step("summary", _summary)
         # Weekly self scan of our own LAN (scan.py decides if it's due).
-        pipelinem.safe_step("weekly-scan", _weekly_scan)
+        # R8: the long subprocess-backed steps carry a one-interval
+        # deadline — an overrun detaches to a background worker instead
+        # of wedging the loop (see pipeline.safe_step).
+        pipelinem.safe_step("weekly-scan", _weekly_scan,
+                            timeout=DETECT_INTERVAL)
         # Windows Event Log / firewall log ingestion (ingest.py decides
         # if it's configured); every 5 minutes is plenty for log files.
         if now - last_ingest >= 300:
@@ -192,11 +196,11 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
         pipelinem.safe_step("selfcheck", _selfcheck)
         # External attack-surface mapping (amass.py decides if it's due,
         # enabled, and configured; silent no-op otherwise).
-        pipelinem.safe_step("amass", _amass)
+        pipelinem.safe_step("amass", _amass, timeout=DETECT_INTERVAL)
         # Deeper vulnerability scan via Nuclei (nuclei.py decides if it's
         # due, enabled, and installed; silent no-op otherwise). Targets
         # are always our own LAN inventory -- never user-supplied.
-        pipelinem.safe_step("nuclei", _nuclei)
+        pipelinem.safe_step("nuclei", _nuclei, timeout=DETECT_INTERVAL)
         # Software inventory + CVE correlation for the sensor box itself
         # (swaudit.py decides if it's due; local reads only).
         pipelinem.safe_step("swaudit", _swaudit)
