@@ -496,8 +496,22 @@ def _login_allowed(ip):
             _LOGIN_ATTEMPTS.pop(ip, None)
             return True
         _LOGIN_ATTEMPTS[ip] = stamps
-        recent = [t for t in stamps if now - t < _LOGIN_WINDOW]
-        return len(recent) < _LOGIN_MAX
+        # The block is derived from the stamps themselves: any cluster
+        # of _LOGIN_MAX failures inside one _LOGIN_WINDOW span blocks
+        # until _LOGIN_BLOCK seconds after that cluster's last failure.
+        # (Counting only stamps inside the window, as this did before,
+        # let an attacker resume guessing 61s after a burst — the
+        # claimed 5-minute block never happened.) No separate block
+        # state, so clearing the stamps (a successful login) clears
+        # the block too, and failures are never recorded while blocked
+        # (the route checks this first), so a block cannot extend itself.
+        ordered = sorted(stamps)
+        for i in range(len(ordered) - _LOGIN_MAX + 1):
+            cluster_last = ordered[i + _LOGIN_MAX - 1]
+            if (cluster_last - ordered[i] < _LOGIN_WINDOW
+                    and now - cluster_last < _LOGIN_BLOCK):
+                return False
+        return True
 
 
 def _record_login_failure(ip):
