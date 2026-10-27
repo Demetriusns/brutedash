@@ -3271,8 +3271,16 @@ def api_intel_ip(ip):
     except ValueError:
         return jsonify({"ok": False, "error": "not a valid IP"}), 400
     now = time.time()
+    # Security M1 (2026-10-25 review, fixed 2026-10-27): external
+    # enrichment is owner-only. A viewer enumerating arbitrary IPs
+    # could burn the 50/day AbuseIPDB budget (each cache miss costs
+    # one unit and sends the owner's API key) and make the box issue
+    # reverse-DNS lookups for IPs of their choosing. Viewers still
+    # get the full local rap sheet; only the off-box calls are gated.
+    # Open mode (no passwords) is ungated, like _owner_required.
+    external_ok = not _auth_enabled() or _role() == "owner"
     try:
-        intel = tim.lookup_ip(ip)
+        intel = tim.lookup_ip(ip, include_abuseipdb=external_ok)
     except Exception:
         intel = {"listed": [], "abuseipdb": None}
     listed = [{
@@ -3282,7 +3290,7 @@ def api_intel_ip(ip):
         "last_seen": _fmt_ts(h["last_seen"]) if h.get("last_seen") else "",
     } for h in intel.get("listed") or []]
     try:
-        rdns = tim.reverse_dns(ip)
+        rdns = tim.reverse_dns(ip) if external_ok else ""
     except Exception:
         rdns = ""
     try:
