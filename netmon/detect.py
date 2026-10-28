@@ -25,6 +25,7 @@ instead of spamming.
 
 import ipaddress
 import time
+from contextlib import contextmanager
 
 from. import db as dbm
 
@@ -39,6 +40,82 @@ def _whole_network():
 
 
 _LOCAL_IPS_CACHE = None
+_LOCAL_IPS_CACHE_TS = 0.0
+_LOCAL_IPS_TTL = 300  # s; local IPs can change (DHCP, new interface)
+
+# Loopback is local by definition -- the floor for the failure fallback
+# in _local_ips(), mirroring capture.get_local_ips()' own minimum.
+_LOOPBACK_IPS = frozenset({"127.0.0.1", "::1"})
+
+
+def _local_ips(now=None):
+    """This box's own IPs, cached for _LOCAL_IPS_TTL seconds (M1).
+
+    The old cache never expired: a transient load failure cached an
+    empty set for the process lifetime (the box stopped recognising
+    its own IPs until restart), and a changed local IP was never
+    picked up. Now a success is refreshed after the TTL; a failed
+    refresh keeps the previous value if there is one, otherwise the
+    loopback floor -- and the attempt is stamped either way, so a
+    failure is retried after the TTL instead of being retried on
+    every label call or never again.
+    """
+    global _LOCAL_IPS_CACHE, _LOCAL_IPS_CACHE_TS
+    now = time.time() if now is None else now
+    if (_LOCAL_IPS_CACHE is not None
+            and now - _LOCAL_IPS_CACHE_TS < _LOCAL_IPS_TTL):
+        return _LOCAL_IPS_CACHE
+    try:
+        from .capture import get_local_ips
+        fresh = get_local_ips()
+    except Exception:
+        if _LOCAL_IPS_CACHE is None:
+            _LOCAL_IPS_CACHE = set(_LOOPBACK_IPS)
+        _LOCAL_IPS_CACHE_TS = now
+        return _LOCAL_IPS_CACHE
+    _LOCAL_IPS_CACHE = fresh
+    _LOCAL_IPS_CACHE_TS = now
+    return _LOCAL_IPS_CACHE
+
+
+class _DeviceMaps:
+    """(ip->mac, mac->name) maps, loaded at most once, on first use.
+
+    Both maps are full DB scans (ip_to_mac_map groups the whole
+    arp_observations table), so loading them per alert candidate --
+    twice per candidate, once via _device_label and once via
+    _device_sentence -- made a detection pass cost ~4 full scans per
+    candidate (robustness H2). run_all() installs one holder for the
+    whole pass; a failed load yields empty maps for that pass instead
+    of raising (the same fallback as the old per-call try/except).
+    """
+
+    def __init__(self):
+        self._maps = None
+
+    def get(self):
+        if self._maps is None:
+            try:
+                self._maps = (dbm.ip_to_mac_map() or {},
+                              dbm.device_name_map() or {})
+            except Exception:
+                self._maps = ({}, {})
+        return self._maps
+
+
+_PASS_MAPS = None
+
+
+@contextmanager
+def _device_maps_scope():
+    """Activate one shared _DeviceMaps for the enclosed pass."""
+    global _PASS_MAPS
+    prev = _PASS_MAPS
+    _PASS_MAPS = _DeviceMaps()
+    try:
+        yield
+    finally:
+        _PASS_MAPS = prev
 
 
 def _device_label(ip):
@@ -51,19 +128,17 @@ def _device_label(ip):
     is only the human-readable surface used in titles, emails, and
     timelines.
     """
-    global _LOCAL_IPS_CACHE
-    if _LOCAL_IPS_CACHE is None:
-        try:
-            from .capture import get_local_ips
-            _LOCAL_IPS_CACHE = get_local_ips()
-        except Exception:
-            _LOCAL_IPS_CACHE = set()
-    if ip and ip in _LOCAL_IPS_CACHE:
+    if ip and ip in _local_ips():
         return f"this computer ({ip})"
     if ip:
         try:
-            mac = (dbm.ip_to_mac_map() or {}).get(ip)
-            name = (dbm.device_name_map() or {}).get(mac, "") if mac else ""
+            if _PASS_MAPS is not None:
+                ip2mac, names = _PASS_MAPS.get()
+            else:
+                ip2mac = dbm.ip_to_mac_map() or {}
+                names = dbm.device_name_map() or {}
+            mac = ip2mac.get(ip)
+            name = names.get(mac, "") if mac else ""
             if name:
                 return f"{name} ({ip})"
         except Exception:
@@ -694,18 +769,27 @@ def check_arp_spoof(now=None):
     now = now or time.time()
     fired = []
 
-    # shape 1: one MAC claiming several different IPs
-    rows = dbm.query(
-        "SELECT mac, COUNT(DISTINCT ip) FROM arp_observations"
-        " WHERE ts >? GROUP BY mac HAVING COUNT(DISTINCT ip) >=?",
-        (now - ARP_SPOOF_WINDOW, ARP_SPOOF_MIN_IPS))
-    for mac, nip in rows:
-        if not mac:
+    # One query for the whole window, grouped in Python (robustness
+    # H2): shape 1 used to run one extra query per flagged MAC and
+    # shape 2 one per distinct IP -- an N+1 over exactly the table a
+    # spoofing flood inflates.
+    pairs = dbm.query(
+        "SELECT DISTINCT ip, mac FROM arp_observations WHERE ts >?",
+        (now - ARP_SPOOF_WINDOW,))
+    mac_to_ips = {}
+    ip_to_macs = {}
+    for obs_ip, obs_mac in pairs:
+        if not obs_ip or not obs_mac:
             continue
-        ips = sorted(r[0] for r in dbm.query(
-            "SELECT DISTINCT ip FROM arp_observations"
-            " WHERE ts >? AND mac =?", (now - ARP_SPOOF_WINDOW, mac))
-            if r[0])
+        mac_to_ips.setdefault(obs_mac, set()).add(obs_ip)
+        ip_to_macs.setdefault(obs_ip, set()).add(obs_mac)
+
+    # shape 1: one MAC claiming several different IPs
+    for mac, ip_set in mac_to_ips.items():
+        nip = len(ip_set)
+        if nip < ARP_SPOOF_MIN_IPS:
+            continue
+        ips = sorted(ip_set)
         if dbm.recent_alert_kind("arp_spoof", mac, ARP_SPOOF_COOLDOWN):
             continue
         dbm.add_alert(
@@ -732,16 +816,8 @@ def check_arp_spoof(now=None):
         fired.append(("mac", mac))
 
     # shape 2: an IP answering with a different MAC than first recorded
-    rows = dbm.query(
-        "SELECT DISTINCT ip FROM arp_observations WHERE ts >?",
-        (now - ARP_SPOOF_WINDOW,))
-    for (ip,) in rows:
-        if not ip:
-            continue
-        macs = sorted(r[0] for r in dbm.query(
-            "SELECT DISTINCT mac FROM arp_observations"
-            " WHERE ts >? AND ip =?", (now - ARP_SPOOF_WINDOW, ip))
-            if r[0])
+    for ip, mac_set in ip_to_macs.items():
+        macs = sorted(mac_set)
         if not macs:
             continue
         first_mac = dbm.get_first_seen("ip_mac", ip)
@@ -1014,12 +1090,15 @@ def run_all(now=None):
     blinds the other eight for the whole minute.
     """
     import sys
-    for rule in _RULES:
-        try:
-            rule(now=now)
-        except Exception as exc:
+    # One shared device-maps load for the whole pass (robustness H2):
+    # rules label many alert candidates, and the maps are full scans.
+    with _device_maps_scope():
+        for rule in _RULES:
             try:
-                print(f"netmon detect: {rule.__name__} failed: {exc!r}",
-                      file=sys.stderr)
-            except Exception:
-                pass
+                rule(now=now)
+            except Exception as exc:
+                try:
+                    print(f"netmon detect: {rule.__name__} failed: {exc!r}",
+                          file=sys.stderr)
+                except Exception:
+                    pass
