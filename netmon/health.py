@@ -40,21 +40,33 @@ _BUNDLE_INSTALLED = False
 def setup_logging():
     """Log to a rotating file next to the config dir, plus console."""
     from . import config as cfgm
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # Robustness M3 (2026-10-29): check BEFORE constructing. A handler
+    # built on every call and then discarded (because one is already
+    # installed) is never closed -- FileHandler opens the file at
+    # construction, so repeat calls leaked an open handle each.
+    if any(isinstance(h, logging.handlers.RotatingFileHandler)
+           for h in root.handlers):
+        return
     log_dir = cfgm.config_dir() / "logs"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return  # logging must never break startup
-    handler = logging.handlers.RotatingFileHandler(
-        log_dir / "orion.log", maxBytes=1_000_000, backupCount=3,
-        encoding="utf-8")
+        # Construction is inside the guard too: a handler that cannot
+        # be built (permissions, locked file) must never break startup.
+        handler = logging.handlers.RotatingFileHandler(
+            log_dir / "orion.log", maxBytes=1_000_000, backupCount=3,
+            encoding="utf-8")
+    except OSError as exc:
+        # Innovation seat's condition: swallowed, but not silent -- a
+        # one-line stderr note keeps the failure debuggable without a
+        # working logger (which is exactly what just failed to build).
+        print(f"orion: file logging unavailable ({exc}); "
+              "continuing with console logging only", file=sys.stderr)
+        return
     handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    if not any(isinstance(h, logging.handlers.RotatingFileHandler)
-               for h in root.handlers):
-        root.addHandler(handler)
+    root.addHandler(handler)
     logging.getLogger(LOG_NAME).info("logging to %s", log_dir / "orion.log")
 
 
@@ -226,20 +238,26 @@ def write_diagnostics_bundle(reason="manual"):
         return None
     log = logging.getLogger(LOG_NAME)
     try:
-        # 1. Summary: what, when, where.
+        # 1. Summary: what, when, where. Own guard (robustness M3,
+        # 2026-10-29): a summary write failure used to abort sections
+        # 2-5 via the outer handler -- one section's failure must not
+        # take the rest of the bundle with it.
         try:
-            free_mb = shutil.disk_usage(
-                os.path.dirname(__file__)).free // 1024 // 1024
-        except Exception:
-            free_mb = -1
-        (dest / "summary.txt").write_text(
-            f"reason:   {reason}\n"
-            f"utc:      {datetime.now(timezone.utc).isoformat()}\n"
-            f"host:     {platform.node()}\n"
-            f"os:       {platform.system()} {platform.release()}\n"
-            f"python:   {platform.python_version()}\n"
-            f"orion:    {_git_version()}\n"
-            f"disk_mb_free: {free_mb}\n", encoding="utf-8")
+            try:
+                free_mb = shutil.disk_usage(
+                    os.path.dirname(__file__)).free // 1024 // 1024
+            except Exception:
+                free_mb = -1
+            (dest / "summary.txt").write_text(
+                f"reason:   {reason}\n"
+                f"utc:      {datetime.now(timezone.utc).isoformat()}\n"
+                f"host:     {platform.node()}\n"
+                f"os:       {platform.system()} {platform.release()}\n"
+                f"python:   {platform.python_version()}\n"
+                f"orion:    {_git_version()}\n"
+                f"disk_mb_free: {free_mb}\n", encoding="utf-8")
+        except Exception as exc:
+            log.warning("diagnostics: summary section failed (%s)", exc)
 
         # 2. Config, scrubbed.
         try:
@@ -266,17 +284,30 @@ def write_diagnostics_bundle(reason="manual"):
         # 4. Database integrity + row counts.
         try:
             from . import db as dbm
+            # Robustness M3 (2026-10-29): close in a finally -- the old
+            # code only reached conn.close() on the happy path, so the
+            # handle leaked on exactly the error path a diagnostics
+            # bundle exists for.
             conn = sqlite3.connect(dbm.DB_PATH, timeout=10)
-            integrity = conn.execute(
-                "PRAGMA integrity_check").fetchone()[0]
-            counts = {}
-            for table in ("flows", "alerts", "devices"):
-                try:
-                    counts[table] = conn.execute(
-                        f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                except Exception:
-                    counts[table] = "n/a"
-            conn.close()
+            try:
+                integrity = conn.execute(
+                    "PRAGMA integrity_check").fetchone()[0]
+                counts = {}
+                # Literal query strings only -- no interpolation into
+                # SQL, even of these compile-time table names (the
+                # release gate's sink audit flags any f-string query,
+                # and a fixed mapping is just as readable).
+                for table, query in (
+                        ("flows", "SELECT COUNT(*) FROM flows"),
+                        ("alerts", "SELECT COUNT(*) FROM alerts"),
+                        ("devices", "SELECT COUNT(*) FROM devices")):
+                    try:
+                        counts[table] = conn.execute(
+                            query).fetchone()[0]
+                    except Exception:
+                        counts[table] = "n/a"
+            finally:
+                conn.close()
             (dest / "db_check.txt").write_text(
                 f"integrity_check: {integrity}\n"
                 + "\n".join(f"{t}: {c}" for t, c in counts.items()),
@@ -285,15 +316,19 @@ def write_diagnostics_bundle(reason="manual"):
             (dest / "db_check.txt").write_text(
                 f"<check failed: {exc}>", encoding="utf-8")
 
-        # 5. Thread stacks -- shows hangs, not just crashes.
-        stacks = []
-        for tid, frame in sys._current_frames().items():
-            name = next((t.name for t in threading.enumerate()
-                         if t.ident == tid), "?")
-            stacks.append(f"--- thread {name} ({tid}) ---")
-            stacks.append("".join(traceback.format_stack(frame)))
-        (dest / "threads.txt").write_text("\n".join(stacks),
-                                          encoding="utf-8")
+        # 5. Thread stacks -- shows hangs, not just crashes. Own guard
+        # like the other sections (robustness M3, 2026-10-29).
+        try:
+            stacks = []
+            for tid, frame in sys._current_frames().items():
+                name = next((t.name for t in threading.enumerate()
+                             if t.ident == tid), "?")
+                stacks.append(f"--- thread {name} ({tid}) ---")
+                stacks.append("".join(traceback.format_stack(frame)))
+            (dest / "threads.txt").write_text("\n".join(stacks),
+                                              encoding="utf-8")
+        except Exception as exc:
+            log.warning("diagnostics: threads section failed (%s)", exc)
     except Exception as exc:
         log.warning("diagnostics: bundle incomplete (%s)", exc)
     log.warning("diagnostics: bundle written to %s", dest)
