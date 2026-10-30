@@ -18,6 +18,7 @@ reads as one.
 """
 
 import gzip
+import ipaddress
 import os
 import zlib
 
@@ -89,6 +90,15 @@ def detect_brute_force(log_path, threshold=3):
         if not tail:
             return
         ip = tail[0]
+        # Security L1 (council review, 2026-10-25): the token after
+        # "from " is attacker-controlled log text, not a validated IP.
+        # Hostnames, truncated garbage, or markup-shaped tokens used to
+        # be counted, returned as findings, and persisted into
+        # detections.db. Only real IP addresses are findings.
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return
         # Move B -- keep failures...
         if "Failed password" in line:
             counts[ip] = counts.get(ip, 0) + 1

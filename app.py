@@ -81,38 +81,48 @@ def get_db():
             os.chmod(DB_PATH, 0o600)
     except OSError:
         pass
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS detections ("
-        "id INTEGER PRIMARY KEY, ip TEXT, count INTEGER, "
-        "severity TEXT, scanned_at TEXT)"
-    )
+    # Robustness M4 (council review, 2026-10-25): if the CREATE fails,
+    # close the fresh handle instead of leaking it on the error path.
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS detections ("
+            "id INTEGER PRIMARY KEY, ip TEXT, count INTEGER, "
+            "severity TEXT, scanned_at TEXT)"
+        )
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
 def known_ips():
     conn = get_db()
-    rows = conn.execute("SELECT DISTINCT ip FROM detections").fetchall()
-    conn.close()
+    try:
+        rows = conn.execute("SELECT DISTINCT ip FROM detections").fetchall()
+    finally:
+        conn.close()
     return {r[0] for r in rows}
 
 
 def save_detections(findings):
     conn = get_db()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for f in findings:
-        conn.execute(
-            "INSERT INTO detections (ip, count, severity, scanned_at)"
-            " VALUES (?,?,?,?)",
-            (f["ip"], f["count"], f["severity"], now),
-        )
-    # M2 retention (security, 2026-10-20): the demo table used to grow
-    # without bound. scanned_at is "%Y-%m-%d %H:%M:%S" text, so the
-    # 30-day cutoff compares correctly as a string.
-    cutoff = (datetime.now() - timedelta(days=30)).strftime(
-        "%Y-%m-%d %H:%M:%S")
-    conn.execute("DELETE FROM detections WHERE scanned_at < ?", (cutoff,))
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for f in findings:
+            conn.execute(
+                "INSERT INTO detections (ip, count, severity, scanned_at)"
+                " VALUES (?,?,?,?)",
+                (f["ip"], f["count"], f["severity"], now),
+            )
+        # M2 retention (security, 2026-10-20): the demo table used to grow
+        # without bound. scanned_at is "%Y-%m-%d %H:%M:%S" text, so the
+        # 30-day cutoff compares correctly as a string.
+        cutoff = (datetime.now() - timedelta(days=30)).strftime(
+            "%Y-%m-%d %H:%M:%S")
+        conn.execute("DELETE FROM detections WHERE scanned_at < ?", (cutoff,))
+        conn.commit()
+    finally:
+        conn.close()
     return now
 
 
@@ -133,6 +143,13 @@ use it to characterize the source (e.g. "hosting-provider IP"), never as
 proof of malice. No markdown, no extra text."""
 
 VALID_SEVERITIES = {"Low", "Medium", "High", "Critical"}
+
+# Security L1 (council review, 2026-10-25): a /brief count is a claim
+# about a scanned log, not a free-form number. Detector findings are
+# >= the threshold and a pasted log is body-capped at 10 MB, so counts
+# outside 1..1,000,000 can only be hand-forged form data feeding the
+# LLM prompt / brief text. Reject them like any other invalid field.
+BRIEF_MAX_COUNT = 1_000_000
 
 
 def _validate_brief(data):
@@ -365,11 +382,15 @@ Recommended actions:
 def sample_log():
     # Demo UX: pre-fill the whole sample file so a first-time visitor who
     # just hits "Analyze" immediately sees real Critical findings.
+    # Robustness M4 (council review, 2026-10-25): the exists() check and
+    # the open() are not atomic -- a vanished or unreadable sample file
+    # must degrade to an empty form, never crash GET /.
     path = os.path.join(BASE_DIR, "auth.log")
-    if os.path.exists(path):
+    try:
         with open(path) as f:
             return "".join(f.readlines())
-    return ""
+    except OSError:
+        return ""
 
 
 # ---------------------------------------------------------------------- routes
@@ -393,7 +414,12 @@ def index():
         try:
             findings = detect_brute_force(tmp_path, threshold=3)
         finally:
-            os.unlink(tmp_path)
+            # Robustness M4: a locked/busy temp file on Windows raises
+            # on unlink -- that must never mask the scan result.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         seen = known_ips()  # repeat-offender check BEFORE saving this run
         for f in findings:
             f["repeat"] = f["ip"] in seen
@@ -406,10 +432,12 @@ def index():
 @app.route("/history")
 def history():
     conn = get_db()
-    rows = conn.execute(
-        "SELECT ip, count, severity, scanned_at FROM detections "
-        "ORDER BY scanned_at DESC, count DESC LIMIT 500").fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT ip, count, severity, scanned_at FROM detections "
+            "ORDER BY scanned_at DESC, count DESC LIMIT 500").fetchall()
+    finally:
+        conn.close()
     return render_template_string(HISTORY_HTML, rows=rows)
 
 
@@ -424,6 +452,8 @@ def brief():
     try:
         count = int(request.form.get("count", ""))
     except (TypeError, ValueError):
+        return "Invalid count", 400
+    if not 1 <= count <= BRIEF_MAX_COUNT:
         return "Invalid count", 400
     severity = request.form.get("severity", "")
     if severity not in VALID_SEVERITIES:
