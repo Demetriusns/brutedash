@@ -666,8 +666,19 @@ def run_pcap(path):
     if not HAVE_SCAPY:
         raise RuntimeError("scapy is not installed (pip install scapy)")
     agg = FlowAggregator()
-    with PcapReader(path) as reader:
-        for pkt in reader:
-            agg.handle(pkt)
+    try:
+        with PcapReader(path) as reader:
+            for pkt in reader:
+                try:
+                    agg.handle(pkt)
+                except Exception:
+                    continue
+    except Exception:
+        # Council review 2026-11-01 (robustness M2): a corrupt,
+        # truncated-header, or wrong-format file raises out of
+        # PcapReader instead of yielding packets. Keep whatever was
+        # aggregated before the failure rather than losing the run.
+        print(f"run_pcap: stopped early on unreadable capture data "
+              f"in {path}", file=sys.stderr)
     agg.flush()
     return agg

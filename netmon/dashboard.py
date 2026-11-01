@@ -169,7 +169,7 @@ def _cross_site_mutation_check():
 def _password_gate():
     if not _auth_enabled():
         return None
-    if request.path in ("/login", "/api/health"):
+    if request.path in ("/login",):
         return None
     if _role() is not None:
         return None
@@ -3752,6 +3752,7 @@ def _download_response(payload, filename, mimetype):
 
 
 @app.route("/reports/compliance.html")
+@_owner_required
 def reports_compliance_html():
     from . import reporting as repm
     period = _report_period()
@@ -3765,6 +3766,7 @@ def reports_compliance_html():
 
 
 @app.route("/reports/compliance.csv")
+@_owner_required
 def reports_compliance_csv():
     from . import reporting as repm
     period = _report_period()
@@ -4228,7 +4230,10 @@ def pcap():
             try:
                 agg = capm.run_pcap(path)
             finally:
-                os.unlink(path)
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
             # Anchor analysis windows at the newest packet, not wall-clock
             # time, so old captures analyze against their own timeline.
             anchor = agg.max_ts or time.time()
@@ -4244,7 +4249,10 @@ def pcap():
             ]
             summary, _origin = expl.summarize(save=False, now=anchor)
     finally:
-        os.unlink(scratch.name)
+        try:
+            os.unlink(scratch.name)
+        except OSError:
+            pass
     return render_template_string(PCAP_RESULT_HTML, filename=f.filename,
                                   packets=agg.packets_seen,
                                   summary=summary, alerts=alerts)

@@ -191,7 +191,7 @@ def _secret_res():
         _SECRET_KV_RE = re.compile(
             r"(?i)(key|token|password|passwd|pwd|"
             r"pass|secret|heartbeat_url|webhook_url)"
-            r"[\"']?\s*[:=]\s*[\"']?\S+")
+            r"[\"']?\s*[:=]\s*(?:[\"'][^\"']*[\"']|\S+)")
         _SECRET_AUTH_RE = re.compile(
             r"(?i)(authorization\s*:\s*(?:basic|bearer)\s+)\S+")
         _SECRET_URL_RE = re.compile(

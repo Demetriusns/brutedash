@@ -107,7 +107,7 @@ def check_listening_ports():
     try:
         from . import canary as canarym
         trap_port = canarym.canary_port()
-        current = {(p, n) for p, n in current if p != trap_port}
+        current = {(proto, n) for proto, n in current if n != trap_port}
     except Exception:
         pass
     base = dbm.selfcheck_baseline_get("listening_ports")
