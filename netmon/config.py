@@ -415,19 +415,40 @@ def get(cfg: dict, dotted: str, default=None):
 _CACHE: dict = {}
 
 
+def _env_fingerprint() -> tuple:
+    """Snapshot of the BRUTEDASH_* env vars _apply_env() bakes into a load.
+
+    load() folds the current env into its result, so a cache keyed only
+    on the file's mtime serves stale values when a var is set, changed,
+    or REMOVED without the file changing -- a removed
+    BRUTEDASH_AUTH_OWNER_PASSWORD kept working from cache (head find,
+    2026-10-25; reproduced both directions 2026-11-01). Keying the
+    cache on this fingerprint too makes any BRUTEDASH_* change
+    invalidate immediately, while an unchanged env still hits.
+    """
+    return tuple(sorted(
+        (name, value) for name, value in os.environ.items()
+        if name.startswith(ENV_PREFIX)))
+
+
 def load_cached(path: Path | None = None) -> dict:
-    """load() with a stat-based cache so hot paths don't re-read the file."""
+    """load() with a stat-based cache so hot paths don't re-read the file.
+
+    A hit requires BOTH the file's mtime and the BRUTEDASH_* env
+    fingerprint to be unchanged (see _env_fingerprint).
+    """
     path = path or config_path()
     key = str(path)
     try:
         mtime = path.stat().st_mtime
     except OSError:
         mtime = None
+    fingerprint = _env_fingerprint()
     cached = _CACHE.get(key)
-    if cached is not None and cached[1] == mtime:
+    if cached is not None and cached[1] == mtime and cached[2] == fingerprint:
         return cached[0]
     cfg = load(path)
-    _CACHE[key] = (cfg, mtime)
+    _CACHE[key] = (cfg, mtime, fingerprint)
     return cfg
 
 
