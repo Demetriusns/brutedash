@@ -365,6 +365,52 @@ def export_window(start_ts, end_ts):
     return bytes(out), count
 
 
+def export_window_to_file(start_ts, end_ts, out):
+    """Stream a .pcap of the window to a binary file object.
+
+    Same window, cap and segment-snapshot semantics as export_window(),
+    but the export is written one record at a time: peak memory is one
+    packet (<= SNAPLEN) plus the global header, never the whole export.
+    export_window() builds up to EXPORT_MAX_BYTES (512 MB) in a
+    bytearray and then copies it with bytes(out) -- on the small-box
+    target one dashboard export could peak near 1 GB and OOM-kill the
+    monitor process that also runs capture and detection (council
+    review 2026-11-01, robustness H1; streamed 2026-11-02).
+
+    `out` is a binary file object owned by the CALLER: it is written to
+    and flushed, never closed. Returns (packet_count, bytes_written).
+    """
+    start_ts = float(start_ts)
+    end_ts = float(end_ts)
+    if end_ts < start_ts:
+        start_ts, end_ts = end_ts, start_ts
+    out.write(_GLOBAL_HDR)
+    written = len(_GLOBAL_HDR)
+    count = 0
+    with _lock:
+        segs = _segments(rewind_dir())
+    for start, path in segs:
+        if start > end_ts or start + SEGMENT_SECONDS < start_ts:
+            continue
+        for ts, data in _iter_segment_packets(path):
+            if not (start_ts <= ts <= end_ts):
+                continue
+            need = _REC_HDR.size + len(data)
+            if written + need > EXPORT_MAX_BYTES:
+                break
+            sec = int(ts)
+            usec = int((ts - sec) * 1_000_000)
+            out.write(_REC_HDR.pack(sec, usec, len(data), len(data)))
+            out.write(data)
+            written += need
+            count += 1
+    try:
+        out.flush()
+    except Exception:
+        pass
+    return count, written
+
+
 def incident_window(incident_id):
     """(start, end) timestamps for a case, or None if it doesn't exist.
 

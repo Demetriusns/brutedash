@@ -3859,9 +3859,48 @@ def api_rewind_export():
                             "pick a case or a time window"}), 400
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "bad time window"}), 400
-    blob, count = rwm.export_window(*window)
-    resp = _download_response(blob, fname, "application/vnd.tcpdump.pcap")
-    resp.headers["X-Packets"] = str(count)
+    # Council review 2026-11-01 (robustness H1), streamed 2026-11-02:
+    # the old path built the whole export (up to 512 MB, plus a copy)
+    # in RAM. Stream it to a temp file instead, then serve it from
+    # disk in 64 KB chunks. The temp file is unlinked in the stream's
+    # finally block, which runs when the response is exhausted AND
+    # when the server closes it early (client abort). (Response
+    # call_on_close was tried first and empirically does not fire
+    # under Flask's test client, so cleanup does not rely on it.)
+    tmp = tempfile.NamedTemporaryFile(suffix=".pcap", delete=False)
+    tmp_path = tmp.name
+    try:
+        with tmp:
+            count, written = rwm.export_window_to_file(*window, tmp)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error":
+                        "couldn't build that download"}), 500
+    safe = "".join(c for c in fname if c.isalnum() or c in ("-", "_", "."))
+
+    def _stream(path=tmp_path):
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    resp = Response(_stream(), mimetype="application/vnd.tcpdump.pcap",
+                    headers={
+                        "Content-Disposition":
+                            f'attachment; filename="{safe or "rewind.pcap"}"',
+                        "Content-Length": str(written),
+                        "X-Packets": str(count)})
     return resp
 
 
