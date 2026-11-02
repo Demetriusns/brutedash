@@ -419,11 +419,21 @@ class BehaviorDeviationPocTests(_ScratchDb):
     def _hour_ts(self, now, days_ago, minute=30):
         """Timestamp at `minute` past the current local hour, days_ago back.
 
-        DST-safe: the wall-clock hour is resolved per target day (mktime
-        with isdst=-1), so a DST transition inside the window cannot push
-        the fixture into the wrong profile cell."""
-        lt = time.localtime(now - days_ago * 86400)
-        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour,
+        DST-safe: the target CALENDAR date is computed by date
+        arithmetic and the wall hour is always now's local hour,
+        resolved per target day by mktime (isdst=-1). Deriving the
+        date from now - days_ago*86400 is NOT safe: across a fall-back
+        (a 25-hour day) that lands one wall hour later on the
+        pre-transition days, seeding the baseline into the wrong
+        profile cell -- which turned this suite red on 2026-11-02,
+        the morning after the US fall-back (hour-7 profile got 1 of
+        the 5 seeded days, below the 3-day minimum, so the rule
+        correctly stayed quiet and test_deviation_fires failed)."""
+        import datetime
+        lt = time.localtime(now)
+        day = (datetime.date(lt.tm_year, lt.tm_mon, lt.tm_mday)
+               - datetime.timedelta(days=days_ago))
+        return time.mktime((day.year, day.month, day.day, lt.tm_hour,
                             minute, 0, -1, -1, -1))
 
     def _seed_device(self, now):
