@@ -26,6 +26,8 @@ SEVERITY_HIGH_CUTOFF = 10  # from the session #3 SPL stretch: count > 10 -> High
 
 MAX_ROTATED_SIBLINGS = 8   # auth.log.1 .. auth.log.8 (logrotate default is 4)
 MAX_TOTAL_BYTES = 64 * 1024 * 1024  # never read more than this across siblings
+MAX_LINE_BYTES = 1 * 1024 * 1024  # per-line cap, enforced BEFORE parsing (M4)
+_READ_CHUNK_BYTES = 64 * 1024     # bounded read block for the chunked reader
 
 
 def _rotated_siblings(log_path):
@@ -49,11 +51,61 @@ def _rotated_siblings(log_path):
     return found[::-1]
 
 
-def _open_line_stream(path, is_gz):
-    """Yield lines from path (plain or gzipped) in text mode."""
+def _open_byte_stream(path, is_gz):
+    """Open path (plain or gzipped) as a binary stream."""
     if is_gz:
-        return gzip.open(path, "rt", errors="replace")
-    return open(path, errors="replace")
+        return gzip.open(path, "rb")
+    return open(path, "rb")
+
+
+def _iter_capped_lines(stream):
+    """Yield (line_text, raw_len) from a binary stream, reading in
+    bounded chunks so no single line is ever fully materialised.
+
+    Robustness M4 (council review, 2026-11-01): the old text-mode
+    `for line in f` iteration built each whole line as a str before
+    the byte cap was checked, so one newline-free line (or a small
+    .gz inflating to one) defeated the 64 MB cap entirely -- a 90 MB
+    single line peaked ~354 MB RSS. Here the stream is read in
+    _READ_CHUNK_BYTES blocks and split on b"\\n" at byte level (0x0A
+    never occurs inside a UTF-8 multibyte sequence, so decoding
+    complete lines with errors="replace" matches the old text mode).
+    Only the first MAX_LINE_BYTES of a line are kept; the rest is
+    discarded up to its newline -- a real auth line is a few hundred
+    bytes, so nothing parseable is lost. raw_len counts every raw
+    byte the line consumed (kept + discarded + newline), so the
+    caller's MAX_TOTAL_BYTES accounting bounds total work, including
+    decompressed .gz content. A final line with no trailing newline
+    is still yielded.
+    """
+    buf = bytearray()
+    raw_len = 0
+    skipping = False
+    while True:
+        chunk = stream.read(_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        pos, end = 0, len(chunk)
+        while pos < end:
+            nl = chunk.find(b"\n", pos)
+            if nl < 0:
+                seg, pos, term = chunk[pos:], end, False
+            else:
+                seg, pos, term = chunk[pos:nl], nl + 1, True
+            raw_len += len(seg) + (1 if term else 0)
+            if seg and not skipping:
+                room = MAX_LINE_BYTES - len(buf)
+                if len(seg) <= room:
+                    buf += seg
+                else:
+                    if room > 0:
+                        buf += seg[:room]
+                    skipping = True
+            if term:
+                yield bytes(buf).decode("utf-8", "replace"), raw_len
+                buf, raw_len, skipping = bytearray(), 0, False
+    if buf or raw_len:
+        yield bytes(buf).decode("utf-8", "replace"), raw_len
 
 
 def detect_brute_force(log_path, threshold=3):
@@ -126,21 +178,22 @@ def detect_brute_force(log_path, threshold=3):
             except OSError:
                 continue
         try:
-            stream = _open_line_stream(src, is_gz)
+            stream = _open_byte_stream(src, is_gz)
         except OSError:
             if is_primary:
                 raise
             continue
         try:
             with stream as f:
-                for line in f:
+                capped = False
+                for line, n_raw in _iter_capped_lines(f):
                     _count_line(line)
-                    bytes_read += len(line.encode("utf-8", "replace"))
+                    bytes_read += n_raw
                     if bytes_read > MAX_TOTAL_BYTES:
+                        capped = True
                         break
-                else:
-                    continue
-                break  # byte cap hit: stop merging further sources
+                if capped:
+                    break  # byte cap hit: stop merging further sources
         except (OSError, EOFError, zlib.error):
             # Robustness R5 (council review, 2026-10-18): a truncated
             # .gz sibling raises EOFError and a corrupt deflate stream
