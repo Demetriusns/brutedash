@@ -325,6 +325,105 @@ def _declares_entities(path):
         return False
 
 
+XML_BATCH_SIZE = 1000
+
+
+def _stream_security_xml(path, since_ts, emit, batch_size, state):
+    """Streaming core for the XML parsers (robustness M5, 2026-11-01).
+
+    Walks the export with ET.iterparse and hands each completed
+    <Event> to `emit` in batches of at most `batch_size` tuples (the
+    same tuple shape parse_security_xml has always returned). Every
+    Event element is cleared right after it is parsed, so neither a
+    DOM nor a full event list is ever held: peak memory is one Event
+    subtree plus one batch, not several times the file size (the old
+    ET.parse + list code peaked at 6.2x the file on a 20,000-event
+    export, head-measured 2026-11-04). Only Event elements are
+    cleared, and only on their end tag -- clearing a child (System /
+    EventData) on its own end tag would empty it before the enclosing
+    Event is parsed. `state` ({"count": n, "skipped": n}) is mutated
+    as batches are emitted, so a caller catching a parse error can
+    still see how far the stream got. Raises ET.ParseError / OSError.
+    """
+    batch = []
+    context = ET.iterparse(path, events=("end",))
+    try:
+        for _event, el in context:
+            if _strip_ns(el.tag) != "Event":
+                continue
+            parsed = _parse_event_xml(el)
+            el.clear()
+            if parsed is None:
+                state["skipped"] += 1
+                continue
+            if parsed["ts"] <= since_ts:
+                continue
+            fields = parsed["fields"]
+            user = (fields.get("TargetUserName")
+                    or fields.get("SubjectUserName") or "")
+            detail = {
+                "summary": _event_summary(parsed["event_id"], fields),
+                "channel": parsed["channel"],
+                "fields": fields,
+                "file": os.path.basename(path),
+            }
+            batch.append((parsed["ts"], "eventlog", parsed["event_id"],
+                          parsed["computer"], user[:128],
+                          json.dumps(detail)[:2000]))
+            if len(batch) >= batch_size:
+                emit(batch)
+                state["count"] += len(batch)
+                batch = []
+    except (ET.ParseError, OSError):
+        # Keep-what-was-parsed: events delivered before the error are
+        # real, complete Events -- flush the pending partial batch so
+        # the streaming caller keeps them, then let the error stand.
+        # (The collecting wrapper discards its list on this raise, so
+        # its all-or-nothing shape is unaffected. Events still queued
+        # inside the parser's final, error-containing block are not
+        # delivered by iterparse and are lost -- they were never
+        # complete, verified documents to this code.)
+        if batch:
+            emit(batch)
+            state["count"] += len(batch)
+        raise
+    finally:
+        close = getattr(context, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
+    if batch:
+        emit(batch)
+        state["count"] += len(batch)
+
+
+def stream_security_xml(path, since_ts=0, emit=None, batch_size=1000):
+    """Stream-parse a Windows event XML export, emitting bounded batches.
+
+    Returns (count, skipped): count events newer than `since_ts` were
+    passed to `emit(batch)` in document order, in lists of at most
+    `batch_size` (emit=None counts and discards -- a measuring pass).
+    Files that declare XML entities are rejected unparsed (see
+    _declares_entities) with the same (0, 1) shape as a parse error,
+    and emit is never called for them. On a mid-stream parse/open
+    error the batches already emitted stay emitted and the return is
+    (count_so_far, skipped + 1) -- the keep-what-was-aggregated rule
+    the pcap path adopted 2026-11-01; a garbage file with no complete
+    Event emits nothing and returns (0, 1).
+    """
+    if _declares_entities(path):
+        return 0, 1
+    state = {"count": 0, "skipped": 0}
+    try:
+        _stream_security_xml(path, since_ts, emit or (lambda batch: None),
+                             max(1, batch_size), state)
+    except (ET.ParseError, OSError):
+        return state["count"], state["skipped"] + 1
+    return state["count"], state["skipped"]
+
+
 def parse_security_xml(path, since_ts=0):
     """Parse a Windows event XML export.
 
@@ -333,38 +432,23 @@ def parse_security_xml(path, since_ts=0):
     only events newer than `since_ts` are returned (incremental).
     Files that declare XML entities are rejected unparsed (see
     _declares_entities) with the same ([], 1) shape as a parse error.
+
+    Compatibility wrapper over the streaming core: the returned list
+    is this caller's copy, and a parse/open error still discards
+    partial results ([], 1) exactly as the old ET.parse code did.
+    Production ingestion uses stream_security_xml directly and never
+    materialises the list.
     """
-    events = []
-    skipped = 0
     if _declares_entities(path):
         return [], 1
+    events = []
+    state = {"count": 0, "skipped": 0}
     try:
-        tree = ET.parse(path)
+        _stream_security_xml(path, since_ts, events.extend,
+                             XML_BATCH_SIZE, state)
     except (ET.ParseError, OSError):
         return [], 1
-    root = tree.getroot()
-    for el in root.iter():
-        if _strip_ns(el.tag) != "Event":
-            continue
-        parsed = _parse_event_xml(el)
-        if parsed is None:
-            skipped += 1
-            continue
-        if parsed["ts"] <= since_ts:
-            continue
-        fields = parsed["fields"]
-        user = (fields.get("TargetUserName") or fields.get("SubjectUserName")
-                or "")
-        detail = {
-            "summary": _event_summary(parsed["event_id"], fields),
-            "channel": parsed["channel"],
-            "fields": fields,
-            "file": os.path.basename(path),
-        }
-        events.append((parsed["ts"], "eventlog", parsed["event_id"],
-                       parsed["computer"], user[:128],
-                       json.dumps(detail)[:2000]))
-    return events, skipped
+    return events, state["skipped"]
 
 
 def _xml_max_ts(basename):
@@ -822,8 +906,15 @@ def run_ingest():
                 if ext == ".xml":
                     if state.get("mtime") == mtime:
                         continue  # unchanged export
-                    events, skipped = parse_security_xml(
-                        path, since_ts=_xml_max_ts(os.path.basename(path)))
+                    # Robustness M5: stream the export into the DB in
+                    # bounded batches -- a 50 MB export never becomes a
+                    # DOM plus a full event list in this process.
+                    n_events, skipped = stream_security_xml(
+                        path,
+                        since_ts=_xml_max_ts(os.path.basename(path)),
+                        emit=dbm.insert_host_events)
+                    summary["events"] += n_events
+                    events = []
                     new_offset = 0
                 else:  # .log / .txt: append-style firewall logs
                     offset = state.get("offset") or 0
