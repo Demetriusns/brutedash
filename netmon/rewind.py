@@ -266,27 +266,50 @@ def enforce_caps(now=None):
         for start, path in segs:
             if start < cutoff:
                 try:
-                    freed += path.stat().st_size
+                    size = path.stat().st_size
                     path.unlink()
                 except OSError:
                     fresh.append((start, path))
+                else:
+                    freed += size
             else:
                 fresh.append((start, path))
         # Size cap: keep deleting the oldest until we're under.
-        try:
-            total = sum(p.stat().st_size for _, p in fresh)
-        except OSError:
-            total = 0
-        kept = list(fresh)
-        while kept and total > max_bytes:
-            _start, path = kept.pop(0)
+        # Council review 2026-11-01 (robustness L6): stat per file --
+        # one segment vanishing mid-pass must not zero the total and
+        # disable the cap for the whole pass. A file whose stat fails
+        # is treated as vanished and dropped from kept; its bytes
+        # simply do not count toward the partial total.
+        sized = []
+        total = 0
+        for start, path in fresh:
             try:
                 size = path.stat().st_size
+            except OSError:
+                continue
+            sized.append((start, path, size))
+            total += size
+        # Evict oldest first, using the sizes already measured (no
+        # second stat race). Only a successful unlink decrements the
+        # total. A segment that cannot be unlinked (locked / AV-held
+        # on Windows) stays on disk, is counted in kept, and its size
+        # is removed from the eviction total so it cannot drive the
+        # deletion of every remaining segment this pass; the 60s
+        # backstop sweep retries it next pass.
+        kept = []
+        idx = 0
+        while idx < len(sized) and total > max_bytes:
+            _start, path, size = sized[idx]
+            try:
                 path.unlink()
+            except OSError:
+                kept.append((_start, path))
+                total -= size
+            else:
                 total -= size
                 freed += size
-            except OSError:
-                pass
+            idx += 1
+        kept.extend((start, path) for start, path, _size in sized[idx:])
     return len(kept), freed
 
 
