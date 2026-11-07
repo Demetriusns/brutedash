@@ -31,7 +31,10 @@ MAX_RESPONSE_BYTES = 64 * 1024  # a legit reply is a few hundred bytes
 
 
 def _db():
-    conn = sqlite3.connect(DB_PATH)
+    # Robustness L7 (council review, 2026-11-01): timeout=30, matching
+    # app.get_db() and netmon/db.py -- this module writes the same
+    # detections.db and must wait out a lock, not fail at the 5s default.
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     # L1 (security, 2026-10-20): same file, same self-heal as app.get_db
     # -- this module also opens detections.db and must not leave a
     # fresh copy world-readable.

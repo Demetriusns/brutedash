@@ -71,7 +71,10 @@ DB_PATH = os.path.join(BASE_DIR, "detections.db")
 
 # ---------------------------------------------------------------- persistence
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # Robustness L7 (council review, 2026-11-01): timeout=30, matching
+    # netmon/db.py -- the sqlite3 default (5s) turned a lock held by a
+    # concurrent scan/ipintel write into a 500 on /history or POST /.
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     # L1 (security, 2026-10-20): detections.db holds scan history (which
     # IPs were investigated, when) -- not world-readable. Same self-heal
     # as netmon/db.py: covers fresh files and pre-existing ones whose
@@ -379,8 +382,16 @@ Recommended actions:
 </body></html>"""
 
 
+# Robustness L7 (council review, 2026-11-01): the sample read is capped
+# at the first 256 KB. The shipped auth.log is ~2.6 KB, so a normal demo
+# visit is unaffected; the cap only bites when the sample file has been
+# replaced or grown oversized, in which case the form is pre-filled with
+# the first 256 KB and the rest is truncated (not loaded into memory).
+SAMPLE_MAX_BYTES = 256 * 1024
+
+
 def sample_log():
-    # Demo UX: pre-fill the whole sample file so a first-time visitor who
+    # Demo UX: pre-fill the sample file so a first-time visitor who
     # just hits "Analyze" immediately sees real Critical findings.
     # Robustness M4 (council review, 2026-10-25): the exists() check and
     # the open() are not atomic -- a vanished or unreadable sample file
@@ -388,7 +399,7 @@ def sample_log():
     path = os.path.join(BASE_DIR, "auth.log")
     try:
         with open(path) as f:
-            return "".join(f.readlines())
+            return f.read(SAMPLE_MAX_BYTES)
     except OSError:
         return ""
 
