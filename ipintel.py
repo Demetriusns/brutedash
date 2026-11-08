@@ -6,9 +6,10 @@ the raw log lines. This is the project's "tool use": gather evidence with a
 tool, then reason over it.
 
 Uses the free ip-api.com endpoint (no key needed). Results are cached in
-SQLite for 24h. Any failure -- no network, rate limit, reserved IP range --
-returns {} and the brief is written without enrichment. Intel never blocks
-the brief.
+SQLite for 24h; failures are cached for 10 minutes so an outage costs one
+stall per IP per window, not one per brief. Any failure -- no network,
+rate limit, reserved IP range -- returns {} and the brief is written
+without enrichment. Intel never blocks the brief.
 """
 import json
 import os
@@ -27,6 +28,11 @@ DB_PATH = os.path.join(BASE_DIR, "detections.db")
 # context only (the brief shape is validated in app.py).
 API_URL = "http://ip-api.com/json/{ip}?fields=status,country,org,proxy,hosting,query"
 CACHE_TTL = 24 * 3600  # seconds
+# Robustness L8 (council review, 2026-11-01): how long a failed lookup
+# is cached before it is retried. A negative row is stored with empty
+# country/org -- a shape _fetch() never produces (it defaults both to
+# "unknown") -- so the read path can tell it apart from a real result.
+NEGATIVE_CACHE_TTL = 10 * 60  # seconds
 MAX_RESPONSE_BYTES = 64 * 1024  # a legit reply is a few hundred bytes
 
 
@@ -73,18 +79,33 @@ def _fetch(ip):
 def lookup_ip(ip):
     """Return enrichment dict for ip, or {} when unavailable.
 
-    Cached in SQLite for 24h; never raises.
+    Cached in SQLite for 24h; failures are cached for
+    NEGATIVE_CACHE_TTL so a down endpoint is retried at most once per
+    IP per window instead of stalling every brief. Never raises, and
+    the connection is closed on every path (robustness L8: the old
+    bare-except return leaked the handle whenever _fetch raised).
     """
+    conn = None
     try:
         conn = _db()
         row = conn.execute(
             "SELECT country, org, proxy, hosting, fetched_at "
             "FROM ip_intel WHERE ip = ?", (ip,)).fetchone()
-        if row and time.time() - row[4] < CACHE_TTL:
-            conn.close()
-            return {"country": row[0], "org": row[1],
-                    "proxy": bool(row[2]), "hosting": bool(row[3])}
-        intel = _fetch(ip)
+        if row:
+            age = time.time() - row[4]
+            if row[0] == "" and row[1] == "":
+                # Negative marker (see NEGATIVE_CACHE_TTL): fresh
+                # means "known unavailable", not a real result --
+                # never return it as a positive dict.
+                if age < NEGATIVE_CACHE_TTL:
+                    return {}
+            elif age < CACHE_TTL:
+                return {"country": row[0], "org": row[1],
+                        "proxy": bool(row[2]), "hosting": bool(row[3])}
+        try:
+            intel = _fetch(ip)
+        except Exception:
+            intel = {}
         if intel:
             conn.execute(
                 "INSERT OR REPLACE INTO ip_intel "
@@ -92,11 +113,22 @@ def lookup_ip(ip):
                 "VALUES (?,?,?,?,?,?)",
                 (ip, intel["country"], intel["org"],
                  int(intel["proxy"]), int(intel["hosting"]), time.time()))
-            conn.commit()
-        conn.close()
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO ip_intel "
+                "(ip, country, org, proxy, hosting, fetched_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (ip, "", "", 0, 0, time.time()))
+        conn.commit()
         return intel
     except Exception:
         return {}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def describe(intel):
