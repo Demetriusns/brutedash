@@ -102,6 +102,15 @@ def check_listening_ports():
         # unavailable only when we truly couldn't read.
         if not os.path.exists("/proc/net/tcp"):
             return "unavailable", "not supported on this platform", set()
+    if not current and _is_windows():
+        # Council review 2026-11-08 (robustness R5): _run() returns ""
+        # on a failed/timed-out netstat, so an empty set on Windows
+        # means "could not read", not "nothing is listening" (the
+        # dashboard itself listens). Learning it as the baseline
+        # poisoned the next good run into a drift alert naming every
+        # real port. Mirror check_services: an empty enumeration is
+        # an error, never a baseline.
+        return "error", "could not read listening ports", set()
     # The canary trap is OUR OWN listener -- exclude it so the tripwire
     # never trips the "new listening port" self-alert.
     try:

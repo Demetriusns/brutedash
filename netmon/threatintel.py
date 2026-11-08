@@ -92,6 +92,10 @@ _ABUSEIPDB_CACHE_S = 24 * 3600
 _ABUSEIPDB_DAILY_CAP = 50
 
 _RDNS_CACHE_S = 7 * 86400
+# Council review 2026-11-08 (robustness R8): a FAILED or timed-out
+# lookup is not a definitive "no PTR record" -- cache those for only
+# 10 minutes (mirroring ipintel's negative-cache TTL), not 7 days.
+_RDNS_NEG_CACHE_S = 10 * 60
 
 _refresh_lock = threading.Lock()
 
@@ -418,6 +422,9 @@ def reverse_dns(ip):
 
     Returns the hostname or "". Slow/broken resolvers can't stall the
     dashboard: the lookup runs on a thread that we stop waiting for.
+    A lookup that fails or times out is cached for only
+    _RDNS_NEG_CACHE_S -- one resolver hiccup must not hide a hostname
+    for a week (council review 2026-11-08, robustness R8).
     """
     try:
         ipaddress.ip_address((ip or "").strip())
@@ -429,7 +436,9 @@ def reverse_dns(ip):
     if cached:
         try:
             data = json.loads(cached)
-            if time.time() - data.get("ts", 0) < _RDNS_CACHE_S:
+            ttl = (_RDNS_NEG_CACHE_S if data.get("neg")
+                   else _RDNS_CACHE_S)
+            if time.time() - data.get("ts", 0) < ttl:
                 return data.get("name") or ""
         except Exception:
             pass
@@ -445,8 +454,17 @@ def reverse_dns(ip):
     t.start()
     t.join(3.0)
     name = (box.get("name") or "").rstrip(".")
+    # Definitive only when the lookup actually completed with an
+    # answer. An exception in _go leaves "name" unset; a timeout
+    # leaves the thread still running. Both are negative results and
+    # get the short TTL, so a recovered resolver is re-asked within
+    # minutes instead of a week later.
+    definitive = not t.is_alive() and "name" in box
+    payload = {"ts": time.time(), "name": name}
+    if not definitive:
+        payload["neg"] = True
     try:
-        dbm.set_meta(ck, json.dumps({"ts": time.time(), "name": name}))
+        dbm.set_meta(ck, json.dumps(payload))
     except Exception:
         pass
     return name

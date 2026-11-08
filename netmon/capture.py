@@ -607,7 +607,15 @@ def run_live(interface=None, stop_event=None):
         raise RuntimeError("scapy is not installed (pip install scapy)")
     agg = FlowAggregator()
     stop_event = stop_event or threading.Event()
-    flusher = threading.Thread(target=_flush_loop, args=(agg, stop_event),
+    # Council review 2026-11-08 (robustness R1): the flusher gets its
+    # OWN stop event. The caller's event is shared (run.py passes one
+    # event to capture, the monitor loop, and shutdown); setting it in
+    # the finally below when sniff() raised turned one transient
+    # Npcap/driver error into a permanent outage -- the monitor loop
+    # exited at its next wait and the capture watchdog's restart
+    # returned instantly on the already-set event.
+    flush_stop = threading.Event()
+    flusher = threading.Thread(target=_flush_loop, args=(agg, flush_stop),
                                daemon=True)
     flusher.start()
     # Forensic rewind (netmon/rewind.py): when enabled, keep a bounded
@@ -652,7 +660,11 @@ def run_live(interface=None, stop_event=None):
                   timeout=SNIFF_TIMEOUT,
                   stop_filter=lambda _p: stop_event.is_set())
     finally:
-        stop_event.set()
+        # Stop only OUR flusher (see flush_stop above) -- never the
+        # caller's shared event. At real shutdown the caller sets the
+        # shared event, the sniff loop above exits within
+        # SNIFF_TIMEOUT, and this finally still runs the final flush.
+        flush_stop.set()
         flusher.join(timeout=FLUSH_INTERVAL + 5)
     return agg
 

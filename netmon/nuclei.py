@@ -561,7 +561,13 @@ def maybe_weekly_nuclei():
         return None
     if _nuclei_already_running():
         return None
-    dbm.set_meta("nuclei_scan_last_ts", str(time.time()))
+    # Council review 2026-11-08 (robustness R3): do NOT stamp
+    # nuclei_scan_last_ts here. Stamping at launch let one failed
+    # scan consume the whole weekly slot (the success stamp in
+    # run_full_nuclei_scan never ran, and this launch stamp made the
+    # next pass skip for 7 days). The built-in scan (scan.py) stamps
+    # on success only -- a failed attempt is retried next pass, and
+    # _nuclei_already_running() above prevents overlap meanwhile.
     start_nuclei_async()
     return True
 

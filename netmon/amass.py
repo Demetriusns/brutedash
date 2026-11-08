@@ -478,6 +478,9 @@ def run_domain_scan(domain, note="scheduled"):
             len({v for k, v, _ in rows if k == "subdomain"}),
             len({v for k, v, _ in rows if k == "ip"}),
             note=note)
+        # Council review 2026-11-08 (robustness R3): the weekly
+        # schedule stamps on success only (mirrors nuclei/scan).
+        dbm.set_meta("amass_last_ts", str(started))
         alerts_fired = 0
         if had_run and (new_subs or new_ips):
             # First run is the baseline: everything is "new", so it
@@ -554,7 +557,10 @@ def maybe_weekly_amass():
         return None
     if _amass_already_running():
         return None
-    dbm.set_meta("amass_last_ts", str(time.time()))
+    # Council review 2026-11-08 (robustness R3): do NOT stamp
+    # amass_last_ts here (see nuclei.maybe_weekly_nuclei). The stamp
+    # lives on the success path in run_domain_scan; a failed launch
+    # is retried next pass instead of eating the weekly slot.
     start_amass_async()
     return True
 

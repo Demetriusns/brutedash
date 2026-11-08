@@ -138,24 +138,34 @@ def _record_touch(src_ip, src_port):
 def _serve(sock, stop_event):
     """Accept loop: record the touch, close immediately. Never reads,
     never writes -- there is nothing useful to do with the socket."""
-    sock.settimeout(1.0)
-    while not stop_event.is_set():
-        try:
-            conn, addr = sock.accept()
-        except socket.timeout:
-            continue
-        except OSError:
-            break
-        try:
-            src_ip = addr[0] if addr else "unknown"
-            src_port = addr[1] if addr and len(addr) > 1 else 0
-        except Exception:
-            src_ip, src_port = "unknown", 0
-        try:
-            conn.close()
-        except Exception:
-            pass
-        _record_touch(src_ip, src_port)
+    try:
+        sock.settimeout(1.0)
+        while not stop_event.is_set():
+            try:
+                conn, addr = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                src_ip = addr[0] if addr else "unknown"
+                src_port = addr[1] if addr and len(addr) > 1 else 0
+            except Exception:
+                src_ip, src_port = "unknown", 0
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _record_touch(src_ip, src_port)
+    finally:
+        # Council review 2026-11-08 (robustness R4): when this listener
+        # exits (socket error, sleep/resume, driver reset), clear the
+        # running flag if we are still the recorded listener -- a stale
+        # True flag made ensure_running()/start() report success
+        # forever while the trap was actually down.
+        with _lock:
+            if _state["stop"] is stop_event:
+                _state["running"] = False
 
 
 def start(bind_ip=None):
@@ -187,7 +197,21 @@ def start(bind_ip=None):
         return False
     with _lock:
         if _state["running"]:
-            return True
+            thread = _state["thread"]
+            if thread is not None and thread.is_alive():
+                return True
+            # Council review 2026-11-08 (robustness R4): flag set but
+            # the listener thread is dead -- clear the stale state,
+            # close any stale socket, and fall through to rebind
+            # instead of returning success for a dead trap.
+            stale_sock = _state["sock"]
+            _state.update(thread=None, stop=None, sock=None,
+                          running=False)
+            if stale_sock is not None:
+                try:
+                    stale_sock.close()
+                except Exception:
+                    pass
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
