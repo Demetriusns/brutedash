@@ -82,6 +82,41 @@ class TestScrub(unittest.TestCase):
         text = "http://192.168.1.1:8080/status"
         self.assertEqual(_scrub(text), text)
 
+    # Security S3 (2026-11-09): a quoted value containing the OTHER
+    # quote character used to terminate the redaction early and leak
+    # the rest of the passphrase into the bundle.
+
+    def test_apostrophe_inside_double_quoted_value(self):
+        out = _scrub('owner_password: "don\'t tell anyone"')
+        self.assertNotIn("tell", out)
+        self.assertNotIn("anyone", out)
+
+    def test_apostrophe_inside_json_value(self):
+        out = _scrub('{"password": "don\'t tell anyone"}')
+        self.assertNotIn("tell", out)
+        self.assertNotIn("anyone", out)
+
+    def test_double_quote_inside_single_quoted_value(self):
+        out = _scrub("owner_password: 'say \"hi\" loudly now'")
+        self.assertNotIn("loudly", out)
+        self.assertNotIn("now", out)
+
+    def test_escaped_quote_inside_json_value(self):
+        out = _scrub('{"password": "say \\"hi\\" loudly now"}')
+        self.assertNotIn("loudly", out)
+        self.assertNotIn("now", out)
+
+    def test_doubled_quote_inside_single_quoted_value(self):
+        # YAML single-quoted strings escape a quote by doubling it.
+        out = _scrub("password: 'don''t tell anyone'")
+        self.assertNotIn("tell", out)
+        self.assertNotIn("anyone", out)
+
+    def test_curly_quoted_value(self):
+        out = _scrub("owner_password: “don’t tell anyone”")
+        self.assertNotIn("tell", out)
+        self.assertNotIn("anyone", out)
+
 
 if __name__ == "__main__":
     unittest.main()

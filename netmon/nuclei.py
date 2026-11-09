@@ -49,6 +49,7 @@ import threading
 import time
 
 from . import db as dbm
+from .envscrub import scrubbed_env
 
 WEEK_SECONDS = 7 * 86400
 SCAN_TIMEOUT_MIN = 30       # nuclei-side -timeout flag (seconds; see below)
@@ -104,7 +105,7 @@ def binary_version(binary=None):
     try:
         proc = subprocess.run(
             [binary, "-version"], capture_output=True, text=True,
-            timeout=15)
+            timeout=15, env=scrubbed_env())
         out = (proc.stdout or "") + (proc.stderr or "")
         m = re.search(r"v\d+\.\d+\.\d+", out)
         return m.group(0) if m else out.strip().splitlines()[0][:32]
@@ -291,10 +292,11 @@ def run_scan(targets):
                 "work_dir": work_dir}
     started = time.time()
     try:
-        # No shell=True -- argv list only.
+        # No shell=True -- argv list only. env is scrubbed (security
+        # S4): the downloaded binary never sees brutedash's secrets.
         proc = subprocess.run(
             argv, capture_output=True, text=True,
-            timeout=timeout_min * 60 + 300)
+            timeout=timeout_min * 60 + 300, env=scrubbed_env())
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "scan timed out",
                 "work_dir": work_dir}

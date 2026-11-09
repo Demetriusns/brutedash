@@ -179,6 +179,14 @@ class Heartbeat(threading.Thread):
 # 1. keyword=value (optional quotes around the separator), 2. Authorization
 # header, 3. userinfo in URLs. Over-redaction beats a leak in a bundle the
 # owner may email to support.
+# 2026-11-09 (security S3): the quoted alternative is quote-SPECIFIC and
+# escape-aware -- the closing quote must match the opening one, and an
+# escaped quote (\" in JSON/YAML double-quoted strings, '' or \' in
+# single-quoted ones) does not end the value. The old [^"'] class
+# excluded both quotes, so a value quoted with one quote and containing
+# the other ("don't tell anyone") terminated at the embedded quote and
+# leaked the rest of the passphrase; a plain quote-specific class still
+# leaked past \" and '' escapes (both reproduced by the head).
 _SECRET_KV_RE = None  # compiled lazily to keep import cheap
 _SECRET_AUTH_RE = None
 _SECRET_URL_RE = None
@@ -191,7 +199,9 @@ def _secret_res():
         _SECRET_KV_RE = re.compile(
             r"(?i)(key|token|password|passwd|pwd|"
             r"pass|secret|heartbeat_url|webhook_url)"
-            r"[\"']?\s*[:=]\s*(?:[\"'][^\"']*[\"']|\S+)")
+            r"[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\""
+            r"|'(?:\\.|''|[^'\\])*'"
+            r"|“[^”]*”|‘[^’]*’|\S+)")
         _SECRET_AUTH_RE = re.compile(
             r"(?i)(authorization\s*:\s*(?:basic|bearer)\s+)\S+")
         _SECRET_URL_RE = re.compile(

@@ -48,6 +48,7 @@ import threading
 import time
 
 from . import db as dbm
+from .envscrub import scrubbed_env
 
 # Strict hostname shape for scan targets (linear-time, no ReDoS).
 # This is the security gate: anything not shaped like a real domain
@@ -113,7 +114,7 @@ def binary_version(binary=None):
     try:
         proc = subprocess.run(
             [binary, "-version"], capture_output=True, text=True,
-            timeout=15)
+            timeout=15, env=scrubbed_env())
         out = (proc.stdout or "") + (proc.stderr or "")
         m = re.search(r"v\d+\.\d+\.\d+", out)
         return m.group(0) if m else out.strip().splitlines()[0][:32]
@@ -246,10 +247,11 @@ def run_enum(domain):
     argv = build_argv(domain, out_path, work_dir)
     started = time.time()
     try:
-        # No shell=True -- argv list only. Env passes through untouched
-        # (Amass reads its own data-source API keys from its own config).
+        # No shell=True -- argv list only. Env is scrubbed (security
+        # S4): brutedash's secrets are stripped; Amass reads its own
+        # data-source API keys from its own config file, not env vars.
         proc = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=SUBPROC_TIMEOUT_S)
+                              timeout=SUBPROC_TIMEOUT_S, env=scrubbed_env())
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "scan timed out", "work_dir": work_dir}
     except Exception as exc:
