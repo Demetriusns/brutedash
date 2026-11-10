@@ -483,20 +483,39 @@ def _host_ip_for(computer):
 # All deterministic. Watermarked via meta so each poll only looks at new
 # events; failures never break ingestion (events stay stored for retry).
 
+_NEW_EVENTS_PAGE = 5000
+
+
 def _new_events(since_ts, source=None, event_ids=()):
-    rows = dbm.host_events_since(since_ts, limit=5000)
+    # Robustness R2 (2026-11-08 council review): this used to fetch the
+    # NEWEST 5,000 rows once (host_events_since ordered ts DESC), so the
+    # oldest events of any larger backlog were never evaluated -- and
+    # each rule then stamped its watermark to `now`, skipping them
+    # forever. Now: page OLDEST-first through the whole backlog. The
+    # paging window is stable in practice: run_ingest finishes storing
+    # a pass's events before run_detection_rules runs, in the same
+    # thread, and each rule's watermark (below) advances only to the
+    # newest event it actually processed, so anything that does arrive
+    # late is retried next pass instead of discarded.
     out = []
-    for r in rows:
-        if source and r["source"] != source:
-            continue
-        if event_ids and r["event_id"] not in event_ids:
-            continue
-        try:
-            r["_detail"] = json.loads(r["detail"] or "{}")
-        except Exception:
-            r["_detail"] = {}
-        out.append(r)
-    return out
+    offset = 0
+    while True:
+        rows = dbm.host_events_since(
+            since_ts, limit=_NEW_EVENTS_PAGE, offset=offset,
+            ascending=True)
+        for r in rows:
+            if source and r["source"] != source:
+                continue
+            if event_ids and r["event_id"] not in event_ids:
+                continue
+            try:
+                r["_detail"] = json.loads(r["detail"] or "{}")
+            except Exception:
+                r["_detail"] = {}
+            out.append(r)
+        if len(rows) < _NEW_EVENTS_PAGE:
+            return out
+        offset += len(rows)
 
 
 def _watermark(key):
@@ -572,7 +591,11 @@ def check_failed_logons():
             ts=now,
         )
         fired += 1
-    dbm.set_meta("ingest_correlate_4625_ts", str(now))
+    # R2: advance only to the newest event actually processed, never
+    # to wall-clock `now` -- events stored with an older ts after this
+    # pass must be seen next pass, not skipped.
+    dbm.set_meta("ingest_correlate_4625_ts",
+                 str(max(ev["ts"] for ev in events)))
     return fired
 
 
@@ -614,7 +637,8 @@ def check_new_services():
             ts=now,
         )
         fired += 1
-    dbm.set_meta("ingest_correlate_7045_ts", str(now))
+    dbm.set_meta("ingest_correlate_7045_ts",
+                 str(max(ev["ts"] for ev in events)))
     return fired
 
 
@@ -687,7 +711,8 @@ def check_usb_devices():
             ts=now,
         )
         fired += 1
-    dbm.set_meta("ingest_correlate_usb_ts", str(now))
+    dbm.set_meta("ingest_correlate_usb_ts",
+                 str(max(ev["ts"] for ev in events)))
     return fired
 
 
@@ -824,7 +849,8 @@ def check_defender():
             ts=now,
         )
         fired += 1
-    dbm.set_meta("ingest_correlate_defender_ts", str(now))
+    dbm.set_meta("ingest_correlate_defender_ts",
+                 str(max(ev["ts"] for ev in events)))
     return fired
 
 

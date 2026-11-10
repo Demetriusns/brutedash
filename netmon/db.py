@@ -2915,7 +2915,14 @@ def insert_host_events(rows):
         conn.commit()
 
 
-def host_events_since(ts, limit=200):
+def host_events_since(ts, limit=200, offset=0, ascending=False):
+    # Default stays newest-first: the dashboard's recent-events view
+    # relies on it. ascending=True (ingest rules, R2) pages oldest-first
+    # with a stable ts/id order and an offset, so a backlog can be
+    # walked in full instead of capped at the newest `limit` rows.
+    # The ORDER BY text is one of two fixed strings chosen by the bool
+    # -- never caller-supplied SQL.
+    order = "ts ASC, id ASC" if ascending else "ts DESC"
     with _lock:
         conn = _db()
         return [
@@ -2925,7 +2932,8 @@ def host_events_since(ts, limit=200):
             for i, t, s, e, c, u, d, m in conn.execute(
                 "SELECT id, ts, source, event_id, computer, user_name,"
                 " detail, matched_alert FROM host_events WHERE ts > ?"
-                " ORDER BY ts DESC LIMIT ?", (ts, limit))]
+                f" ORDER BY {order} LIMIT ? OFFSET ?",
+                (ts, limit, offset))]
 
 
 def mark_host_event_matched(event_id, alert_id):
