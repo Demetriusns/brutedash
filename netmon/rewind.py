@@ -26,6 +26,7 @@ touches the buffer (that is someone else's capture, not your network).
 """
 import os
 import struct
+import sys
 import threading
 import time
 from pathlib import Path
@@ -48,6 +49,7 @@ FLUSH_EVERY_SECONDS = 5.0
 _lock = threading.Lock()
 _ENABLED = False               # set by refresh(); capture checks this
 _seg_file = None               # open file handle for the current segment
+_seg_path = None               # path of the current segment (R6)
 _seg_start = 0                 # epoch the current segment started
 _seg_bytes = 0
 _seg_since_flush = 0
@@ -141,9 +143,38 @@ def _disk_ok(directory):
         return True  # can't tell: keep recording rather than break
 
 
+def _is_active(start, path):
+    """True when (start, path) is the segment currently open for
+    writing. Council review 2026-11-08 (robustness R6): the active
+    segment must never be evicted — on POSIX unlinking it succeeds
+    and record_packet() keeps writing to an unlinked inode, so the
+    forensic window silently loses everything since the unlink; on
+    Windows the unlink just fails and is retried every sweep. The
+    segment becomes evictable at the next rotation, when _rotate()
+    closes it.
+
+    Identification: path equality with _seg_path (compared via
+    realpath, per the 2026-11-12 council ADAPT), with a start-epoch
+    fallback for state constructed without _rotate() — a same-second
+    suffix sibling of the active segment may then be kept one extra
+    rotation, which is the safe direction."""
+    if _seg_file is None:
+        return False
+    if _seg_path is not None:
+        try:
+            if os.path.realpath(str(path)) == os.path.realpath(
+                    str(_seg_path)):
+                return True
+        except OSError:
+            if path == _seg_path:
+                return True
+    return start == _seg_start
+
+
 def _rotate(now):
     """Close the current segment, open a fresh one. Caller holds _lock."""
-    global _seg_file, _seg_start, _seg_bytes, _seg_since_flush, _seg_last_flush
+    global _seg_file, _seg_path, _seg_start, _seg_bytes
+    global _seg_since_flush, _seg_last_flush
     if _seg_file is not None:
         try:
             _seg_file.flush()
@@ -151,6 +182,7 @@ def _rotate(now):
         except Exception:
             pass
         _seg_file = None
+        _seg_path = None
     _seg_start = int(now)
     _seg_bytes = 0
     _seg_since_flush = 0
@@ -167,6 +199,7 @@ def _rotate(now):
         path = directory / f"{base}_{n}.pcap"
     try:
         _seg_file = open(path, "ab")
+        _seg_path = path
         try:
             os.chmod(path, 0o600)  # raw packets: owner-only (see above)
         except OSError:
@@ -175,6 +208,7 @@ def _rotate(now):
         _seg_bytes = len(_GLOBAL_HDR)
     except OSError:
         _seg_file = None
+        _seg_path = None
 
 
 def record_packet(raw, ts=None):
@@ -253,18 +287,26 @@ def maybe_record(pkt):
 
 def enforce_caps(now=None):
     """Delete oldest segments until both caps hold. Returns (kept, freed
-    bytes). Never raises. Called on rotation and from run.py's loop."""
+    bytes). Never raises. Called on rotation and from run.py's loop.
+
+    The segment currently open for writing is never deleted (R6): it
+    becomes evictable at the next rotation instead."""
     now = now if now is not None else time.time()
     max_minutes, max_bytes = _caps()
     directory = rewind_dir()
     freed = 0
     with _lock:
         segs = _segments(directory)
-        # Time cap first: anything older than the window goes.
+        # Time cap first: anything older than the window goes. The
+        # ACTIVE segment is exempt (R6, _is_active): it may be older
+        # than a small configured window while still being written,
+        # because segments rotate only every SEGMENT_SECONDS.
         cutoff = now - max_minutes * 60
         fresh = []
         for start, path in segs:
-            if start < cutoff:
+            if _is_active(start, path):
+                fresh.append((start, path))
+            elif start < cutoff:
                 try:
                     size = path.stat().st_size
                     path.unlink()
@@ -300,6 +342,28 @@ def enforce_caps(now=None):
         idx = 0
         while idx < len(sized) and total > max_bytes:
             _start, path, size = sized[idx]
+            if _is_active(_start, path):
+                # R6: the active segment is never evicted. Like an
+                # undeletable segment (L6 below), it stays in kept and
+                # its size leaves the eviction total, so protecting it
+                # cannot drive deletion of newer segments. If it alone
+                # exceeds the cap, say so once per pass — silently
+                # holding an over-cap live buffer would hide a
+                # retention misconfiguration (council ADAPT,
+                # 2026-11-12).
+                kept.append((_start, path))
+                total -= size
+                if size > max_bytes:
+                    try:
+                        print(f"netmon rewind: active segment"
+                              f" {path.name} is {size} bytes, over the"
+                              f" {int(max_bytes)}-byte cap on its own;"
+                              f" it stays until rotation",
+                              file=sys.stderr)
+                    except Exception:
+                        pass
+                idx += 1
+                continue
             try:
                 path.unlink()
             except OSError:
@@ -490,7 +554,8 @@ def status(now=None):
 
 def _reset_for_tests():
     """Close the current segment. Tests only."""
-    global _seg_file, _seg_start, _seg_bytes, _seg_since_flush, _seg_last_flush
+    global _seg_file, _seg_path, _seg_start, _seg_bytes
+    global _seg_since_flush, _seg_last_flush
     global _ENABLED
     with _lock:
         if _seg_file is not None:
@@ -500,6 +565,7 @@ def _reset_for_tests():
             except Exception:
                 pass
         _seg_file = None
+        _seg_path = None
         _seg_start = 0
         _seg_bytes = 0
         _seg_since_flush = 0
