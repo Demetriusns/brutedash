@@ -110,7 +110,8 @@ DEFAULTS = {
         # longer actionable goes. The forensic rewind buffer has its own
         # bounds (rewind_minutes / rewind_max_mb) and is not pruned here.
         "flows_days": 30,          # raw flow records (the bulk of the DB)
-        "observations_days": 30,   # dns_queries + arp_observations
+        "observations_days": 30,   # dns_queries + arp_observations + device_hostnames
+        "host_events_days": 90,    # ingested Windows/firewall host events (security history)
         "alerts_days": 365,        # alert history (open/escalated cases exempt)
         "summaries_days": 90,      # AI/plain-English summaries
         "outages_days": 365,       # internet uptime log
@@ -256,7 +257,8 @@ auth:
 
 retention:
   flows_days: 30            # raw flow records (the bulk of the database)
-  observations_days: 30     # dns_queries + arp_observations
+  observations_days: 30     # dns_queries + arp_observations + device hostname observations
+  host_events_days: 90      # ingested Windows/firewall host events (security history)
   alerts_days: 365          # alert history -- alerts on OPEN or ESCALATED cases are never pruned
   summaries_days: 90        # AI/plain-English summaries
   outages_days: 365         # internet uptime log

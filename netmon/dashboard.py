@@ -1576,7 +1576,8 @@ async function loadRetention(){
   try {
     const r = await fetch("/api/retention");
     const d = await r.json();
-    const labels = {flows_days:"Flow records", observations_days:"DNS/ARP observations",
+    const labels = {flows_days:"Flow records", observations_days:"DNS/ARP/hostname observations",
+      host_events_days:"Windows host events",
       alerts_days:"Alerts", summaries_days:"Summaries", outages_days:"Internet uptime log",
       score_snapshots_days:"Score snapshots"};
     let html = "<table><tr><th>Data</th><th>Kept</th></tr>" +

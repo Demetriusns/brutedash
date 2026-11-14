@@ -7,6 +7,18 @@ prune job (daily, from the monitor loop) deletes expired rows; the
 dashboard's Settings panel shows the policy and the last prune run, and
 owners can trigger a prune on demand.
 
+Two windows have distinct rationales (R7, 2026-11-14):
+  * ``device_hostnames`` is an asset-fold cache -- raw DHCP/mDNS
+    observations whose only reader folds the latest name per MAC. It
+    shares the 30d ``observations_days`` window with the fold's other
+    inputs (dns_queries, arp_observations), so a device unseen for
+    30 days loses all of its observation inputs together. The curated
+    ``device_names`` table (owner-set names) is NOT pruned.
+  * ``host_events`` is security history -- ingested Windows Event Log
+    and firewall events that alerts correlate against -- so it gets
+    its own longer window, ``host_events_days`` (default 90d), under
+    its own config key, never the observations window.
+
 SAFETY RULES (deliberate, documented):
   * Alerts attached to OPEN or ESCALATED cases are NEVER pruned -- only
     history that is no longer actionable goes. (Every alert lands in a
@@ -16,8 +28,10 @@ SAFETY RULES (deliberate, documented):
   * Deletes run in bounded batches (prune_batch rows per DELETE, default
     5000) so the database never locks for minutes on a big prune.
   * Ongoing outages (end_ts NULL) are never pruned, whatever their age.
-  * Scan findings, threat-intel feeds, the asset inventory, device
-    names/types, the allowlist, and the audit trail are NOT pruned here:
+  * Scan findings, threat-intel feeds, the asset inventory, curated
+    device names/types (device_names -- not the raw device_hostnames
+    observations above), the allowlist, and the audit trail are NOT
+    pruned here:
     findings describe current exposure (small), feeds are replaced
     wholesale on refresh, the rest is configuration -- and the audit log
     is append-only by design (batch 9: the trail cannot be rewritten
@@ -46,6 +60,8 @@ _PRUNE_SQL = {
     "flows": "DELETE FROM flows WHERE ts < ? LIMIT ?",
     "dns_queries": "DELETE FROM dns_queries WHERE ts < ? LIMIT ?",
     "arp_observations": "DELETE FROM arp_observations WHERE ts < ? LIMIT ?",
+    "device_hostnames": "DELETE FROM device_hostnames WHERE ts < ? LIMIT ?",
+    "host_events": "DELETE FROM host_events WHERE ts < ? LIMIT ?",
     "summaries": "DELETE FROM summaries WHERE ts < ? LIMIT ?",
     "outages": ("DELETE FROM outages WHERE start_ts < ?"
                 " AND end_ts IS NOT NULL LIMIT ?"),
@@ -73,6 +89,11 @@ _TABLES = [
     ("flows", "flows_days"),
     ("dns_queries", "observations_days"),
     ("arp_observations", "observations_days"),
+    # Raw hostname observations: same 30d window as the asset fold's
+    # other inputs (see the module docstring's R7 note).
+    ("device_hostnames", "observations_days"),
+    # Ingested host security events: own longer window, own key.
+    ("host_events", "host_events_days"),
     ("summaries", "summaries_days"),
     ("outages", "outages_days"),
     ("score_snapshots", "score_snapshots_days"),
