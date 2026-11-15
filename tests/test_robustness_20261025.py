@@ -146,8 +146,12 @@ class TestRunWiring(unittest.TestCase):
             src = fh.read()
         for step in ("weekly-scan", "amass", "nuclei"):
             self.assertIn(f'safe_step("{step}"', src)
-        # The three calls are the only timeout=DETECT_INTERVAL uses.
-        self.assertEqual(src.count("timeout=DETECT_INTERVAL"), 3)
+        # The three scanner calls plus ingest (council review
+        # 2026-11-15, robustness N1: a huge ingest backlog gets the
+        # same detach-instead-of-wedging deadline) are the only
+        # timeout=DETECT_INTERVAL uses.
+        self.assertIn('safe_step("ingest"', src)
+        self.assertEqual(src.count("timeout=DETECT_INTERVAL"), 4)
 
 
 if __name__ == "__main__":

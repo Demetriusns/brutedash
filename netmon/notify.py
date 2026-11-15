@@ -93,35 +93,56 @@ def dropped_job_count():
         return _dropped_jobs
 
 
+_worker_thread = None
+
+
 def _ensure_worker():
-    global _worker_started
+    global _worker_started, _worker_thread
     with _worker_lock:
-        if not _worker_started:
-            threading.Thread(target=_worker_loop, name="notify-worker",
-                             daemon=True).start()
-            _worker_started = True
+        if (_worker_started and _worker_thread is not None
+                and _worker_thread.is_alive()):
+            return
+        # Council review 2026-11-15 (robustness L3): the started flag
+        # alone used to be trusted forever -- the same dead-thread
+        # defect R4 fixed in canary.start(). If the worker died, mail
+        # silently stopped for the process lifetime while every send
+        # kept queueing. A dead recorded thread is restarted here.
+        _worker_thread = threading.Thread(
+            target=_worker_loop, name="notify-worker", daemon=True)
+        _worker_thread.start()
+        _worker_started = True
 
 
 def _worker_loop():
-    while True:
-        try:
-            job = _job_queue.get()
-        except Exception:
-            continue
-        try:
-            kind, payload = job
-            if kind == "alert":
-                _maybe_send_alert(payload)
-            elif kind == "digest":
-                _send_digest()
-        except Exception as exc:
+    global _worker_started, _worker_thread
+    try:
+        while True:
             try:
-                print(f"netmon notify: worker job failed: {exc}",
-                      file=sys.stderr)
+                job = _job_queue.get()
             except Exception:
-                pass
-        finally:
-            _job_queue.task_done()
+                continue
+            try:
+                kind, payload = job
+                if kind == "alert":
+                    _maybe_send_alert(payload)
+                elif kind == "digest":
+                    _send_digest()
+            except Exception as exc:
+                try:
+                    print(f"netmon notify: worker job failed: {exc}",
+                          file=sys.stderr)
+                except Exception:
+                    pass
+            finally:
+                _job_queue.task_done()
+    finally:
+        # Clear the recorded state on exit so the next _ensure_worker
+        # restarts the worker (L3). Only the recorded thread may
+        # clear it -- a replacement may already be running.
+        with _worker_lock:
+            if _worker_thread is threading.current_thread():
+                _worker_started = False
+                _worker_thread = None
 
 
 def _clean(text):
@@ -417,8 +438,6 @@ def in_quiet_hours(kind, now=None):
         if not isinstance(w, dict):
             continue
         days = w.get("days")
-        if days and day not in days:
-            continue
         start = _parse_hhmm(w.get("start") or "")
         end = _parse_hhmm(w.get("end") or "")
         if start is None or end is None:
@@ -427,9 +446,22 @@ def in_quiet_hours(kind, now=None):
         if "all" not in kinds and kind not in kinds:
             continue
         if start < end:
-            inside = start <= mins < end
-        else:  # wraps midnight
-            inside = mins >= start or mins < end
+            inside = (not days or day in days) and start <= mins < end
+        elif start > end:
+            # Wraps midnight (council review 2026-11-15, robustness
+            # R9): the before-midnight half belongs to today's
+            # weekday, but the after-midnight half belongs to the
+            # window that STARTED yesterday -- test it against
+            # yesterday's weekday. The old single `day not in days`
+            # gate meant "Fri 22:00-06:00" was not quiet Sat 03:00.
+            prev_day = (day - 1) % 7
+            inside = ((mins >= start and (not days or day in days))
+                      or (mins < end
+                          and (not days or prev_day in days)))
+        else:
+            # start == end: a zero-length window covers the whole
+            # day (the pre-R9 wrap test was true at every minute).
+            inside = not days or day in days
         if inside:
             return True
     return False

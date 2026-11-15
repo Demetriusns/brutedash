@@ -191,7 +191,13 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
         # if it's configured); every 5 minutes is plenty for log files.
         if now - last_ingest >= 300:
             last_ingest = now
-            pipelinem.safe_step("ingest", _ingest)
+            # Council review 2026-11-15 (robustness N1): same
+            # one-interval deadline as the scanner steps -- a huge
+            # ingest backlog detaches instead of wedging the loop;
+            # safe_step's in-flight registry skips an overlapping
+            # ingest pass while one is still running.
+            pipelinem.safe_step("ingest", _ingest,
+                                timeout=DETECT_INTERVAL)
         # Sensor-box self-health (selfcheck.py decides if it's due).
         pipelinem.safe_step("selfcheck", _selfcheck)
         # External attack-surface mapping (amass.py decides if it's due,

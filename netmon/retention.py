@@ -140,26 +140,33 @@ def _prune_table(table, cutoff, batch):
     """
     total = 0
     try:
-        with dbm._lock:
-            conn = dbm._db()
-            if table == "alerts":
-                while True:
+        conn = dbm._db()
+        if table == "alerts":
+            while True:
+                # Council review 2026-11-15 (robustness N2): the DB
+                # lock is held per batch only, never across the whole
+                # prune. Batches already commit individually; holding
+                # the shared lock for the full loop starved the
+                # capture flusher and every dashboard query for the
+                # duration of a first-run prune of a legacy table.
+                with dbm._lock:
                     conn.execute(_PRUNE_ALERT_MAPPINGS, (cutoff, batch))
                     cur = conn.execute(_PRUNE_ALERTS, (cutoff, batch))
                     n = cur.rowcount or 0
                     conn.commit()
-                    total += n
-                    if n < batch:
-                        break
-            else:
-                sql = _PRUNE_SQL[table]
-                while True:
+                total += n
+                if n < batch:
+                    break
+        else:
+            sql = _PRUNE_SQL[table]
+            while True:
+                with dbm._lock:
                     cur = conn.execute(sql, (cutoff, batch))
                     n = cur.rowcount or 0
                     conn.commit()
-                    total += n
-                    if n < batch:
-                        break
+                total += n
+                if n < batch:
+                    break
     except Exception as exc:
         _log(f"prune of {table} failed partway ({exc!r});"
              f" {total} rows deleted before the failure")

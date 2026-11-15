@@ -484,6 +484,16 @@ def _host_ip_for(computer):
 # events; failures never break ingestion (events stay stored for retry).
 
 _NEW_EVENTS_PAGE = 5000
+# Council review 2026-11-15 (robustness N1): per-pass ceiling on the
+# rows one rule will process. The R2 fix paged the whole backlog with
+# no ceiling and filtered in Python, so a large backlog (monitor down
+# a weekend; 90 days of host_events now retained) was materialised in
+# full by EVERY rule on EVERY pass -- and a rule with no matching
+# events never advanced its watermark, so the next pass did it all
+# again. Rows past the ceiling are carried over: the watermark only
+# advances to the newest event actually processed (R2 semantics), so
+# the remainder is picked up next pass.
+_MAX_EVENTS_PER_PASS = 20000
 
 
 def _new_events(since_ts, source=None, event_ids=()):
@@ -491,23 +501,27 @@ def _new_events(since_ts, source=None, event_ids=()):
     # NEWEST 5,000 rows once (host_events_since ordered ts DESC), so the
     # oldest events of any larger backlog were never evaluated -- and
     # each rule then stamped its watermark to `now`, skipping them
-    # forever. Now: page OLDEST-first through the whole backlog. The
+    # forever. Now: page OLDEST-first through the backlog. The
     # paging window is stable in practice: run_ingest finishes storing
     # a pass's events before run_detection_rules runs, in the same
     # thread, and each rule's watermark (below) advances only to the
     # newest event it actually processed, so anything that does arrive
     # late is retried next pass instead of discarded.
+    # Council review 2026-11-15 (robustness N1): the source/event_id
+    # filter now runs in SQL (host_events_since), not in Python after
+    # the fetch, and a pass stops at _MAX_EVENTS_PER_PASS rows. The
+    # ceiling never strands a row: pages are oldest-first and the
+    # watermark is ts-only, so when the ceiling lands mid-way through
+    # a same-ts group the pass keeps paging until that group ends --
+    # otherwise the unprocessed remainder of the group would share
+    # the watermark ts and be skipped forever.
     out = []
     offset = 0
     while True:
         rows = dbm.host_events_since(
             since_ts, limit=_NEW_EVENTS_PAGE, offset=offset,
-            ascending=True)
+            ascending=True, source=source, event_ids=event_ids)
         for r in rows:
-            if source and r["source"] != source:
-                continue
-            if event_ids and r["event_id"] not in event_ids:
-                continue
             try:
                 r["_detail"] = json.loads(r["detail"] or "{}")
             except Exception:
@@ -516,6 +530,12 @@ def _new_events(since_ts, source=None, event_ids=()):
         if len(rows) < _NEW_EVENTS_PAGE:
             return out
         offset += len(rows)
+        if len(out) >= _MAX_EVENTS_PER_PASS:
+            nxt = dbm.host_events_since(
+                since_ts, limit=1, offset=offset, ascending=True,
+                source=source, event_ids=event_ids)
+            if not nxt or nxt[0]["ts"] != out[-1]["ts"]:
+                return out
 
 
 def _watermark(key):
@@ -545,23 +565,35 @@ def check_failed_logons():
         if not ip or ip in ("-", "127.0.0.1", "::1"):
             continue
         by_ip.setdefault(ip, []).append(ev)
-        # Correlate: did the network see this IP acting hostile recently?
+    # Correlate once per distinct IP, not once per event (council
+    # review 2026-11-15, robustness N1: this was 3 DB queries per
+    # event, so a 3,000-event backlog cost 9,000 queries). A match
+    # marks every event from that IP, as the per-event loop did.
+    for ip, evs in by_ip.items():
         for kind in ("port_scan", "beaconing", "unusual_port"):
             row = dbm.query(
                 "SELECT id, title FROM alerts WHERE kind=? AND detail LIKE ?"
                 " AND ts > ? ORDER BY ts DESC LIMIT 1",
                 (kind, f"%{ip}%", now - 86400))
             if row:
-                dbm.mark_host_event_matched(ev["id"], row[0][0])
+                for ev in evs:
+                    dbm.mark_host_event_matched(ev["id"], row[0][0])
                 break
     fired = 0
     for ip, evs in by_ip.items():
         evs.sort(key=lambda e: e["ts"])
-        # sliding window: any 10-minute span with 5+ failures
+        # Sliding window: any 10-minute span with 5+ failures.
+        # Two pointers (N1: the old count-from-every-index scan was
+        # O(n^2) in the backlog size for one IP).
         burst = False
+        j = 0
         for i, ev in enumerate(evs):
-            n = sum(1 for e in evs[i:] if e["ts"] - ev["ts"] <= _FAILED_LOGON_WINDOW)
-            if n >= _FAILED_LOGON_BURST:
+            if j < i:
+                j = i
+            while (j < len(evs)
+                   and evs[j]["ts"] - ev["ts"] <= _FAILED_LOGON_WINDOW):
+                j += 1
+            if j - i >= _FAILED_LOGON_BURST:
                 burst = True
                 break
         if not burst:

@@ -294,10 +294,15 @@ def parse_jsonl_text(text):
     total-line caps bound memory. Returns [{name, domain, ips, cidrs,
     asns, tag, sources}].
     """
-    assets = []
     if not text:
-        return assets
-    for i, line in enumerate(text.splitlines()):
+        return []
+    return _parse_jsonl_lines(text.splitlines())
+
+
+def _parse_jsonl_lines(lines):
+    """Per-line parse shared by parse_jsonl_text and parse_jsonl_file."""
+    assets = []
+    for i, line in enumerate(lines):
         if i >= MAX_JSONL_LINES:
             break
         line = line.strip()
@@ -347,11 +352,28 @@ def parse_jsonl_text(text):
     return assets
 
 
+# Council review 2026-11-15 (robustness R10): same streaming fix as
+# nuclei.py -- no whole-file read + splitlines copy; a total byte cap
+# (counted in characters; scanner JSONL is ASCII in practice) keeps
+# partial results instead of peaking at 2-3x the file size in RAM.
+MAX_JSONL_BYTES = 256 * 1024 * 1024
+
+
+def _capped_lines(fh):
+    seen = 0
+    for line in fh:
+        seen += len(line)
+        if seen > MAX_JSONL_BYTES:
+            return
+        yield line
+
+
 def parse_jsonl_file(path):
-    """Parse a -json output file. Never raises; missing file -> []."""
+    """Parse a -json output file, streaming. Never raises;
+    missing file -> []."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            return parse_jsonl_text(fh.read())
+            return _parse_jsonl_lines(_capped_lines(fh))
     except OSError:
         return []
 

@@ -2915,14 +2915,31 @@ def insert_host_events(rows):
         conn.commit()
 
 
-def host_events_since(ts, limit=200, offset=0, ascending=False):
+def host_events_since(ts, limit=200, offset=0, ascending=False,
+                      source=None, event_ids=()):
     # Default stays newest-first: the dashboard's recent-events view
     # relies on it. ascending=True (ingest rules, R2) pages oldest-first
     # with a stable ts/id order and an offset, so a backlog can be
     # walked in full instead of capped at the newest `limit` rows.
     # The ORDER BY text is one of two fixed strings chosen by the bool
     # -- never caller-supplied SQL.
+    # Council review 2026-11-15 (robustness N1): optional source /
+    # event_id filters are applied in SQL with bound parameters, so a
+    # caller that only wants a few event kinds never materialises the
+    # rows it would only discard in Python (the R2 paging fix fetched
+    # EVERY host event since the watermark into one list per rule).
     order = "ts ASC, id ASC" if ascending else "ts DESC"
+    where = "WHERE ts > ?"
+    params = [ts]
+    if source:
+        where += " AND source = ?"
+        params.append(source)
+    ids = list(event_ids or ())
+    if ids:
+        where += (" AND event_id IN ("
+                  + ",".join("?" for _ in ids) + ")")
+        params.extend(ids)
+    params.extend((limit, offset))
     with _lock:
         conn = _db()
         return [
@@ -2931,9 +2948,9 @@ def host_events_since(ts, limit=200, offset=0, ascending=False):
              "detail": d or "", "matched_alert": m}
             for i, t, s, e, c, u, d, m in conn.execute(
                 "SELECT id, ts, source, event_id, computer, user_name,"
-                " detail, matched_alert FROM host_events WHERE ts > ?"
+                f" detail, matched_alert FROM host_events {where}"
                 f" ORDER BY {order} LIMIT ? OFFSET ?",
-                (ts, limit, offset))]
+                tuple(params))]
 
 
 def mark_host_event_matched(event_id, alert_id):

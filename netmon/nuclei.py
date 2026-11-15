@@ -360,10 +360,15 @@ def parse_jsonl_text(text):
     severity (OUR scale; None when it should never alert), nuclei_severity,
     matched_at, description, cves}].
     """
-    findings = []
     if not text:
-        return findings
-    for i, line in enumerate(text.splitlines()):
+        return []
+    return _parse_jsonl_lines(text.splitlines())
+
+
+def _parse_jsonl_lines(lines):
+    """Per-line parse shared by parse_jsonl_text and parse_jsonl_file."""
+    findings = []
+    for i, line in enumerate(lines):
         if i >= MAX_JSONL_LINES:
             break
         line = line.strip()
@@ -396,11 +401,30 @@ def parse_jsonl_text(text):
     return findings
 
 
+# Council review 2026-11-15 (robustness R10): parse_jsonl_file used
+# to fh.read() the whole scanner output and splitlines() a second
+# copy -- a runaway output peaked at 2-3x its size in RAM on a small
+# box. Files are now streamed line by line under a total byte cap
+# (counted in characters; scanner JSONL is ASCII in practice), and
+# findings parsed before the cap are kept.
+MAX_JSONL_BYTES = 256 * 1024 * 1024
+
+
+def _capped_lines(fh):
+    seen = 0
+    for line in fh:
+        seen += len(line)
+        if seen > MAX_JSONL_BYTES:
+            return
+        yield line
+
+
 def parse_jsonl_file(path):
-    """Parse a -jsonl output file. Never raises; missing file -> []."""
+    """Parse a -jsonl output file, streaming. Never raises;
+    missing file -> []."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            return parse_jsonl_text(fh.read())
+            return _parse_jsonl_lines(_capped_lines(fh))
     except OSError:
         return []
 
