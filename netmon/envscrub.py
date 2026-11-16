@@ -18,7 +18,15 @@ property, and two copies in two modules would drift.
 import os
 
 # Uppercase substrings that mark an env var name as secret-bearing.
-_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS")
+# 2026-11-16 (security S4-residual): HEARTBEAT/WEBHOOK/AUTH/CREDENTIAL/
+# PRIVATE added -- BRUTEDASH_MONITOR_HEARTBEAT_URL is a capability URL
+# (health.py's scrub list already treats heartbeat_url/webhook_url as
+# secrets) and it used to pass untouched to the scanner subprocesses;
+# the same gap covered any *_AUTH / *_CREDENTIAL / *_WEBHOOK_* name.
+# Over-scrubbing is safe here: neither scanner needs any of these.
+_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS",
+                   "HEARTBEAT", "WEBHOOK", "AUTH", "CREDENTIAL",
+                   "PRIVATE")
 
 
 def is_secret_name(name):

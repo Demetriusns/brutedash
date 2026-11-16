@@ -187,6 +187,13 @@ class Heartbeat(threading.Thread):
 # the other ("don't tell anyone") terminated at the embedded quote and
 # leaked the rest of the passphrase; a plain quote-specific class still
 # leaked past \" and '' escapes (both reproduced by the head).
+# 2026-11-16 (security S3-residual): the UNQUOTED fallback used to be
+# \S+ (first word only), so a YAML plain (unquoted) multi-word
+# passphrase still leaked every word after the first into the bundle.
+# The fallback now consumes to end-of-line -- it only ever fires after
+# a known secret keyword, and per the rule above over-redaction on
+# that line beats a leak. Per-line scope keeps the rest of the bundle
+# (next lines) untouched.
 _SECRET_KV_RE = None  # compiled lazily to keep import cheap
 _SECRET_AUTH_RE = None
 _SECRET_URL_RE = None
@@ -201,7 +208,7 @@ def _secret_res():
             r"pass|secret|heartbeat_url|webhook_url)"
             r"[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\""
             r"|'(?:\\.|''|[^'\\])*'"
-            r"|“[^”]*”|‘[^’]*’|\S+)")
+            r"|“[^”]*”|‘[^’]*’|\S[^\r\n]*)")
         _SECRET_AUTH_RE = re.compile(
             r"(?i)(authorization\s*:\s*(?:basic|bearer)\s+)\S+")
         _SECRET_URL_RE = re.compile(
