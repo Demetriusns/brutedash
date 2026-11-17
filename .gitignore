@@ -3,6 +3,8 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+ssh_key_state.json
+ssh_key_state.json.tmp
 .env
 venv/
 wifimon.local.cap

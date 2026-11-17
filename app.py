@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask, request, render_template_string
 
-from detector import detect_brute_force
+from detector import detect_brute_force, detect_cadence, detect_key_events
 from ipintel import lookup_ip, describe as describe_intel
 from netmon import config as cfgm
 
@@ -67,6 +67,10 @@ def _security_headers(resp):
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "detections.db")
+# First-seen SSH key history for detector.detect_key_events (B2,
+# council review 2026-11-17): persists across scans so a key that was
+# present in earlier scans is established, not "new" forever.
+KEY_STATE_PATH = os.path.join(BASE_DIR, "ssh_key_state.json")
 
 
 # ---------------------------------------------------------------- persistence
@@ -345,7 +349,7 @@ RESULTS_HTML = """<html><head><title>brutedash results</title><style>""" + STYLE
 {% if findings %}
 <table><tr><th>IP</th><th>Failed attempts</th><th>Severity</th><th></th><th></th></tr>
 {% for f in findings %}
-<tr><td>{{ f.ip }}</td><td>{{ f.count }}</td>
+<tr><td>{{ f.ip }}{% if f.detail %}<br><small style="color:#8b949e">{{ f.detail }}</small>{% endif %}</td><td>{{ f.count }}</td>
 <td class="{{ f.severity|lower }}">{{ f.severity }}</td>
 <td>{% if f.repeat %}<span class="tag">repeat attacker</span>{% endif %}</td>
 <td><form method="post" action="/brief" style="margin:0">
@@ -355,6 +359,10 @@ RESULTS_HTML = """<html><head><title>brutedash results</title><style>""" + STYLE
 <button type="submit">Generate brief</button></form></td></tr>
 {% endfor %}</table>
 {% else %}<p>No brute-force activity detected.</p>{% endif %}
+{% if coverage %}
+<h2>SSH key visibility</h2>
+<ul>{% for c in coverage %}<li><strong>{{ c.host }}</strong> -- {{ c.note }}</li>{% endfor %}</ul>
+{% endif %}
 <p><a href="/">New scan</a> | <a href="/history">History</a></p>
 </body></html>"""
 
@@ -422,8 +430,32 @@ def index():
         with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as tmp:
             tmp.write(log_text)
             tmp_path = tmp.name
+        coverage = []
         try:
             findings = detect_brute_force(tmp_path, threshold=3)
+            # Cadence + first-seen-key passes (council review
+            # 2026-11-17, ARTEX B1/B2): additive -- a failure in the
+            # new passes must never lose the brute-force result.
+            try:
+                findings += detect_cadence(tmp_path)
+                key_result = detect_key_events(
+                    tmp_path, state_path=KEY_STATE_PATH)
+                findings += key_result["findings"]
+                coverage = key_result["coverage"]
+            except Exception:
+                coverage = []
+            # The windowed burst finding times the break-in; when it
+            # fires for an IP it supersedes the count-based one.
+            burst_ips = {f["ip"] for f in findings
+                         if f.get("kind") == "login_after_burst"}
+            if burst_ips:
+                findings = [f for f in findings
+                            if not (f.get("kind")
+                                    == "login_after_bruteforce"
+                                    and f["ip"] in burst_ips)]
+            _sev = {"Critical": 0, "High": 1, "Medium": 2}
+            findings.sort(key=lambda f: (_sev.get(f["severity"], 9),
+                                         -f["count"]))
         finally:
             # Robustness M4: a locked/busy temp file on Windows raises
             # on unlink -- that must never mask the scan result.
@@ -436,7 +468,8 @@ def index():
             f["repeat"] = f["ip"] in seen
         scanned_at = save_detections(findings)
         return render_template_string(RESULTS_HTML, findings=findings,
-                                      scanned_at=scanned_at)
+                                      scanned_at=scanned_at,
+                                      coverage=coverage)
     return render_template_string(INDEX_HTML, sample=sample_log())
 
 

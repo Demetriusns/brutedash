@@ -271,6 +271,49 @@ RULES = [
                   ".test_new_busy_domain_fires"],
     },
     {
+        "id": "llm_egress",
+        "title": "New AI-service contact under login attack",
+        "module": "netmon/detect.py",
+        "rule": "check_llm_egress (runs every minute)",
+        "description": ("Catches a device that has never (or only just)"
+                        " used AI services suddenly reaching out to them"
+                        " while someone is hammering its login services"
+                        " -- the shape of the newest break-in tools,"
+                        " which get in and then let an AI do the"
+                        " attacking (FBI FLASH-20261113-001)."),
+        "trigger": ("A device whose first recorded contact with a known"
+                    " AI endpoint (static provider list, matched on DNS"
+                    " lookups) is less than 7 days old contacts one in"
+                    " the last 24 hours, AND in the same 24 hours either"
+                    " 10+ inbound connections hit its login services"
+                    " (ports 22, 3389, 445) or a failed-logon burst was"
+                    " logged on this computer."),
+        "severities": ["High"],
+        "mitre_id": "T1071.001",
+        "mitre_name": "Application Layer Protocol: Web Protocols",
+        "mitre_tactic": "Command and Control",
+        "fp_profile": ("Someone on the device genuinely just started"
+                       " using an AI tool at the same time as unrelated"
+                       " login noise -- their own mistyped passwords, a"
+                       " scanner sweeping the street. The rule needs"
+                       " both halves together, and any device with a"
+                       " week or more of open AI use is treated as an"
+                       " established AI user and never fires, which"
+                       " keeps the owner's own AI tools quiet."),
+        "recognize_fp": ("Ask the device's user: did you just start a"
+                         " chatbot, coding assistant, or other AI app?"
+                         " If yes, and the login pressure has an"
+                         " innocent explanation, it is benign. If nobody"
+                         " started anything AI, treat it as a break-in."),
+        "tuning": ("24-hour cooldown per device. The endpoint list is"
+                   " a static, maintained list of AI provider"
+                   " addresses; encrypted DNS (DoH), hard-coded IPs,"
+                   " and third-party AI reseller gateways are invisible"
+                   " to the DNS matching and are a known blind spot."),
+        "tests": ["tests/test_detection_poc.py::LlmEgressPocTests"
+                  ".test_unbaselined_with_login_attack_fires"],
+    },
+    {
         "id": "new_device",
         "title": "New device joined",
         "module": "netmon/detect.py",

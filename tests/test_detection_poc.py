@@ -485,5 +485,94 @@ class BehaviorDeviationPocTests(_ScratchDb):
         self.assertEqual(self._alerts(), [])
 
 
+# --- LLM egress (ARTEX batch B3, council review 2026-11-17) -----------------
+
+
+class LlmEgressPocTests(_ScratchDb):
+    SRC = "192.168.1.5"
+    ATTACKER = "203.0.113.9"
+
+    def _dns(self, now, name="api.deepseek.com", ip=None):
+        return [(now - 300, ip or self.SRC, name, 1)]
+
+    def _auth_flows(self, now, n=12, dst=None):
+        # inbound connections to the device's SSH port from outside
+        return [(now - 600 - i * 30, self.ATTACKER, dst or self.SRC,
+                 40000 + i, 22, "TCP", 1, 200, "inbound")
+                for i in range(n)]
+
+    def test_unbaselined_with_login_attack_fires(self):
+        now = time.time()
+        dbm.insert_dns_queries(self._dns(now))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            fired = detm.check_llm_egress(now=now)
+        self.assertEqual(fired, [("llm_egress", self.SRC)])
+        self.assertIn(("llm_egress", "High"), self._alerts())
+
+    def test_no_login_attack_stays_quiet_and_baselines(self):
+        now = time.time()
+        dbm.insert_dns_queries(self._dns(now))
+        with dbm.notifications_paused():
+            self.assertEqual(detm.check_llm_egress(now=now), [])
+        self.assertEqual(self._alerts(), [])
+        # ...but the sighting is recorded, so the baseline can form.
+        self.assertIsNotNone(dbm.get_first_seen("llm_egress", self.SRC))
+
+    def test_baselined_device_stays_quiet(self):
+        # Task edge case: baselined/sanctioned AI egress must NOT
+        # fire, even with login pressure at the same time.
+        now = time.time()
+        dbm.note_first_seen("llm_egress", self.SRC, now - 8 * 86400)
+        dbm.insert_dns_queries(self._dns(now))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            self.assertEqual(detm.check_llm_egress(now=now), [])
+        self.assertEqual(self._alerts(), [])
+
+    def test_login_attack_without_ai_stays_quiet(self):
+        now = time.time()
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            self.assertEqual(detm.check_llm_egress(now=now), [])
+        self.assertEqual(self._alerts(), [])
+
+    def test_non_llm_dns_stays_quiet(self):
+        now = time.time()
+        dbm.insert_dns_queries(self._dns(now, name="api.example.com"))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            self.assertEqual(detm.check_llm_egress(now=now), [])
+        self.assertEqual(self._alerts(), [])
+
+    def test_lookalike_domain_stays_quiet(self):
+        now = time.time()
+        dbm.insert_dns_queries(
+            self._dns(now, name="api.openai.com.evil.example"))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            self.assertEqual(detm.check_llm_egress(now=now), [])
+        self.assertEqual(self._alerts(), [])
+
+    def test_provider_subdomain_matches(self):
+        now = time.time()
+        dbm.insert_dns_queries(
+            self._dns(now, name="eu.api.anthropic.com"))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            fired = detm.check_llm_egress(now=now)
+        self.assertEqual(fired, [("llm_egress", self.SRC)])
+
+    def test_cooldown_one_alert_per_day(self):
+        now = time.time()
+        dbm.insert_dns_queries(self._dns(now))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            detm.check_llm_egress(now=now)
+            fired2 = detm.check_llm_egress(now=now)
+        self.assertEqual(fired2, [])
+        self.assertEqual(len(self._alerts()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

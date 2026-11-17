@@ -67,6 +67,12 @@ _TECHNIQUES = {
         "Command and Control",
         "First contact with a new outside address can be C2 being set up.",
     ),
+    "llm_egress": (
+        "T1071.001", "Application Layer Protocol: Web Protocols",
+        "Command and Control",
+        "A foothold phoning an AI service is an attack framework asking"
+        " its model what to do next (FBI FLASH-20261113-001).",
+    ),
     "new_busy_domain": (
         "T1568.002", "Domain Generation Algorithms",
         "Defense Evasion",

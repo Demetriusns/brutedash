@@ -2,7 +2,7 @@
 
 > GENERATED FROM `netmon/detection_catalog.py` -- do not edit by hand. Re-render with `python -m netmon.detection_catalog --render`.
 
-Every rule that can raise an alert in brutedash (26 rules), what it watches for, what it maps to in MITRE ATT&CK, what benign things set it off, and the test that proves it fires.
+Every rule that can raise an alert in brutedash (27 rules), what it watches for, what it maps to in MITRE ATT&CK, what benign things set it off, and the test that proves it fires.
 
 Design principles, from the roadmap: AI narrates, code decides -- deterministic rules fire alerts; the model only explains them. Quiet is a feature -- every dismissal must make tomorrow quieter.
 
@@ -203,6 +203,28 @@ Something new installed or opened recently = expected. Nothing new = search the 
 1-hour cooldown per device+domain.
 
 **Proven by:** `tests/test_detection_poc.py::NewBusyDomainPocTests.test_new_busy_domain_fires`
+
+### `llm_egress` -- New AI-service contact under login attack
+
+- **What it detects:** Catches a device that has never (or only just) used AI services suddenly reaching out to them while someone is hammering its login services -- the shape of the newest break-in tools, which get in and then let an AI do the attacking (FBI FLASH-20261113-001).
+- **Fires when:** A device whose first recorded contact with a known AI endpoint (static provider list, matched on DNS lookups) is less than 7 days old contacts one in the last 24 hours, AND in the same 24 hours either 10+ inbound connections hit its login services (ports 22, 3389, 445) or a failed-logon burst was logged on this computer.
+- **Severity:** High
+- **MITRE:** T1071.001 Application Layer Protocol: Web Protocols (Command and Control)
+- **Where it lives:** `netmon/detect.py` -- check_llm_egress (runs every minute)
+
+**False positives (be honest):**
+
+Someone on the device genuinely just started using an AI tool at the same time as unrelated login noise -- their own mistyped passwords, a scanner sweeping the street. The rule needs both halves together, and any device with a week or more of open AI use is treated as an established AI user and never fires, which keeps the owner's own AI tools quiet.
+
+**How to tell a false positive from a real one:**
+
+Ask the device's user: did you just start a chatbot, coding assistant, or other AI app? If yes, and the login pressure has an innocent explanation, it is benign. If nobody started anything AI, treat it as a break-in.
+
+**Tuning:**
+
+24-hour cooldown per device. The endpoint list is a static, maintained list of AI provider addresses; encrypted DNS (DoH), hard-coded IPs, and third-party AI reseller gateways are invisible to the DNS matching and are a known blind spot.
+
+**Proven by:** `tests/test_detection_poc.py::LlmEgressPocTests.test_unbaselined_with_login_attack_fires`
 
 ### `new_device` -- New device joined
 

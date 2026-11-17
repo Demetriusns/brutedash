@@ -40,6 +40,7 @@ KIND_TO_SLUG = {
     "nuclei_finding": "risky-service",
     "cve_match": "known-exploited-software",
     "host_event": "brute-force",
+    "llm_egress": "llm-egress",
     "usb_insert": "usb-drive",
     "defender_detection": "defender-detection",
     "host_compromise": "host-compromise",
@@ -624,6 +625,45 @@ GUIDES = {
         ],
         "escalate": ("Persistent gibberish domains, or a flagged domain"
                      " with ongoing lookups, are worth an admin's time."),
+    },
+    "llm-egress": {
+        "found": [
+            "A device that never used AI services before suddenly"
+            " started talking to one -- at the same time as someone was"
+            " hammering its login services. The newest break-in tools"
+            " work exactly like that: a person gets in, then hands the"
+            " keyboard to an AI, and the AI needs to reach its service"
+            " out on the internet to work.",
+            "Either half alone is ordinary. New AI apps are normal, and"
+            " login noise is constant. Both landing on the same device"
+            " in the same day is the pattern that matters.",
+        ],
+        "do": [
+            ("Ask the device's user first",
+             "Did anyone just start a chatbot, a coding assistant, or"
+             " another AI tool on that device? A yes with an innocent"
+             " explanation for the login noise (their own mistyped"
+             " passwords) closes this out."),
+            ("Check the login side",
+             "Open the alert and see which login service took the"
+             " hits -- SSH, Remote Desktop, or file sharing. Work the"
+             " brute-force guide for that side of the story."),
+            ("If nobody started anything AI, isolate the device",
+             "Disconnect it from the network but leave it powered on."
+             " An AI-driven intruder needs that connection to work;"
+             " cutting it stops the session without wiping evidence."),
+            ("Change passwords from a clean device",
+             "Assume the login they were hammering may have given way."
+             " Change that account's password from a different,"
+             " trusted device -- never from the suspect one."),
+            ("Watch for the key trick",
+             "These intruders plant SSH keys and new accounts so they"
+             " can come back. Check the device for accounts and keys"
+             " nobody recognizes."),
+        ],
+        "escalate": ("A device nobody can explain the AI contact for,"
+                     " or any sign a login actually succeeded, is worth"
+                     " escalating to a professional."),
     },
     "brute-force": {
         "found": [

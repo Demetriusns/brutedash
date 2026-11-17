@@ -15,6 +15,8 @@ SYN timing). Everything here runs on a schedule against the flows table:
   arp_spoof ARP lies: one MAC claiming many IPs, or an IP changing MAC
   behavior_deviation a device moving far more than its own learned
     hourly baseline (per-device profiles -- quiet-first)
+  llm_egress a device with no established AI use contacting known AI
+    endpoints while login attacks hit it (ARTEX pattern)
 
 Every alert carries plain-English fields (meaning / is_this_normal /
 what_to_do) so a non-technical reader can understand it. Each rule
@@ -710,6 +712,134 @@ def check_dns_anomalies(now=None):
     return fired
 
 
+# --- LLM egress (council review 2026-11-17, ARTEX batch B3) ----------------
+# FBI FLASH-20261113-001: autonomous attack frameworks carry no model of
+# their own -- they plug into external LLMs, so the first network sign
+# of a foothold can be a compromised host suddenly talking to AI
+# endpoints it never used before. Endpoint classification uses a STATIC
+# list of provider API hosts (the innovation seat's variant, adopted):
+# destination identity stays deterministic and auditable, and a learned
+# destination set could be trained by the attacker. Whether a device
+# is an established AI user IS learned per device (first_seen), the
+# new_external_ip baseline pattern. Known blind spots, by design of the
+# data: encrypted DNS (DoH), hard-coded IPs, and third-party AI
+# reseller gateways are invisible to DNS-name matching.
+LLM_ENDPOINT_SUFFIXES = (
+    "api.anthropic.com", "api.openai.com", "api.deepseek.com",
+    "open.bigmodel.cn", "api.x.ai", "api.groq.com",
+    "generativelanguage.googleapis.com", "api.mistral.ai",
+    "api.cohere.com", "api.cohere.ai", "openrouter.ai",
+    "api.together.xyz", "api.fireworks.ai", "api.perplexity.ai",
+    "openai.azure.com",
+)
+LLM_WINDOW = 24 * 3600          # egress + correlation look-back
+LLM_BASELINE_S = 7 * 24 * 3600  # a week of open AI use = established
+LLM_AUTH_PORTS = (22, 3389, 445)  # SSH / RDP / SMB login services
+LLM_AUTH_FLOW_MIN = 10          # inbound login-service flows = pressure
+LLM_COOLDOWN = 24 * 3600
+
+
+def _llm_endpoint(name):
+    """The known LLM API endpoint a DNS name belongs to, or None.
+    Suffix match on a dot boundary, so lookalike names
+    (evil-api.openai.com.evil.example, notapi.openai.com) never match."""
+    n = (name or "").strip().rstrip(".").lower()
+    for suf in LLM_ENDPOINT_SUFFIXES:
+        if n == suf or n.endswith("." + suf):
+            return suf
+    return None
+
+
+def check_llm_egress(now=None):
+    """Flag a device with no established AI use that starts contacting
+    known AI endpoints WHILE login attacks are hitting it.
+
+    Both halves are required -- the correlation is the false-positive
+    control. AI egress alone is how legitimate tools look; login
+    pressure alone is the brute-force rules' job. A device whose first
+    AI contact is at least LLM_BASELINE_S old is an established AI user
+    and never fires, which is what keeps the owner's own AI tooling
+    (this dashboard's briefs included) quiet.
+    """
+    now = now or time.time()
+    rows = dbm.query(
+        "SELECT src_ip, name FROM dns_queries WHERE ts > ?",
+        (now - LLM_WINDOW,))
+    by_ip = {}
+    for src_ip, name in rows:
+        if not src_ip or not name:
+            continue
+        ep = _llm_endpoint(name)
+        if ep:
+            by_ip.setdefault(src_ip, set()).add(ep)
+    if not by_ip:
+        return []
+    local_ips = _local_ips(now)
+    fired = []
+    for ip in sorted(by_ip):
+        first = dbm.get_first_seen("llm_egress", ip)
+        if first is None:
+            dbm.note_first_seen("llm_egress", ip, now)
+            first = now
+        if now - first >= LLM_BASELINE_S:
+            continue  # established AI user -- sanctioned by history
+        # Correlation (a): inbound login-service pressure in flows.
+        placeholders = ",".join("?" for _ in LLM_AUTH_PORTS)
+        auth_flows = dbm.query(
+            "SELECT COUNT(*) FROM flows WHERE dst_ip=?"
+            " AND direction='inbound'"
+            f" AND dst_port IN ({placeholders}) AND ts > ?",
+            (ip, *LLM_AUTH_PORTS, now - LLM_WINDOW))[0][0]
+        correlated = auth_flows >= LLM_AUTH_FLOW_MIN
+        corr_text = (f"{auth_flows} inbound connections to its login"
+                     f" services (ports 22, 3389, 445) in the last"
+                     f" 24 hours")
+        # Correlation (b): this box itself took a failed-logon burst
+        # (the monitor host is the highest-value target on the LAN).
+        if not correlated and ip in local_ips \
+                and dbm.recent_alert_kind("host_event", "4625",
+                                          LLM_WINDOW):
+            correlated = True
+            corr_text = ("a burst of failed logins on this computer"
+                         " in the last 24 hours")
+        if not correlated:
+            continue
+        if dbm.recent_alert_kind("llm_egress", ip, LLM_COOLDOWN):
+            continue
+        dev = _device_label(ip)
+        dev_s = _device_sentence(ip)
+        endpoints = ", ".join(sorted(by_ip[ip]))
+        dbm.add_alert(
+            "llm_egress", "High",
+            f"Talking to AI services while under login attack ({dev})",
+            (f"{dev_s} looked up AI service addresses ({endpoints})"
+             f" in the last 24 hours, and this device has no history"
+             f" of using AI services before this week. At the same"
+             f" time it took {corr_text}."),
+            meaning=("The newest break-in tools let an AI do the"
+                     " attacking: a person gets into a device, then"
+                     " the AI takes over -- and the AI has to talk to"
+                     " an AI service out on the internet to work. A"
+                     " device that never used AI before suddenly"
+                     " reaching for it, at the same moment someone is"
+                     " battering its login door, is that pattern."),
+            is_normal=("Fine if someone on that device just started"
+                       " using an AI tool on purpose -- a new chatbot"
+                       " app or coding assistant. It is only suspicious"
+                       " here because the login attacks landed at the"
+                       " same time. Devices with a week or more of AI"
+                       " use on record never trigger this."),
+            what_to_do=("Ask whoever uses that device whether they"
+                        " just started an AI tool. If nobody did, treat"
+                        " the device as broken into: disconnect it from"
+                        " the network, leave it powered on, and work"
+                        " the brute-force guide for the login side."),
+            ts=now,
+        )
+        fired.append(("llm_egress", ip))
+    return fired
+
+
 def check_new_devices(now=None):
     """Flag hardware addresses never seen on the local network before.
 
@@ -1070,6 +1200,7 @@ _RULES = (
     check_beaconing,
     check_baseline_anomalies,
     check_dns_anomalies,
+    check_llm_egress,
     check_new_devices,
     check_arp_spoof,
     check_behavior_deviation,
