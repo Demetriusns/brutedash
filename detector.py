@@ -37,6 +37,7 @@ import json
 import os
 import re
 import statistics
+import threading
 import zlib
 
 SEVERITY_HIGH_CUTOFF = 10  # from the session #3 SPL stretch: count > 10 -> High
@@ -392,112 +393,160 @@ def _ip_after_from(line):
 
 
 def _collect_events(log_path):
-    """One capped pass over log_path + rotated siblings, OLDEST first,
-    returning auth events in stream order:
+    """One capped pass over log_path + rotated siblings, returning
+    auth events in stream order:
         {"ts", "kind", "ip", "user", "host", "fingerprint", "primary"}
     kind is "fail" (Failed password), "accept" (Accepted password) or
     "key" (Accepted publickey; fingerprint None when the line carries
     none, i.e. sshd is not at LogLevel VERBOSE). ts is None when the
     line has no parseable timestamp.
 
-    Chronological order is the point of this pass, so sources are read
-    oldest-sibling-first and the primary last -- the reverse of
-    detect_brute_force, whose aggregates are order-independent and
-    which therefore protects the primary from the byte cap first. The
-    same 64 MB total cap bounds this pass; in practice rotated sets
-    are a few MB. Syslog year repair: timestamps have no year, so when
-    a syslog event lands more than 180 days before the previous syslog
-    event in the stream, the stream has crossed a New Year and a year
-    is added (logrotate sets are chronological, so this is safe).
+    Council review 2026-11-22 (robustness H2): the primary log is read
+    FIRST into its own list under the byte cap, and siblings are then
+    read oldest-first under whatever cap remains -- previously the
+    oldest-first order let one large (decompressed) sibling consume
+    the whole 64 MB cap and silently starve the primary, blinding the
+    cadence and first-seen-key passes to the live attack. The merged
+    result is still chronological (siblings + primary). Syslog year
+    repair: timestamps have no year, so when a syslog event lands more
+    than 180 days before the previous syslog event in its source, the
+    stream has crossed a New Year and a year is added; after merging,
+    the primary's syslog events are shifted forward a year at a time
+    while its first syslog event still lands more than 180 days
+    before the last sibling syslog event (the cross-source wrap).
     """
-    events = []
-    sources = _rotated_siblings(log_path) + [(log_path, False)]
-    bytes_read = 0
-    wrap_years = 0
-    last_syslog_ts = None
+    def _make_handler(events):
+        state = {"wrap_years": 0, "last": None}
 
-    def _handle(line, is_primary):
-        nonlocal wrap_years, last_syslog_ts
-        if "Failed password" not in line and "Accepted" not in line:
-            return
-        ts, is_syslog, parts = _parse_timestamp(line)
-        if is_syslog and parts is not None:
-            ts = calendar.timegm((2000 + wrap_years,) + parts + (0, 0, 0))
-            if (last_syslog_ts is not None
-                    and ts < last_syslog_ts - _YEAR_WRAP_S):
-                wrap_years += 1
-                ts = calendar.timegm((2000 + wrap_years,) + parts
-                                     + (0, 0, 0))
-            last_syslog_ts = ts
-        host = _host_token(line, bool(_TS_ISO_RE.match(line)))
-        if "Failed password" in line:
-            ip = _ip_after_from(line)
-            if ip is None:
+        def _handle(line, is_primary):
+            if "Failed password" not in line and "Accepted" not in line:
                 return
-            m = _USER_RE.search(line)
-            events.append({"ts": ts, "kind": "fail", "ip": ip,
-                           "user": m.group(1) if m else "",
-                           "host": host, "fingerprint": None,
-                           "primary": is_primary})
-        elif "Accepted publickey" in line:
-            m = _KEY_RE.search(line)
-            if m:
-                user, ip = m.group(1), m.group(2)
-                try:
-                    ipaddress.ip_address(ip)
-                except ValueError:
-                    return
-                fp = m.group(4)
-            else:
+            ts, is_syslog, parts = _parse_timestamp(line)
+            year = None
+            if is_syslog and parts is not None:
+                year = 2000 + state["wrap_years"]
+                ts = calendar.timegm((year,) + parts + (0, 0, 0))
+                if (state["last"] is not None
+                        and ts < state["last"] - _YEAR_WRAP_S):
+                    state["wrap_years"] += 1
+                    year = 2000 + state["wrap_years"]
+                    ts = calendar.timegm((year,) + parts + (0, 0, 0))
+                state["last"] = ts
+            host = _host_token(line, bool(_TS_ISO_RE.match(line)))
+            extra = {"_parts": parts if is_syslog else None,
+                     "_year": year}
+            if "Failed password" in line:
                 ip = _ip_after_from(line)
                 if ip is None:
                     return
-                um = _USER_RE.search(line)
-                user = um.group(1) if um else ""
-                fp = None
-            events.append({"ts": ts, "kind": "key", "ip": ip,
-                           "user": user, "host": host,
-                           "fingerprint": fp, "primary": is_primary})
-        elif "Accepted password" in line:
-            ip = _ip_after_from(line)
-            if ip is None:
-                return
-            m = _USER_RE.search(line)
-            events.append({"ts": ts, "kind": "accept", "ip": ip,
-                           "user": m.group(1) if m else "",
-                           "host": host, "fingerprint": None,
-                           "primary": is_primary})
+                m = _USER_RE.search(line)
+                events.append({"ts": ts, "kind": "fail", "ip": ip,
+                               "user": m.group(1) if m else "",
+                               "host": host, "fingerprint": None,
+                               "primary": is_primary, **extra})
+            elif "Accepted publickey" in line:
+                m = _KEY_RE.search(line)
+                if m:
+                    user, ip = m.group(1), m.group(2)
+                    try:
+                        ipaddress.ip_address(ip)
+                    except ValueError:
+                        return
+                    fp = m.group(4)
+                else:
+                    ip = _ip_after_from(line)
+                    if ip is None:
+                        return
+                    um = _USER_RE.search(line)
+                    user = um.group(1) if um else ""
+                    fp = None
+                events.append({"ts": ts, "kind": "key", "ip": ip,
+                               "user": user, "host": host,
+                               "fingerprint": fp,
+                               "primary": is_primary, **extra})
+            elif "Accepted password" in line:
+                ip = _ip_after_from(line)
+                if ip is None:
+                    return
+                m = _USER_RE.search(line)
+                events.append({"ts": ts, "kind": "accept", "ip": ip,
+                               "user": m.group(1) if m else "",
+                               "host": host, "fingerprint": None,
+                               "primary": is_primary, **extra})
+        return _handle
 
-    for src, is_gz in sources:
-        is_primary = (src == log_path)
+    def _read(src, is_gz, is_primary, events, budget):
+        """Read one source into events under a byte budget; returns
+        bytes consumed. Sibling failures are best-effort; a primary
+        open failure raises, as before."""
+        if budget <= 0:
+            return 0
         if not is_primary:
             try:
                 if os.path.getsize(src) > MAX_TOTAL_BYTES:
-                    continue
+                    return 0
             except OSError:
-                continue
+                return 0
         try:
             stream = _open_byte_stream(src, is_gz)
         except OSError:
             if is_primary:
                 raise
-            continue
+            return 0
+        handle = _make_handler(events)
+        consumed = 0
         try:
             with stream as f:
-                capped = False
                 for line, n_raw in _iter_capped_lines(f):
-                    _handle(line, is_primary)
-                    bytes_read += n_raw
-                    if bytes_read > MAX_TOTAL_BYTES:
-                        capped = True
+                    handle(line, is_primary)
+                    consumed += n_raw
+                    if consumed > budget:
                         break
-                if capped:
-                    break
         except (OSError, EOFError, zlib.error):
             if is_primary:
                 raise
             # best-effort for siblings, as in detect_brute_force
+        return consumed
+
+    primary_events = []
+    consumed = _read(log_path, False, True, primary_events,
+                     MAX_TOTAL_BYTES)
+    sibling_events = []
+    remaining = MAX_TOTAL_BYTES - consumed
+    for src, is_gz in _rotated_siblings(log_path):
+        if remaining <= 0:
+            break
+        remaining -= _read(src, is_gz, False, sibling_events, remaining)
+
+    # Cross-source New-Year wrap: shift the primary's syslog events
+    # forward until they no longer land far before the siblings' end.
+    if sibling_events and primary_events:
+        sib_last = None
+        for ev in sibling_events:
+            if ev["_parts"] is not None and ev["ts"] is not None:
+                sib_last = ev["ts"]
+        prim_sys = [ev for ev in primary_events
+                    if ev["_parts"] is not None and ev["ts"] is not None]
+        if sib_last is not None and prim_sys:
+            shift = 0
+            while (prim_sys[0]["ts"] is not None
+                   and _shifted(prim_sys[0], shift)
+                   < sib_last - _YEAR_WRAP_S):
+                shift += 1
+            if shift:
+                for ev in prim_sys:
+                    ev["ts"] = _shifted(ev, shift)
+
+    events = sibling_events + primary_events
+    for ev in events:
+        ev.pop("_parts", None)
+        ev.pop("_year", None)
     return events
+
+
+def _shifted(ev, shift):
+    return calendar.timegm((ev["_year"] + shift,) + ev["_parts"]
+                           + (0, 0, 0))
 
 
 def _burst_windows(times):
@@ -580,19 +629,34 @@ def detect_cadence(log_path):
             findings.append({"ip": ip, "count": count, "severity": "High",
                              "kind": "burst_cadence", "detail": detail})
         # Username enumeration: distinct names inside the window.
+        # Council review 2026-11-22 (robustness H1): sliding window
+        # with incremental per-user counts -- the previous version
+        # rebuilt the window's user set for every index (O(n*window);
+        # 20k failures from one IP took ~12s). The best window's user
+        # set is snapshotted only when the distinct count improves
+        # (bounded by distinct users, not events).
         pairs = sorted(fail_users.get(ip, []))
-        seen_users = {}
+        seen_users = set()
+        window_counts = {}
         j = 0
         enum_best = 0
         for i, (t, user) in enumerate(pairs):
             if j < i:
                 j = i
             while j < len(pairs) and pairs[j][0] - t <= ENUM_WINDOW_S:
+                u = pairs[j][1]
+                if u:
+                    window_counts[u] = window_counts.get(u, 0) + 1
                 j += 1
-            window_users = {u for _, u in pairs[i:j] if u}
-            if len(window_users) > enum_best:
-                enum_best = len(window_users)
-                seen_users = window_users
+            if len(window_counts) > enum_best:
+                enum_best = len(window_counts)
+                seen_users = set(window_counts)
+            if user:
+                left = window_counts.get(user, 0) - 1
+                if left > 0:
+                    window_counts[user] = left
+                else:
+                    window_counts.pop(user, None)
         if enum_best >= ENUM_MIN_USERS:
             names = ", ".join(sorted(seen_users)[:8])
             findings.append({
@@ -629,6 +693,12 @@ def _key_id(ev):
     return f"{ev['host']}|{ev['user']}|{ev['fingerprint']}"
 
 
+# Council review 2026-11-22 (robustness M4): the key-state file is
+# shared by every threaded scan; serialise load->merge->save so
+# concurrent writers cannot lose or tear each other's updates.
+_KEY_STATE_LOCK = threading.Lock()
+
+
 def _load_key_state(state_path):
     """Persisted first-seen key history {key_id: {"first_seen", "ip"}}.
     A missing or corrupt file reads as empty history -- the safe
@@ -638,7 +708,23 @@ def _load_key_state(state_path):
         with open(state_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         keys = data.get("keys") if isinstance(data, dict) else None
-        return keys if isinstance(keys, dict) else {}
+        if not isinstance(keys, dict):
+            return {}
+        # Council review 2026-11-22 (robustness M1): shape-valid but
+        # type-wrong values (e.g. an int, or a string first_seen) used
+        # to crash _save_key_state's sort and discard the whole pass.
+        # Keep only entries the rest of the code can actually use.
+        clean = {}
+        for kid, val in keys.items():
+            if not isinstance(val, dict):
+                continue
+            first = val.get("first_seen")
+            if first is not None and (isinstance(first, bool)
+                                      or not isinstance(first,
+                                                        (int, float))):
+                continue
+            clean[kid] = val
+        return clean
     except (OSError, ValueError):
         return {}
 
@@ -648,20 +734,30 @@ def _save_key_state(state_path, keys):
     KEY_STATE_MAX entries, newest first-seen kept. A failed save
     degrades the next pass to sibling history only -- it must never
     crash the analysis, so OSError is swallowed here deliberately."""
-    items = sorted(keys.items(),
-                   key=lambda kv: (kv[1].get("first_seen") or 0),
+    def _sort_key(kv):
+        val = kv[1]
+        first = val.get("first_seen") if isinstance(val, dict) else None
+        return first if isinstance(first, (int, float)) \
+            and not isinstance(first, bool) else 0
+    items = sorted(keys.items(), key=_sort_key,
                    reverse=True)[:KEY_STATE_MAX]
     payload = {"version": 1, "keys": dict(items)}
-    tmp = state_path + ".tmp"
+    # Council review 2026-11-22 (robustness M4 + security S7): a unique
+    # tmp name per writer (concurrent threaded scans used to write the
+    # same tmp file and tear each other's saves), created 0600 from
+    # the start instead of chmod-after-replace.
+    tmp = (f"{state_path}.{os.getpid()}."
+           f"{threading.get_ident()}.tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f)
         os.replace(tmp, state_path)
         try:
             os.chmod(state_path, 0o600)
         except OSError:
             pass
-    except OSError:
+    except (OSError, TypeError, AttributeError, ValueError):
         try:
             os.unlink(tmp)
         except OSError:
@@ -688,12 +784,35 @@ def detect_key_events(log_path, state_path=None):
     records what it sees, reports coverage, and fires nothing, rather
     than calling every existing key "new".
     """
+    # The lock is held for the whole state-dependent pass (M4):
+    # load, the known-set, and the final merge/save must observe one
+    # consistent state snapshot.
+    _lock = _KEY_STATE_LOCK if state_path else None
+    if _lock is not None:
+        _lock.acquire()
+    try:
+        return _detect_key_events_inner(log_path, state_path)
+    finally:
+        if _lock is not None:
+            _lock.release()
+
+
+def _detect_key_events_inner(log_path, state_path=None):
     events = _collect_events(log_path)
     key_events = [e for e in events if e["kind"] == "key"]
     accepts = [e for e in events if e["kind"] == "accept"]
 
     state = _load_key_state(state_path) if state_path else {}
-    has_history = bool(state) or bool(_rotated_siblings(log_path))
+    # Council review 2026-11-22 (robustness M2): history means KEY
+    # history -- an empty or unreadable rotated sibling used to count
+    # as history and fire first-seen alerts for every established key
+    # on the first scan after a log rotation. A sibling only counts
+    # when it actually contributed a fingerprinted key event.
+    has_history = bool(state)
+
+    if not has_history:
+        has_history = any(not ev["primary"] and ev["fingerprint"]
+                          for ev in key_events)
 
     known = set(state)
     for ev in key_events:

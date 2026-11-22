@@ -67,10 +67,13 @@ def _security_headers(resp):
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "detections.db")
-# First-seen SSH key history for detector.detect_key_events (B2,
-# council review 2026-11-17): persists across scans so a key that was
-# present in earlier scans is established, not "new" forever.
-KEY_STATE_PATH = os.path.join(BASE_DIR, "ssh_key_state.json")
+# Council review 2026-11-22 (security S6): the demo scan is
+# unauthenticated, so it must NOT persist first-seen SSH key state --
+# anyone who could reach the demo could pre-seed a fingerprint they
+# plan to use and suppress its later first-seen alert (or evict
+# legitimate history). detect_key_events is therefore called with
+# state_path=None below: the demo uses only in-log sibling history.
+# Persistent key history belongs to an authenticated/local path.
 
 
 # ---------------------------------------------------------------- persistence
@@ -438,8 +441,7 @@ def index():
             # new passes must never lose the brute-force result.
             try:
                 findings += detect_cadence(tmp_path)
-                key_result = detect_key_events(
-                    tmp_path, state_path=KEY_STATE_PATH)
+                key_result = detect_key_events(tmp_path)
                 findings += key_result["findings"]
                 coverage = key_result["coverage"]
             except Exception:
