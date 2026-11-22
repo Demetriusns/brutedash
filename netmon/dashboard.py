@@ -1214,7 +1214,9 @@ async function loadDevices(){
     (d.devices.length ?
     `<table><tr><th>Device</th><th>Status</th><th>Last address</th><th>Traffic (15 min)</th><th>Normal for this device</th><th>First seen</th><th>Last seen</th><th></th></tr>` +
     d.devices.map(v=>{
-      const status = v.on_probation
+      const status = v.quarantined
+        ? `<span class="badge bad">⛔ Cut off from the internet — click Release to bring it back</span>`
+        : v.on_probation
         ? `<span class="badge warn">🟡 Probation · trusted in ${v.probation_left_h}h</span>`
         : `<span class="badge ok">✅ Trusted</span>`;
       const dohbadge = v.doh
