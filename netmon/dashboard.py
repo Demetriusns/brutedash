@@ -1588,8 +1588,13 @@ async function loadRetention(){
       "</table>";
     html += `<p class="note">${esc(d.policy_note || "")}</p>`;
     if (d.last_run) {
+      const tableLabels = {flows:"Flow records", dns_queries:"DNS lookups",
+        arp_observations:"Network sightings", device_hostnames:"Device name sightings",
+        host_events:"Windows host events",
+        alerts:"Alerts", summaries:"Summaries", outages:"Internet uptime log",
+        score_snapshots:"Score snapshots"};
       const parts = Object.entries(d.last_counts || {}).filter(([,n])=>n)
-        .map(([t,n])=>`${esc(t)}: ${esc(String(n))}`).join(", ");
+        .map(([t,n])=>`${esc(tableLabels[t] || t)}: ${esc(String(n))}`).join(", ");
       html += `<p class="note">Last prune: ${esc(d.last_run)} -- deleted ${parts || "nothing (nothing had expired)"}.</p>`;
     } else {
       html += `<p class="note">No prune has run yet.</p>`;

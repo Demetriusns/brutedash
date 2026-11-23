@@ -875,15 +875,16 @@ def _detect_key_events_inner(log_path, state_path=None):
         if counts["fingerprinted"]:
             status = "verbose"
             note = (f"SSH key fingerprints are visible in {name}'s log"
-                    f" (LogLevel VERBOSE) -- the first-seen key rule"
-                    f" can see new keys here.")
+                    f" -- the first-seen key rule can see new keys"
+                    f" here.")
         elif counts["plain"]:
             status = "dark"
-            note = (f"{name} accepts SSH keys but its log lines carry"
-                    f" no key fingerprints -- sshd is not logging at"
-                    f" VERBOSE, so the first-seen key rule CANNOT see"
-                    f" new keys on this host. Set 'LogLevel VERBOSE'"
-                    f" in sshd_config to light it up.")
+            note = (f"{name} accepts SSH keys, but its log lines do"
+                    f" not include the key fingerprints, so the"
+                    f" first-seen key rule CANNOT see new keys on this"
+                    f" host. Whoever looks after this machine can turn"
+                    f" on detailed SSH key logging if they want new"
+                    f" keys watched here.")
         else:
             status = "no-key-auth"
             note = (f"No SSH key sign-ins appear in {name}'s log --"

@@ -350,9 +350,9 @@ INDEX_HTML = """<html><head><title>brutedash</title><style>""" + STYLE + """</st
 RESULTS_HTML = """<html><head><title>brutedash results</title><style>""" + STYLE + """</style></head><body>
 <h1>Scan results <small style="color:#8b949e">{{ scanned_at }}</small></h1>
 {% if findings %}
-<table><tr><th>IP</th><th>Failed attempts</th><th>Severity</th><th></th><th></th></tr>
+<table><tr><th>IP</th><th>Count</th><th>Severity</th><th></th><th></th></tr>
 {% for f in findings %}
-<tr><td>{{ f.ip }}{% if f.detail %}<br><small style="color:#8b949e">{{ f.detail }}</small>{% endif %}</td><td>{{ f.count }}</td>
+<tr><td>{{ f.ip }}{% if f.detail %}<br><small style="color:#8b949e">{{ f.detail }}</small>{% endif %}</td><td>{{ f.count }}{% if f.count_label %}<br><small style="color:#8b949e">{{ f.count_label }}</small>{% endif %}</td>
 <td class="{{ f.severity|lower }}">{{ f.severity }}</td>
 <td>{% if f.repeat %}<span class="tag">repeat attacker</span>{% endif %}</td>
 <td><form method="post" action="/brief" style="margin:0">
@@ -363,7 +363,10 @@ RESULTS_HTML = """<html><head><title>brutedash results</title><style>""" + STYLE
 {% endfor %}</table>
 {% else %}<p>No brute-force activity detected.</p>{% endif %}
 {% if coverage %}
-<h2>SSH key visibility</h2>
+<h2>Can brutedash spot new SSH keys?</h2>
+<p>SSH keys are one way to sign in without typing anything each time. This says,
+for each computer in the log, whether brutedash can spot a key it has
+never seen before.</p>
 <ul>{% for c in coverage %}<li><strong>{{ c.host }}</strong> -- {{ c.note }}</li>{% endfor %}</ul>
 {% endif %}
 <p><a href="/">New scan</a> | <a href="/history">History</a></p>
@@ -372,7 +375,7 @@ RESULTS_HTML = """<html><head><title>brutedash results</title><style>""" + STYLE
 HISTORY_HTML = """<html><head><title>brutedash history</title><style>""" + STYLE + """</style></head><body>
 <h1>Scan history</h1>
 {% if rows %}
-<table><tr><th>Scanned at</th><th>IP</th><th>Failed attempts</th><th>Severity</th></tr>
+<table><tr><th>Scanned at</th><th>IP</th><th>Count</th><th>Severity</th></tr>
 {% for ip, count, severity, scanned_at in rows %}
 <tr><td>{{ scanned_at }}</td><td>{{ ip }}</td><td>{{ count }}</td>
 <td class="{{ severity|lower }}">{{ severity }}</td></tr>
@@ -391,6 +394,26 @@ Recommended actions:
 {% endfor %}</pre>
 <p><a href="/">New scan</a> | <a href="/history">History</a></p>
 </body></html>"""
+
+
+# UX U12 (council review, 2026-11-22): a finding's "count" does not
+# always mean failed logins -- enumeration counts distinct usernames,
+# a first-seen key counts 1 sighting. The results table heads the
+# column "Count" and labels what was counted, in plain words, per kind.
+COUNT_LABELS = {
+    "brute_force": "failed logins",
+    "login_after_bruteforce": "failed logins",
+    "login_after_burst": "failed logins in the burst",
+    "burst_cadence": "failed logins in the burst",
+    "username_enumeration": "different usernames tried",
+    "duplicate_attempts": "identical failed logins",
+    "first_seen_key": "new key seen",
+}
+
+
+def count_label(kind):
+    """Plain-words label for what a finding's count counts."""
+    return COUNT_LABELS.get(kind, "events counted")
 
 
 # Robustness L7 (council review, 2026-11-01): the sample read is capped
@@ -468,6 +491,7 @@ def index():
         seen = known_ips()  # repeat-offender check BEFORE saving this run
         for f in findings:
             f["repeat"] = f["ip"] in seen
+            f["count_label"] = count_label(f.get("kind"))
         scanned_at = save_detections(findings)
         return render_template_string(RESULTS_HTML, findings=findings,
                                       scanned_at=scanned_at,
