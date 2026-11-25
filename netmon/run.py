@@ -226,16 +226,42 @@ def _monitor_loop(stop_event, digest_hours=24, loop_state=None):
             pipelinem.safe_step("digest", _digest)
 
 
+def _is_loopback(host):
+    """True if `host` names a loopback interface only this machine can
+    reach. Split out for unit testing."""
+    return (host or "").strip() in ("127.0.0.1", "localhost", "::1")
+
+
 def _bind_allowed(host):
     """True if binding `host` is safe. Loopback is always fine; anything
     else requires a dashboard password (H1: fail closed, don't warn-and-bind).
 
     Split out for unit testing.
     """
-    if (host or "").strip() in ("127.0.0.1", "localhost", "::1"):
+    if _is_loopback(host):
         return True
     owner_pw, viewer_pw = cfgm.auth_passwords()
     return bool(owner_pw or viewer_pw)
+
+
+def _cleartext_warning(host):
+    """S2 minimum: the loud warning owed when the dashboard is bound
+    beyond loopback. The dashboard is served over plain HTTP -- there is
+    no encryption -- so with a password set (H1 lets the bind through)
+    the password and the sign-in session still cross the network
+    readable by anyone who can watch that traffic. Returns None for
+    loopback binds, where traffic never leaves the machine.
+
+    Split out for unit testing.
+    """
+    if _is_loopback(host):
+        return None
+    return (f"WARNING: the dashboard is reachable from other devices "
+            f"({host}) but is served WITHOUT encryption. Your dashboard "
+            f"password and sign-in session travel over the network in "
+            f"plain text, readable by anyone who can watch that "
+            f"traffic. Only use this on a home network you trust, or "
+            f"reach the dashboard through a private tunnel instead.")
 
 
 def main():
@@ -288,6 +314,11 @@ def main():
               file=sys.stderr)
         sys.exit(2)
 
+    # S2 minimum: a password makes a LAN bind allowed, not encrypted.
+    # Say so loudly at startup, and flag it so the sign-in page can say
+    # it again where the password is actually typed.
+    cleartext_warning = _cleartext_warning(args.host)
+
     # Digest cadence: env wins, then config file. Never crash on a bad
     # value (empty YAML key, typo): fall back to 24h.
     digest_env = cfgm.env_compat("BRUTEDASH_ALERTS_DIGEST_HOURS",
@@ -319,6 +350,10 @@ def main():
 
     from . import dashboard as dash  # lazy: weekly-report exits above
     from . import health as healthm
+
+    if cleartext_warning:
+        print(cleartext_warning, file=sys.stderr)
+        dash.app.config["NETMON_CLEARTEXT_LAN"] = True
 
     # The nurse's toolkit: persistent logs, crash bundles, heartbeat.
     # None of this changes behavior when unconfigured.

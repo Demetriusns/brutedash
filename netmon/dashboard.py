@@ -407,6 +407,10 @@ LOGIN_HTML = """<html><head><title>netmon -- sign in</title>
 <h1>netmon sign in</h1>
 <p class="note">This dashboard is password-protected. Enter the dashboard
 password to continue.</p>
+{% if cleartext_warning %}<p class="high">&#9888; This sign-in page is
+NOT encrypted. Anyone on the same network who can watch its traffic
+could read your password as it is sent. Sign in only on a network you
+trust.</p>{% endif %}
 {% if viewer_note %}<p class="note">Viewer sign-in isn't set up on this box --
 use the owner password. (The owner can add a read-only viewer password under
 <code>auth.viewer_password</code> in config.yaml.)</p>{% endif %}
@@ -426,19 +430,30 @@ _OWNER_ONLY_HTML = """<html><head><title>netmon -- owner only</title>
 </body></html>"""
 
 
+def _cleartext_lan():
+    """S2 minimum: True when run.py bound the dashboard beyond loopback.
+    The dashboard is plain HTTP, so on a LAN bind the sign-in page owes
+    the person typing a password a plain warning that it is not
+    encrypted. run.py sets the flag; loopback/default runs never see
+    the banner."""
+    return bool(app.config.get("NETMON_CLEARTEXT_LAN"))
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     owner_pw, viewer_pw = _auth()
     if request.method == "GET":
         return render_template_string(
             LOGIN_HTML, error=None,
-            viewer_note=not viewer_pw)
+            viewer_note=not viewer_pw,
+            cleartext_warning=_cleartext_lan())
     ip = request.remote_addr or "unknown"
     # H2: no unlimited guessing. 5 failures/minute per IP -> 5-min block.
     if not _login_allowed(ip):
         return render_template_string(
             LOGIN_HTML, error="Too many attempts. Try again later.",
-            viewer_note=not viewer_pw), 429
+            viewer_note=not viewer_pw,
+            cleartext_warning=_cleartext_lan()), 429
     password = request.form.get("password", "")
     role = None
     if owner_pw and hmac.compare_digest(password, owner_pw):
@@ -455,7 +470,8 @@ def login():
     _record_login_failure(ip)
     return render_template_string(
         LOGIN_HTML, error="Wrong password, try again.",
-        viewer_note=not viewer_pw)
+        viewer_note=not viewer_pw,
+            cleartext_warning=_cleartext_lan())
 
 
 # --- login rate limiting (H2, stdlib only) ---------------------------------
