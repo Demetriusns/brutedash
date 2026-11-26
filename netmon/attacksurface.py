@@ -203,10 +203,10 @@ PLAYBOOK_SLUGS = {
     },
     "llm-egress": {
         "title": "A device started talking to AI services under login attack",
-        "blurb": ("A device with no history of using AI services reached"
-                  " out to one while someone hammered its logins -- the"
-                  " shape of the newest break-in tools. How to tell a"
-                  " new app from a foothold."),
+        "blurb": ("A device with almost no history of using AI services"
+                  " reached out to one while someone hammered its"
+                  " logins -- the shape of the newest break-in tools."
+                  " How to tell a new app from a foothold."),
     },
     "brute-force": {
         "title": "Someone is hammering logins",

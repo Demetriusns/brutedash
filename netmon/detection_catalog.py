@@ -281,13 +281,13 @@ RULES = [
                         " -- the shape of the newest break-in tools,"
                         " which get in and then let an AI do the"
                         " attacking (FBI FLASH-20261113-001)."),
-        "trigger": ("A device whose first recorded contact with a known"
-                    " AI endpoint (static provider list, matched on DNS"
-                    " lookups) is less than 7 days old contacts one in"
-                    " the last 24 hours, AND in the same 24 hours either"
-                    " 10+ inbound connections hit its login services"
-                    " (ports 22, 3389, 445) or a failed-logon burst was"
-                    " logged on this computer."),
+        "trigger": ("A device that has used AI services on fewer than"
+                    " 3 days in the last 7 days contacts a known AI"
+                    " endpoint (static provider list, matched on DNS"
+                    " lookups) in the last 24 hours, AND in the same"
+                    " 24 hours either 10+ inbound connections hit its"
+                    " login services (ports 22, 3389, 445) or a"
+                    " failed-logon burst was logged on this computer."),
         "severities": ["High"],
         "mitre_id": "T1071.001",
         "mitre_name": "Application Layer Protocol: Web Protocols",
@@ -296,10 +296,11 @@ RULES = [
                        " using an AI tool at the same time as unrelated"
                        " login noise -- their own mistyped passwords, a"
                        " scanner sweeping the street. The rule needs"
-                       " both halves together, and any device with a"
-                       " week or more of open AI use is treated as an"
-                       " established AI user and never fires, which"
-                       " keeps the owner's own AI tools quiet."),
+                       " both halves together, and any device that used"
+                       " AI services on 3 or more days in the last week"
+                       " is treated as an established AI user and never"
+                       " fires, which keeps the owner's own AI tools"
+                       " quiet."),
         "recognize_fp": ("Ask the device's user: did you just start a"
                          " chatbot, coding assistant, or other AI app?"
                          " If yes, and the login pressure has an"

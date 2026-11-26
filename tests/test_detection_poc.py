@@ -495,6 +495,11 @@ class LlmEgressPocTests(_ScratchDb):
     def _dns(self, now, name="api.deepseek.com", ip=None):
         return [(now - 300, ip or self.SRC, name, 1)]
 
+    def _dns_days(self, now, day_offsets, name="api.deepseek.com"):
+        # one AI lookup per listed day offset (0 = today)
+        return [(now - d * 86400 - 300, self.SRC, name, 1)
+                for d in day_offsets]
+
     def _auth_flows(self, now, n=12, dst=None):
         # inbound connections to the device's SSH port from outside
         return [(now - 600 - i * 30, self.ATTACKER, dst or self.SRC,
@@ -521,14 +526,50 @@ class LlmEgressPocTests(_ScratchDb):
 
     def test_baselined_device_stays_quiet(self):
         # Task edge case: baselined/sanctioned AI egress must NOT
-        # fire, even with login pressure at the same time.
+        # fire, even with login pressure at the same time. Sustained
+        # use is what baselines a device now (robustness M3): AI
+        # lookups on 3 distinct days in the last week.
         now = time.time()
-        dbm.note_first_seen("llm_egress", self.SRC, now - 8 * 86400)
-        dbm.insert_dns_queries(self._dns(now))
+        dbm.insert_dns_queries(self._dns_days(now, (6, 3, 0)))
         dbm.insert_flows(self._auth_flows(now))
         with dbm.notifications_paused():
             self.assertEqual(detm.check_llm_egress(now=now), [])
         self.assertEqual(self._alerts(), [])
+
+    def test_single_old_sighting_fires(self):
+        # Robustness M3 regression: one AI lookup 8 days ago used to
+        # exempt the device forever (the first_seen age test). A lone
+        # sighting, however old, must not build the baseline.
+        now = time.time()
+        dbm.note_first_seen("llm_egress", self.SRC, now - 8 * 86400)
+        dbm.insert_dns_queries(
+            [(now - 8 * 86400, self.SRC, "api.deepseek.com", 1)])
+        dbm.insert_dns_queries(self._dns(now))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            fired = detm.check_llm_egress(now=now)
+        self.assertEqual(fired, [("llm_egress", self.SRC)])
+        self.assertIn(("llm_egress", "High"), self._alerts())
+
+    def test_two_days_in_window_fires(self):
+        # Two distinct days of AI use in the last week is not
+        # established yet (needs 3).
+        now = time.time()
+        dbm.insert_dns_queries(self._dns_days(now, (2, 0)))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            fired = detm.check_llm_egress(now=now)
+        self.assertEqual(fired, [("llm_egress", self.SRC)])
+
+    def test_stale_baseline_expires_fires(self):
+        # Three days of AI use, all more than a week ago, plus a fresh
+        # lookup today: the exemption lapses when use stops for a week.
+        now = time.time()
+        dbm.insert_dns_queries(self._dns_days(now, (10, 9, 8, 0)))
+        dbm.insert_flows(self._auth_flows(now))
+        with dbm.notifications_paused():
+            fired = detm.check_llm_egress(now=now)
+        self.assertEqual(fired, [("llm_egress", self.SRC)])
 
     def test_login_attack_without_ai_stays_quiet(self):
         now = time.time()

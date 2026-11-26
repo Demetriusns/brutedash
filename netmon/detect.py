@@ -733,7 +733,10 @@ LLM_ENDPOINT_SUFFIXES = (
     "openai.azure.com",
 )
 LLM_WINDOW = 24 * 3600          # egress + correlation look-back
-LLM_BASELINE_S = 7 * 24 * 3600  # a week of open AI use = established
+LLM_BASELINE_S = 7 * 24 * 3600  # baseline window: a week of AI use
+LLM_BASELINE_DAYS = 3           # distinct days of AI use in the window
+                                # = established (robustness M3: one sighting
+                                # aged 7 days used to exempt forever)
 LLM_AUTH_PORTS = (22, 3389, 445)  # SSH / RDP / SMB login services
 LLM_AUTH_FLOW_MIN = 10          # inbound login-service flows = pressure
 LLM_COOLDOWN = 24 * 3600
@@ -756,22 +759,31 @@ def check_llm_egress(now=None):
 
     Both halves are required -- the correlation is the false-positive
     control. AI egress alone is how legitimate tools look; login
-    pressure alone is the brute-force rules' job. A device whose first
-    AI contact is at least LLM_BASELINE_S old is an established AI user
-    and never fires, which is what keeps the owner's own AI tooling
-    (this dashboard's briefs included) quiet.
+    pressure alone is the brute-force rules' job. A device counts as an
+    established AI user only when it contacted AI endpoints on at least
+    LLM_BASELINE_DAYS distinct days in the last week: one sighting,
+    however old, never establishes the baseline (robustness M3 -- the
+    old first_seen age test exempted a device forever on a single
+    lookup 7 days ago), and the exemption lapses when AI use stops for
+    a week. Three distinct UTC days necessarily span more than 24
+    hours, so one burst, one accidental lookup, or one prefetch can
+    never build the baseline. That is what keeps the owner's own AI
+    tooling (this dashboard's briefs included) quiet.
     """
     now = now or time.time()
     rows = dbm.query(
-        "SELECT src_ip, name FROM dns_queries WHERE ts > ?",
-        (now - LLM_WINDOW,))
+        "SELECT ts, src_ip, name FROM dns_queries WHERE ts > ?",
+        (now - LLM_BASELINE_S,))
     by_ip = {}
-    for src_ip, name in rows:
+    ai_days = {}
+    for ts, src_ip, name in rows:
         if not src_ip or not name:
             continue
         ep = _llm_endpoint(name)
         if ep:
-            by_ip.setdefault(src_ip, set()).add(ep)
+            if ts > now - LLM_WINDOW:
+                by_ip.setdefault(src_ip, set()).add(ep)
+            ai_days.setdefault(src_ip, set()).add(int(ts // 86400))
     if not by_ip:
         return []
     local_ips = _local_ips(now)
@@ -780,9 +792,10 @@ def check_llm_egress(now=None):
         first = dbm.get_first_seen("llm_egress", ip)
         if first is None:
             dbm.note_first_seen("llm_egress", ip, now)
-            first = now
-        if now - first >= LLM_BASELINE_S:
-            continue  # established AI user -- sanctioned by history
+        if len(ai_days.get(ip, ())) >= LLM_BASELINE_DAYS:
+            continue  # established AI user -- sustained use, sanctioned
+                      # by history; a lapsed user re-enters via the
+                      # window (0 days once use stops for a week)
         # Correlation (a): inbound login-service pressure in flows.
         placeholders = ",".join("?" for _ in LLM_AUTH_PORTS)
         auth_flows = dbm.query(
@@ -813,8 +826,9 @@ def check_llm_egress(now=None):
             "llm_egress", "High",
             f"Talking to AI services while under login attack ({dev})",
             (f"{dev_s} looked up AI service addresses ({endpoints})"
-             f" in the last 24 hours, and this device has no history"
-             f" of using AI services before this week. At the same"
+             f" in the last 24 hours, and this device has used AI"
+             f" services on fewer than {LLM_BASELINE_DAYS} days in the"
+             f" last week. At the same"
              f" time it took {corr_text}."),
             meaning=("The newest break-in tools let an AI do the"
                      " attacking: a person gets into a device, then"
@@ -823,12 +837,13 @@ def check_llm_egress(now=None):
                      " device that never used AI before suddenly"
                      " reaching for it, at the same moment someone is"
                      " battering its login door, is that pattern."),
-            is_normal=("Fine if someone on that device just started"
-                       " using an AI tool on purpose -- a new chatbot"
-                       " app or coding assistant. It is only suspicious"
-                       " here because the login attacks landed at the"
-                       " same time. Devices with a week or more of AI"
-                       " use on record never trigger this."),
+            is_normal=(f"Fine if someone on that device just started"
+                       f" using an AI tool on purpose -- a new chatbot"
+                       f" app or coding assistant. It is only suspicious"
+                       f" here because the login attacks landed at the"
+                       f" same time. Devices that use AI services on"
+                       f" {LLM_BASELINE_DAYS} or more days in the last"
+                       f" week never trigger this."),
             what_to_do=("Ask whoever uses that device whether they"
                         " just started an AI tool. If nobody did, treat"
                         " the device as broken into: disconnect it from"
