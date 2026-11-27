@@ -284,19 +284,20 @@ RULES = [
         "trigger": ("A device that has used AI services on fewer than"
                     " 3 days in the last 7 days contacts a known AI"
                     " endpoint (static provider list, matched on DNS"
-                    " lookups) in the last 24 hours, AND in the same"
-                    " 24 hours either 10+ inbound connections hit its"
-                    " login services (ports 22, 3389, 445) or a"
+                    " lookups) in the last 24 hours, AND within 6 hours"
+                    " of that lookup either 10+ inbound connections hit"
+                    " its login services (ports 22, 3389, 445) or a"
                     " failed-logon burst was logged on this computer."),
         "severities": ["High"],
         "mitre_id": "T1071.001",
         "mitre_name": "Application Layer Protocol: Web Protocols",
         "mitre_tactic": "Command and Control",
         "fp_profile": ("Someone on the device genuinely just started"
-                       " using an AI tool at the same time as unrelated"
+                       " using an AI tool within hours of unrelated"
                        " login noise -- their own mistyped passwords, a"
                        " scanner sweeping the street. The rule needs"
-                       " both halves together, and any device that used"
+                       " both halves together within 6 hours of each"
+                       " other, and any device that used"
                        " AI services on 3 or more days in the last week"
                        " is treated as an established AI user and never"
                        " fires, which keeps the owner's own AI tools"

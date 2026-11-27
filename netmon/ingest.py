@@ -494,6 +494,19 @@ _NEW_EVENTS_PAGE = 5000
 # advances to the newest event actually processed (R2 semantics), so
 # the remainder is picked up next pass.
 _MAX_EVENTS_PER_PASS = 20000
+# Council review 2026-11-27 (robustness L2): the same-ts completion
+# below used to page without any bound -- a group of arbitrary size
+# sharing one timestamp escaped the ceiling entirely. One extra page
+# past the ceiling is the most a pass will complete; past that, the
+# trailing partial group is dropped so the watermark (ts-only, stamped
+# to the newest event actually processed) still only advances to a
+# fully-processed ts and the remainder is picked up next pass. The
+# single pathological exception is a group larger than the hard cap
+# on its own: dropping it would empty the pass and wedge the watermark
+# forever, so that chunk is processed as-is and the tail of that one
+# group is skipped instead -- the monitor keeps moving, and the skip
+# is confined to one pathological group.
+_MAX_EVENTS_HARD = _MAX_EVENTS_PER_PASS + _NEW_EVENTS_PAGE
 
 
 def _new_events(since_ts, source=None, event_ids=()):
@@ -530,6 +543,18 @@ def _new_events(since_ts, source=None, event_ids=()):
         if len(rows) < _NEW_EVENTS_PAGE:
             return out
         offset += len(rows)
+        if len(out) >= _MAX_EVENTS_HARD:
+            # Robustness L2 (2026-11-27): the same-ts completion must
+            # not escape the ceiling. Truncate to the last complete
+            # group so the watermark only advances to a fully-processed
+            # ts; the dropped group has a strictly greater ts, so the
+            # next pass picks it up. A single group larger than the
+            # hard cap would truncate to nothing -- process that chunk
+            # as-is instead (its tail is skipped, the monitor moves on).
+            cut = len(out)
+            while cut > 0 and out[cut - 1]["ts"] == out[-1]["ts"]:
+                cut -= 1
+            return out if cut == 0 else out[:cut]
         if len(out) >= _MAX_EVENTS_PER_PASS:
             nxt = dbm.host_events_since(
                 since_ts, limit=1, offset=offset, ascending=True,

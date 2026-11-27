@@ -739,6 +739,13 @@ LLM_BASELINE_DAYS = 3           # distinct days of AI use in the window
                                 # aged 7 days used to exempt forever)
 LLM_AUTH_PORTS = (22, 3389, 445)  # SSH / RDP / SMB login services
 LLM_AUTH_FLOW_MIN = 10          # inbound login-service flows = pressure
+LLM_CORR_S = 6 * 3600           # the AI contact and the attack evidence
+                                # must fall within this many seconds of
+                                # each other (robustness L4: the old 24h
+                                # windows were independent, so a lookup
+                                # at 00:05 and an attack at 23:55 still
+                                # correlated while the copy claimed they
+                                # happened "at the same time")
 LLM_COOLDOWN = 24 * 3600
 
 
@@ -768,7 +775,11 @@ def check_llm_egress(now=None):
     a week. Three distinct UTC days necessarily span more than 24
     hours, so one burst, one accidental lookup, or one prefetch can
     never build the baseline. That is what keeps the owner's own AI
-    tooling (this dashboard's briefs included) quiet.
+    tooling (this dashboard's briefs included) quiet. The two halves
+    must also overlap in time (robustness L4): the newest login-attack
+    evidence has to fall within LLM_CORR_S (6 hours) of the newest AI
+    lookup -- sharing a 24-hour window is not enough, and the alert
+    copy says so.
     """
     now = now or time.time()
     rows = dbm.query(
@@ -776,6 +787,7 @@ def check_llm_egress(now=None):
         (now - LLM_BASELINE_S,))
     by_ip = {}
     ai_days = {}
+    latest_ai = {}
     for ts, src_ip, name in rows:
         if not src_ip or not name:
             continue
@@ -783,6 +795,7 @@ def check_llm_egress(now=None):
         if ep:
             if ts > now - LLM_WINDOW:
                 by_ip.setdefault(src_ip, set()).add(ep)
+                latest_ai[src_ip] = max(latest_ai.get(src_ip, 0), ts)
             ai_days.setdefault(src_ip, set()).add(int(ts // 86400))
     if not by_ip:
         return []
@@ -797,24 +810,38 @@ def check_llm_egress(now=None):
                       # by history; a lapsed user re-enters via the
                       # window (0 days once use stops for a week)
         # Correlation (a): inbound login-service pressure in flows.
+        # Robustness L4: the halves must overlap in time, not merely
+        # share a 24h window -- the newest auth flow has to fall within
+        # LLM_CORR_S of the newest AI lookup.
         placeholders = ",".join("?" for _ in LLM_AUTH_PORTS)
-        auth_flows = dbm.query(
-            "SELECT COUNT(*) FROM flows WHERE dst_ip=?"
+        auth_flows, latest_flow = dbm.query(
+            "SELECT COUNT(*), MAX(ts) FROM flows WHERE dst_ip=?"
             " AND direction='inbound'"
             f" AND dst_port IN ({placeholders}) AND ts > ?",
-            (ip, *LLM_AUTH_PORTS, now - LLM_WINDOW))[0][0]
-        correlated = auth_flows >= LLM_AUTH_FLOW_MIN
+            (ip, *LLM_AUTH_PORTS, now - LLM_WINDOW))[0]
+        correlated = (auth_flows >= LLM_AUTH_FLOW_MIN
+                      and latest_flow is not None
+                      and abs(latest_ai[ip] - latest_flow) <= LLM_CORR_S)
         corr_text = (f"{auth_flows} inbound connections to its login"
                      f" services (ports 22, 3389, 445) in the last"
-                     f" 24 hours")
+                     f" 24 hours, the newest within 6 hours of the"
+                     f" AI lookup")
         # Correlation (b): this box itself took a failed-logon burst
         # (the monitor host is the highest-value target on the LAN).
-        if not correlated and ip in local_ips \
-                and dbm.recent_alert_kind("host_event", "4625",
-                                          LLM_WINDOW):
-            correlated = True
-            corr_text = ("a burst of failed logins on this computer"
-                         " in the last 24 hours")
+        # Same overlap rule, judged on the burst alert's timestamp
+        # (the old boolean check had no timestamp at all).
+        if not correlated and ip in local_ips:
+            burst_row = dbm.query(
+                "SELECT MAX(ts) FROM alerts WHERE kind='host_event'"
+                " AND detail LIKE '%4625%' AND ts > ?",
+                (now - LLM_WINDOW,))[0]
+            burst_ts = burst_row[0] if burst_row else None
+            if burst_ts is not None \
+                    and abs(latest_ai[ip] - burst_ts) <= LLM_CORR_S:
+                correlated = True
+                corr_text = ("a burst of failed logins on this computer"
+                             " in the last 24 hours, within 6 hours of"
+                             " the AI lookup")
         if not correlated:
             continue
         if dbm.recent_alert_kind("llm_egress", ip, LLM_COOLDOWN):
@@ -828,20 +855,20 @@ def check_llm_egress(now=None):
             (f"{dev_s} looked up AI service addresses ({endpoints})"
              f" in the last 24 hours, and this device has used AI"
              f" services on fewer than {LLM_BASELINE_DAYS} days in the"
-             f" last week. At the same"
-             f" time it took {corr_text}."),
+             f" last week. Within 6 hours of that lookup"
+             f" it took {corr_text}."),
             meaning=("The newest break-in tools let an AI do the"
                      " attacking: a person gets into a device, then"
                      " the AI takes over -- and the AI has to talk to"
                      " an AI service out on the internet to work. A"
                      " device that never used AI before suddenly"
-                     " reaching for it, at the same moment someone is"
+                     " reaching for it, within hours of someone"
                      " battering its login door, is that pattern."),
             is_normal=(f"Fine if someone on that device just started"
                        f" using an AI tool on purpose -- a new chatbot"
                        f" app or coding assistant. It is only suspicious"
-                       f" here because the login attacks landed at the"
-                       f" same time. Devices that use AI services on"
+                       f" here because the login attacks landed within"
+                       f" hours of the AI use. Devices that use AI services on"
                        f" {LLM_BASELINE_DAYS} or more days in the last"
                        f" week never trigger this."),
             what_to_do=("Ask whoever uses that device whether they"

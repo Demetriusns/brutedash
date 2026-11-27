@@ -126,7 +126,7 @@ def _iter_capped_lines(stream):
         yield bytes(buf).decode("utf-8", "replace"), raw_len
 
 
-def detect_brute_force(log_path, threshold=3):
+def detect_brute_force(log_path, threshold=3, events=None):
     """Flag IPs with repeated failed SSH logins -- and logins that succeeded
     after a brute-force run.
 
@@ -135,6 +135,14 @@ def detect_brute_force(log_path, threshold=3):
     not several sub-threshold fragments. The primary is always scanned
     first -- the byte cap applies to rotated siblings only, so the
     freshest log is never skipped.
+
+    Council review 2026-11-27 (robustness L5): `events` accepts a
+    pre-collected event list (from _collect_events) so callers that run
+    several passes over the same log read it once. The counts are
+    derived from the same event list the other passes use (kind/ip
+    only -- this pass never uses timestamps), and the result is
+    identical to the standalone read. Default None keeps the current
+    behaviour for all existing callers.
 
     Returns a list of dicts, worst first:
         [{"ip": ..., "count": ..., "severity": ..., "kind": ...}, ...]
@@ -146,6 +154,14 @@ def detect_brute_force(log_path, threshold=3):
     """
     counts = {}
     accepted = {}
+
+    if events is not None:
+        for ev in events:
+            if ev["kind"] == "fail":
+                counts[ev["ip"]] = counts.get(ev["ip"], 0) + 1
+            elif ev["kind"] in ("accept", "key"):
+                accepted[ev["ip"]] = accepted.get(ev["ip"], 0) + 1
+        return _brute_force_results(counts, accepted, threshold)
 
     def _count_line(line):
         # Guard -- skip lines with no IP (the bug-bait line from session #1).
@@ -224,6 +240,13 @@ def detect_brute_force(log_path, threshold=3):
                 raise
             # best-effort for siblings: keep whatever was counted so far
 
+    return _brute_force_results(counts, accepted, threshold)
+
+
+def _brute_force_results(counts, accepted, threshold):
+    """Findings from per-IP fail/accept counts (shared by the standalone
+    read and the shared-events path -- one place decides severity and
+    ordering so the two paths can never drift apart)."""
     results = []
     for ip, count in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
         if count >= threshold:
@@ -392,6 +415,90 @@ def _ip_after_from(line):
     return tail[0]
 
 
+# Days before each month in a non-leap year (ordinal math for L1; a
+# one-day leap error is irrelevant at the 180-day scale).
+_DAYS_BEFORE_MONTH = (0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273,
+                      304, 334)
+_ORDINAL_YEAR_S = 365 * 86400  # the ordinal space wraps every 365 days
+
+
+def _syslog_ordinal(parts):
+    """Seconds into the (leap-blind) year for a syslog (mon, day, hh,
+    mm, ss) tuple -- the raw month/day order, before any year is
+    placed on it."""
+    mon, day, hh, mm, ss = parts
+    doy = _DAYS_BEFORE_MONTH[mon] + day
+    return (doy - 1) * 86400 + hh * 3600 + mm * 60 + ss
+
+
+def _validate_syslog_timestamps(events):
+    """Range-validate syslog timestamps in one source's event list.
+
+    Council review 2026-11-22 (robustness L1): syslog timestamps carry
+    no year, so a corrupt or stray line ("Dec 31" in the middle of a
+    January stream) lands ~a year ahead of its neighbours and every
+    downstream pass trusts the wild ts. Two passes over the raw
+    month/day ordinals, before any year placement is trusted:
+
+    1. An event is an isolated forward spike when its ordinal jumps
+       more than _YEAR_WRAP_S ahead of its previous syslog neighbour
+       AND the next neighbour jumps back by more than _YEAR_WRAP_S
+       AND the forward distance from the previous neighbour to the
+       next is within _YEAR_WRAP_S (the stream returned to the same
+       range, allowing for the year wrap). That last clause is what
+       saves legitimate sparse logs: a real Dec 31 after a June line
+       is followed by a January line 218 days after June, not days
+       after it. A lone event, or one with a single neighbour, is
+       always kept -- never drop a possibly-legitimate line. Spikes
+       get ts None.
+    2. Years are re-placed over the survivors with the same
+       backward-jump rule the reader uses, so a spike can no longer
+       poison the year of the lines after it (the reader's streaming
+       wrap would have shifted them a year on the stray line alone).
+
+    Runs on final handler output, per source, before the cross-source
+    wrap. ISO events (explicit year, _parts None) are untouched.
+    """
+    sys_idx = [i for i, ev in enumerate(events)
+               if ev.get("_parts") is not None]
+    spike = set()
+    for pos, i in enumerate(sys_idx):
+        prev_o = (_syslog_ordinal(events[sys_idx[pos - 1]]["_parts"])
+                  if pos > 0 else None)
+        next_o = (_syslog_ordinal(events[sys_idx[pos + 1]]["_parts"])
+                  if pos + 1 < len(sys_idx) else None)
+        if prev_o is None or next_o is None:
+            continue
+        o = _syslog_ordinal(events[i]["_parts"])
+        # Forward distance prev -> next, allowing for the year wrap:
+        # the neighbours are "the same range" when the stream gets
+        # back to where it was within half a year (a real sparse
+        # crossing is 218 days Jun -> Jan, not 147 -- raw ordinals
+        # understate it by the wrap, so compare forward, not absolute).
+        if (o - prev_o > _YEAR_WRAP_S
+                and next_o - o < -_YEAR_WRAP_S
+                and (next_o - prev_o) % _ORDINAL_YEAR_S <= _YEAR_WRAP_S):
+            spike.add(i)
+    for i in spike:
+        events[i]["ts"] = None
+    wrap_years = 0
+    last = None
+    for i in sys_idx:
+        if i in spike:
+            continue
+        ev = events[i]
+        ts = calendar.timegm((2000 + wrap_years,) + ev["_parts"]
+                             + (0, 0, 0))
+        if last is not None and ts < last - _YEAR_WRAP_S:
+            wrap_years += 1
+            ts = calendar.timegm((2000 + wrap_years,) + ev["_parts"]
+                                 + (0, 0, 0))
+        last = ts
+        ev["ts"] = ts
+        ev["_year"] = 2000 + wrap_years
+
+
+
 def _collect_events(log_path):
     """One capped pass over log_path + rotated siblings, returning
     auth events in stream order:
@@ -414,6 +521,11 @@ def _collect_events(log_path):
     the primary's syslog events are shifted forward a year at a time
     while its first syslog event still lands more than 180 days
     before the last sibling syslog event (the cross-source wrap).
+    Robustness L1 (2026-11-27): before that, each source's syslog
+    timestamps are range-validated -- an isolated forward spike (a
+    stray "Dec 31" in a January stream) gets ts None, and years are
+    re-placed over the survivors so the spike cannot shift the lines
+    after it.
     """
     def _make_handler(events):
         state = {"wrap_years": 0, "last": None}
@@ -518,6 +630,12 @@ def _collect_events(log_path):
             break
         remaining -= _read(src, is_gz, False, sibling_events, remaining)
 
+    # Council review 2026-11-27 (robustness L1): drop isolated syslog
+    # forward spikes and re-place years over the survivors before the
+    # cross-source wrap reads prim_sys[0].
+    _validate_syslog_timestamps(primary_events)
+    _validate_syslog_timestamps(sibling_events)
+
     # Cross-source New-Year wrap: shift the primary's syslog events
     # forward until they no longer land far before the siblings' end.
     if sibling_events and primary_events:
@@ -573,15 +691,20 @@ def _burst_windows(times):
     return best, ends
 
 
-def detect_cadence(log_path):
+def detect_cadence(log_path, events=None):
     """Windowed cadence findings (B1) for log_path + rotated siblings.
 
     Returns finding dicts in the same shape as detect_brute_force
     ({"ip", "count", "severity", "kind", "detail"}), worst first.
     A burst with no success stays High -- top severity is reserved
     for the timed break-in (login_after_burst).
+
+    Council review 2026-11-27 (robustness L5): `events` accepts a
+    pre-collected event list so several passes over one log share a
+    single read. Default None reads the log as before.
     """
-    events = _collect_events(log_path)
+    if events is None:
+        events = _collect_events(log_path)
     fails = {}        # ip -> [ts]
     fail_users = {}   # ip -> [(ts, user)]
     accepts = {}      # ip -> [ts]
@@ -764,7 +887,7 @@ def _save_key_state(state_path, keys):
             pass
 
 
-def detect_key_events(log_path, state_path=None):
+def detect_key_events(log_path, state_path=None, events=None):
     """First-seen SSH key findings + per-host coverage (B2).
 
     Returns {"findings": [...], "coverage": [...]}. Findings use the
@@ -782,23 +905,29 @@ def detect_key_events(log_path, state_path=None):
     there is NO history at all (no siblings, no prior state) the pass
     is a baseline run in the amass/nuclei first-run pattern: it
     records what it sees, reports coverage, and fires nothing, rather
-    than calling every existing key "new".
+    than calling every existing key "new". `events` (robustness L5)
+    accepts a pre-collected event list so several passes over one log
+    share a single read; None reads the log as before.
     """
     # The lock is held for the whole state-dependent pass (M4):
     # load, the known-set, and the final merge/save must observe one
     # consistent state snapshot.
+    # Council review 2026-11-27 (robustness L5): `events` accepts a
+    # pre-collected event list so several passes over one log share a
+    # single read. Default None reads the log as before.
     _lock = _KEY_STATE_LOCK if state_path else None
     if _lock is not None:
         _lock.acquire()
     try:
-        return _detect_key_events_inner(log_path, state_path)
+        return _detect_key_events_inner(log_path, state_path, events)
     finally:
         if _lock is not None:
             _lock.release()
 
 
-def _detect_key_events_inner(log_path, state_path=None):
-    events = _collect_events(log_path)
+def _detect_key_events_inner(log_path, state_path=None, events=None):
+    if events is None:
+        events = _collect_events(log_path)
     key_events = [e for e in events if e["kind"] == "key"]
     accepts = [e for e in events if e["kind"] == "accept"]
 

@@ -20,7 +20,8 @@ from datetime import datetime, timedelta
 
 from flask import Flask, request, render_template_string
 
-from detector import detect_brute_force, detect_cadence, detect_key_events
+from detector import (_collect_events, detect_brute_force, detect_cadence,
+                      detect_key_events)
 from ipintel import lookup_ip, describe as describe_intel
 from netmon import config as cfgm
 
@@ -458,13 +459,24 @@ def index():
             tmp_path = tmp.name
         coverage = []
         try:
-            findings = detect_brute_force(tmp_path, threshold=3)
+            # Robustness L5 (council review, 2026-11-27): the three
+            # passes used to re-read this same uploaded log one after
+            # another. Collect the events once and share them; a
+            # collection failure falls back to the old behaviour (each
+            # pass reads the log itself) instead of losing the scan.
+            try:
+                shared_events = _collect_events(tmp_path)
+            except Exception:
+                shared_events = None
+            findings = detect_brute_force(tmp_path, threshold=3,
+                                          events=shared_events)
             # Cadence + first-seen-key passes (council review
             # 2026-11-17, ARTEX B1/B2): additive -- a failure in the
             # new passes must never lose the brute-force result.
             try:
-                findings += detect_cadence(tmp_path)
-                key_result = detect_key_events(tmp_path)
+                findings += detect_cadence(tmp_path, events=shared_events)
+                key_result = detect_key_events(tmp_path,
+                                               events=shared_events)
                 findings += key_result["findings"]
                 coverage = key_result["coverage"]
             except Exception:

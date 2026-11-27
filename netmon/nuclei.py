@@ -411,11 +411,40 @@ MAX_JSONL_BYTES = 256 * 1024 * 1024
 
 
 def _capped_lines(fh):
+    """Yield lines from a text stream, bounded.
+
+    Council review 2026-11-27 (robustness L3): the old `for line in
+    fh` materialised each whole line before the total-byte cap was
+    checked, so one newline-free scanner line defeated the 256MB cap
+    exactly the way detector.py's M4 did before its chunked reader.
+    Here `readline` is capped at MAX_JSONL_LINE + 1 characters, so no
+    single line is ever fully materialised; the remainder of an
+    over-long line is read and discarded up to its newline (its bytes
+    still count toward the total cap), and the line itself is dropped
+    -- _parse_jsonl_lines skips over-long and unparseable lines anyway.
+    A line of exactly MAX_JSONL_LINE characters plus its newline is
+    still yielded whole and parsed as before.
+    """
     seen = 0
-    for line in fh:
+    while True:
+        line = fh.readline(MAX_JSONL_LINE + 1)
+        if not line:
+            return
         seen += len(line)
         if seen > MAX_JSONL_BYTES:
             return
+        if len(line) > MAX_JSONL_LINE and not line.endswith("\n"):
+            # Over-long line: discard the rest up to its newline.
+            while True:
+                rest = fh.readline(MAX_JSONL_LINE + 1)
+                if not rest:
+                    return
+                seen += len(rest)
+                if seen > MAX_JSONL_BYTES:
+                    return
+                if rest.endswith("\n") or len(rest) <= MAX_JSONL_LINE:
+                    break
+            continue
         yield line
 
 
