@@ -5,7 +5,7 @@ Werkzeug==3.1.9
 scapy==2.8.0
 # optional — enables LLM-powered triage in app.py and AI summaries in netmon/
 # (rule-based fallbacks otherwise)
-openai==3.58.0
+openai==3.60.0
 
 PyYAML==6.0.4  # config.yaml parsing (netmon/config.py); 6.0.4 fixes exponential merge-key expansion, adds cp315 wheels
 
